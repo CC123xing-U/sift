@@ -3,15 +3,15 @@
 //  - 修饰符 `ext:doc;pdf`（扩展名过滤）与 `folder:`（仅目录）
 //  - 普通词匹配文件名子串（不区分大小写）或拼音首字母子串（如 zgr → 中国人）
 import { Entry } from '../data';
-import { MatchRange } from '../types';
+import { MatchRange, ParseError } from '../types';
 
 export interface ParsedQuery {
   exts: string[] | null;
   folderOnly: boolean;
   /** 普通 AND/OR 子句（不含修饰符）。 */
   clauses: string[][];
-  /** 与 Rust 侧同形：`span` 为字节区间 `[start, end)`。 */
-  error: { span: { start: number; end: number } } | null;
+  /** 与 Rust 侧 `ParseError` 同形：原因 + 字节区间 `[start, end)`。 */
+  error: ParseError | null;
 }
 
 export function parseQuery(q: string): ParsedQuery {
@@ -30,7 +30,11 @@ export function parseQuery(q: string): ParsedQuery {
       exts: null,
       folderOnly: false,
       clauses: [],
-      error: { span: { start: pos, end: pos + 1 } },
+      // 与 Rust 侧 ParseError 同形：原因 + 字节区间 [start, end)。
+      error: {
+        message: '语法错误，请检查查询',
+        span: { start: pos, end: pos + 1 },
+      },
     };
   }
 
