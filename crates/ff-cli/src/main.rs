@@ -1,16 +1,28 @@
 //! ff-cli —— 命令行调试工具（DESIGN §3：scan / search / bench / dump）。
 //!
-//! 本轮只实现 `scan`（Track A，M0 摸底 + `VolumeScanner::full_scan`）；
-//! `search` / `index` / `dump` 留待后续里程碑。参数解析手写
+//! 已实现：`scan`（Track A，M0 摸底 + `VolumeScanner::full_scan`）、
+//! `search`（Track F，M1：经 `InProcessEngine` 建索引并执行查询）。
+//! `bench` / `dump` 留待后续里程碑。参数解析手写
 //! （不引入 clap，见 docs/DECISIONS.md）。
 
 use std::process::ExitCode;
 
+use ff_engine::api::{SortKey, SortSpec};
+
 const USAGE: &str = r#"ff-cli —— Sift 命令行调试工具
 
 用法:
-  ff-cli scan <卷> [子串]   全量扫描一个 NTFS 卷（M0），再计时朴素子串搜索
-  ff-cli help              显示本帮助
+  ff-cli scan <卷> [子串]           全量扫描 NTFS 卷（M0），再计时朴素子串搜索
+  ff-cli search <卷> <查询> [选项]  经 InProcess 引擎建索引并搜索（M1）
+  ff-cli help                      显示本帮助
+
+search 选项:
+  --max <N>        最多输出 N 条（默认全部）
+  --sort <键>      排序键: score | name | path | size | modified（默认 score）
+  --asc            升序（默认降序）
+  --case           区分大小写（默认不区分）
+
+查询语法（M1 子集）: 空格分隔的词取 AND；"..." 为短语（可含空格）；均按名字子串匹配。
 
 卷的写法: C:  |  \\.\C:  |  \\?\Volume{...}
 默认子串: ntdll（搜索不区分大小写）
@@ -18,21 +30,24 @@ const USAGE: &str = r#"ff-cli —— Sift 命令行调试工具
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("scan") => match run_scan(&args[1..]) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("scan 失败: {e}");
-                ExitCode::FAILURE
-            }
-        },
+    // 两个子命令统一在这里收尾，避免各自重复错误出口。
+    let result = match args.first().map(String::as_str) {
+        Some("scan") => run_scan(&args[1..]),
+        Some("search") => run_search(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
-            ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         }
         Some(other) => {
             eprintln!("未知子命令: {other}\n");
             eprint!("{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("失败: {e}");
             ExitCode::FAILURE
         }
     }
@@ -172,6 +187,291 @@ fn print_memory(label: &str, bytes: Option<usize>) {
             bytes as f64 / 1_048_576.0
         ),
         None => println!("{label}: 获取失败"),
+    }
+}
+
+// —— Track F：search 子命令（经 InProcess 引擎；M1） ——————————————————
+
+/// `search` 子命令解析后的参数。
+///
+/// 解析逻辑不依赖平台（便于单测）；实际扫描执行见 [`run_search`]。
+#[derive(Debug)]
+struct SearchArgs {
+    /// 卷指定串（盘符 / GUID 路径）。
+    volume: String,
+    /// 查询串（多个位置参数以空格连接；空格在查询语法中即 AND）。
+    query: String,
+    /// 最多输出条数。
+    max_hits: Option<usize>,
+    /// 排序方式。
+    sort: SortSpec,
+    /// 是否区分大小写。
+    case_sensitive: bool,
+}
+
+/// 解析 `search` 参数：`ff-cli search <卷> <查询...> [--max N] [--sort K] [--asc] [--case]`。
+fn parse_search_args(args: &[String]) -> Result<SearchArgs, String> {
+    let mut positional: Vec<String> = Vec::new();
+    let mut max_hits = None;
+    let mut key = SortKey::Score;
+    let mut ascending = false;
+    let mut case_sensitive = false;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "--max" => {
+                let raw = args.get(i + 1).ok_or("--max 需要一个非负整数参数")?;
+                max_hits = Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| format!("--max 需要非负整数，收到 {raw:?}"))?,
+                );
+                i += 2;
+            }
+            "--sort" => {
+                let raw = args.get(i + 1).ok_or("--sort 需要一个排序键")?;
+                key = parse_sort_key(raw)?;
+                i += 2;
+            }
+            "--asc" => {
+                ascending = true;
+                i += 1;
+            }
+            "--case" => {
+                case_sensitive = true;
+                i += 1;
+            }
+            other if other.starts_with("--") => return Err(format!("未知选项 {other:?}")),
+            other => {
+                positional.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    let mut iter = positional.into_iter();
+    let volume = iter.next().ok_or("缺少 <卷> 参数")?;
+    let terms: Vec<String> = iter.collect();
+    if terms.is_empty() {
+        return Err("缺少 <查询> 参数".to_string());
+    }
+    Ok(SearchArgs {
+        volume,
+        query: terms.join(" "),
+        max_hits,
+        sort: SortSpec {
+            key,
+            descending: !ascending,
+        },
+        case_sensitive,
+    })
+}
+
+/// 排序键字面量 → [`SortKey`]。
+fn parse_sort_key(raw: &str) -> Result<SortKey, String> {
+    match raw.to_ascii_lowercase().as_str() {
+        "score" => Ok(SortKey::Score),
+        "name" => Ok(SortKey::Name),
+        "path" => Ok(SortKey::Path),
+        "size" => Ok(SortKey::Size),
+        "modified" | "mtime" => Ok(SortKey::Modified),
+        other => Err(format!(
+            "未知排序键 {other:?}；可用: score | name | path | size | modified"
+        )),
+    }
+}
+
+/// `search` 子命令入口：仅在 Windows 上可用（依赖 NTFS 卷读取）。
+fn run_search(args: &[String]) -> Result<(), String> {
+    let parsed = parse_search_args(args)?;
+    #[cfg(windows)]
+    {
+        run_search_windows(&parsed)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = parsed;
+        Err("search 需要 Windows（依赖 NTFS 卷读取）".to_string())
+    }
+}
+
+#[cfg(windows)]
+fn run_search_windows(args: &SearchArgs) -> Result<(), String> {
+    use std::time::Instant;
+
+    use ff_engine::api::{EngineClient, SearchOptions, SearchRequest};
+    use ff_engine::inprocess::InProcessEngine;
+    use ff_ntfs::{enumerate_volumes, NtfsVolumeScanner, VolumeId};
+
+    let volumes: Vec<ff_ntfs::VolumeInfo> = enumerate_volumes()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|v| v.fs_name.eq_ignore_ascii_case("NTFS"))
+        .collect();
+    if volumes.is_empty() {
+        return Err("未枚举到可用的 NTFS 卷".to_string());
+    }
+    let info = find_volume(&volumes, &args.volume)
+        .ok_or_else(|| format!("未找到卷 {}；请使用上面列出的盘符或 GUID 路径", args.volume))?;
+    let id = VolumeId {
+        serial: info.serial,
+        drive: info.drive,
+    };
+
+    // 建索引：`rescan(Some(卷))` 经扫描器全量扫 MFT 并流式建成 SoA 索引。
+    println!("正在扫描并建立索引: {id}");
+    let build_start = Instant::now();
+    let engine = InProcessEngine::new(Box::new(NtfsVolumeScanner));
+    engine.rescan(Some(id.clone())).map_err(|e| e.to_string())?;
+    let status = engine.status();
+    println!(
+        "索引就绪: {} 卷 / {} 条 / 建索引 {:.3} s",
+        status.volumes.len(),
+        status.total_entries,
+        build_start.elapsed().as_secs_f64()
+    );
+
+    let summary = engine
+        .search(SearchRequest {
+            query: args.query.clone(),
+            sort: args.sort,
+            max_hits: args.max_hits,
+            opts: SearchOptions {
+                case_sensitive: args.case_sensitive,
+                ..Default::default()
+            },
+        })
+        .map_err(|e| e.to_string())?;
+    // 语法错误经 SearchSummary 带回，不是 Err；CLI 上仍算失败退出。
+    if let Some(e) = summary.parse_error {
+        return Err(format!("查询语法错误: {e}"));
+    }
+    println!(
+        "查询 {:?}: 命中 {} 条 / 搜索耗时 {} ms",
+        args.query, summary.total, summary.elapsed_ms
+    );
+    if summary.total == 0 {
+        return Ok(());
+    }
+
+    let limit = args.max_hits.unwrap_or(summary.total).min(summary.total);
+    let rows = engine
+        .range(summary.id, 0, limit)
+        .map_err(|e| e.to_string())?;
+    for (n, row) in rows.iter().enumerate() {
+        println!(
+            "{:>6}  [{}]  {:>10}  {}\t{}",
+            n,
+            if row.is_dir { "D" } else { "F" },
+            row.size.map_or_else(|| "-".to_string(), human_size),
+            row.dir,
+            row.name
+        );
+    }
+    Ok(())
+}
+
+/// 字节数 → 人类可读字符串（1024 进制）。
+#[cfg(windows)]
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+// —— Track F 单测：参数解析不依赖平台，可在本 crate 的 CI（含非 Windows）上跑 ———
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn defaults_to_score_descending_case_insensitive() {
+        let parsed = parse_search_args(&argv(&["C:", "readme"])).unwrap();
+        assert_eq!(parsed.volume, "C:");
+        assert_eq!(parsed.query, "readme");
+        assert_eq!(parsed.max_hits, None);
+        assert_eq!(parsed.sort.key, SortKey::Score);
+        assert!(parsed.sort.descending);
+        assert!(!parsed.case_sensitive);
+    }
+
+    #[test]
+    fn multiword_query_joined_by_space_is_and() {
+        // 查询语法里空格即 AND：多个位置参数应拼成单个查询串
+        let parsed = parse_search_args(&argv(&["C:", "my", "docs"])).unwrap();
+        assert_eq!(parsed.query, "my docs");
+    }
+
+    #[test]
+    fn max_and_sort_options() {
+        let parsed =
+            parse_search_args(&argv(&["C:", "x", "--max", "25", "--sort", "SIZE"])).unwrap();
+        assert_eq!(parsed.max_hits, Some(25));
+        assert_eq!(parsed.sort.key, SortKey::Size);
+        assert!(parsed.sort.descending); // 未给 --asc
+    }
+
+    #[test]
+    fn all_sort_keys_accepted() {
+        for (raw, expected) in [
+            ("score", SortKey::Score),
+            ("name", SortKey::Name),
+            ("path", SortKey::Path),
+            ("size", SortKey::Size),
+            ("modified", SortKey::Modified),
+            ("mtime", SortKey::Modified),
+        ] {
+            let parsed = parse_search_args(&argv(&["C:", "x", "--sort", raw])).unwrap();
+            assert_eq!(parsed.sort.key, expected, "{raw} 应解析为 {expected:?}");
+        }
+    }
+
+    #[test]
+    fn asc_and_case_flags() {
+        let parsed = parse_search_args(&argv(&["C:", "x", "--asc", "--case"])).unwrap();
+        assert!(!parsed.sort.descending);
+        assert!(parsed.case_sensitive);
+    }
+
+    #[test]
+    fn missing_arguments_error() {
+        assert!(parse_search_args(&argv(&[])).is_err());
+        let err = parse_search_args(&argv(&["C:"])).unwrap_err();
+        assert!(err.contains("查询"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_flags_and_bad_values() {
+        assert!(parse_search_args(&argv(&["C:", "x", "--nope"])).is_err());
+        assert!(parse_search_args(&argv(&["C:", "x", "--max", "abc"])).is_err());
+        assert!(parse_search_args(&argv(&["C:", "x", "--sort", "zzz"])).is_err());
+        // 缺参数的开关应收干净的错误，不能 panic / 越界
+        assert!(parse_search_args(&argv(&["C:", "x", "--max"])).is_err());
+        assert!(parse_search_args(&argv(&["C:", "x", "--sort"])).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn human_size_formats_binaries() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(2048), "2.0 KB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MB");
     }
 }
 
