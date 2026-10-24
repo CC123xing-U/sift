@@ -56,7 +56,13 @@ pub struct SearchOptions {
     /// 启用拼音匹配 tier T2（默认 true，见 DESIGN §8.1）。
     pub pinyin: bool,
     /// 隐藏系统文件（DESIGN §5.2：`$MFT` 等元数据默认可在设置中隐藏）。
+    /// 只过滤 `flags::SYSTEM`（`FILE_ATTRIBUTE_SYSTEM`）；不过滤隐藏属性。
     pub hide_system: bool,
+    /// 隐藏带隐藏属性的条目（`flags::HIDDEN` / `FILE_ATTRIBUTE_HIDDEN`）。
+    /// 与 `hide_system` 是两个独立开关：M4 若把 UI 拆成两个 toggle，各映射一个即可，
+    /// 引擎不必再改。当前 UI 是单个「显示系统/隐藏文件」toggle，同时驱动这两个字段
+    /// （DESIGN §11.3）。
+    pub hide_hidden: bool,
 }
 
 impl Default for SearchOptions {
@@ -67,6 +73,7 @@ impl Default for SearchOptions {
             fuzzy: true,
             pinyin: true,
             hide_system: true,
+            hide_hidden: true,
         }
     }
 }

@@ -181,6 +181,7 @@ impl InProcessEngine {
         // 在所有 Ready 卷上求并集命中，记录 (卷, 条目id)
         let mut hits: Vec<(VolumeId, EntryId)> = Vec::new();
         let hide_system = req.opts.hide_system;
+        let hide_hidden = req.opts.hide_hidden;
         {
             let vols = self.volumes.read().unwrap();
             for (vid, vd) in vols.iter() {
@@ -189,8 +190,13 @@ impl InProcessEngine {
                 }
                 for eid in vd.index.search(&query, &token) {
                     // DESIGN §5.2：系统文件"默认可在设置中隐藏"——`hide_system` 在此生效
-                    // （此前该选项未被读取，是死字段）。
-                    if hide_system && vd.index.flags[eid as usize] & flags::SYSTEM != 0 {
+                    // （此前该选项未被读取，是死字段）。两个开关独立判断，不合并成一个
+                    // 掩码常量，便于 M4 按 UI 拆分成两个 toggle（DESIGN §11.3）。
+                    let f = vd.index.flags[eid as usize];
+                    if hide_system && f & flags::SYSTEM != 0 {
+                        continue;
+                    }
+                    if hide_hidden && f & flags::HIDDEN != 0 {
                         continue;
                     }
                     hits.push((vid.clone(), eid));
@@ -485,7 +491,7 @@ fn shell_open(_path: &str, _folder: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::api::{OpenAction, SearchOptions, SearchRequest, SortKey, SortSpec};
-    use ff_core::{attrs, EntryInput, IndexBuilder, VolumeInfo};
+    use ff_core::{attrs, flags, EntryInput, IndexBuilder, VolumeInfo};
     use ff_ntfs::VolumeId;
 
     const DIR: u32 = attrs::FILE_ATTRIBUTE_DIRECTORY;
@@ -671,6 +677,126 @@ mod tests {
         show.opts.hide_system = false;
         let sum = e.search(show).unwrap();
         assert_eq!(sum.total, 2);
+    }
+
+    /// 三条属性向量（名字都含 "e"，便于用同一条查询串覆盖）：
+    ///   - `readme.txt`（无属性）
+    ///   - `pagefile.sys`（只 SYSTEM，`flags::SYSTEM` = 0x4）
+    ///   - `hidefile.txt`（只 HIDDEN，`flags::HIDDEN` = 0x2）
+    ///   - `syshidefile.dat`（SYSTEM | HIDDEN）
+    fn attr_index() -> VolumeIndex {
+        let mut b = IndexBuilder::new(VolumeInfo {
+            drive: Some('C'),
+            ..Default::default()
+        });
+        b.push(dir(5, 0, ".", 0, 1));
+        b.push(file(101, 5, "readme.txt", 1024, 200));
+        b.push(EntryInput {
+            frn: 102,
+            parent_frn: 5,
+            name: "pagefile.sys".to_string(),
+            is_dir: false,
+            attrs: attrs::FILE_ATTRIBUTE_SYSTEM,
+            size: 4096,
+            mtime: 300,
+            ctime: 300,
+            atime: 300,
+        });
+        b.push(EntryInput {
+            frn: 103,
+            parent_frn: 5,
+            name: "hidefile.txt".to_string(),
+            is_dir: false,
+            attrs: attrs::FILE_ATTRIBUTE_HIDDEN,
+            size: 512,
+            mtime: 400,
+            ctime: 400,
+            atime: 400,
+        });
+        b.push(EntryInput {
+            frn: 104,
+            parent_frn: 5,
+            name: "syshidefile.dat".to_string(),
+            is_dir: false,
+            attrs: attrs::FILE_ATTRIBUTE_SYSTEM | attrs::FILE_ATTRIBUTE_HIDDEN,
+            size: 8192,
+            mtime: 500,
+            ctime: 500,
+            atime: 500,
+        });
+        b.finish()
+    }
+
+    fn attr_engine() -> InProcessEngine {
+        let e = InProcessEngine::empty();
+        e.add_volume(
+            VolumeId {
+                serial: 1,
+                drive: Some('C'),
+            },
+            attr_index(),
+        );
+        e
+    }
+
+    /// 断言用 `flags` 的实际位值（见 `ff_core/src/entry.rs:22-26`）：HIDDEN = 1<<1 = 0x2，
+    /// SYSTEM = 1<<2 = 0x4。
+    #[test]
+    fn flags_bits_are_0x2_and_0x4() {
+        assert_eq!(flags::HIDDEN, 0x2);
+        assert_eq!(flags::SYSTEM, 0x4);
+        let ix = attr_index();
+        // entry_id 即 push 顺序：0 = "."、1 = readme.txt、2 = pagefile.sys、
+        // 3 = hidefile.txt、4 = syshidefile.dat
+        let (plain, sys_only, hidden_only, both) =
+            (ix.flags[1], ix.flags[2], ix.flags[3], ix.flags[4]);
+        assert_eq!(plain & (flags::SYSTEM | flags::HIDDEN), 0);
+        assert_eq!(sys_only & flags::SYSTEM, 0x4);
+        assert_eq!(sys_only & flags::HIDDEN, 0);
+        assert_eq!(hidden_only & flags::HIDDEN, 0x2);
+        assert_eq!(hidden_only & flags::SYSTEM, 0);
+        assert_eq!(both & flags::SYSTEM, 0x4);
+        assert_eq!(both & flags::HIDDEN, 0x2);
+    }
+
+    /// `hide_system` 与 `hide_hidden` 独立生效：4 种开关组合 × 3 条属性向量。
+    #[test]
+    fn hide_system_and_hide_hidden_are_independent() {
+        let e = attr_engine();
+        let names = |hide_system: bool, hide_hidden: bool| {
+            let mut r = req("e"); // 四条都含 "e"
+            r.opts.hide_system = hide_system;
+            r.opts.hide_hidden = hide_hidden;
+            let sum = e.search(r).unwrap();
+            e.range(sum.id, 0, 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // 都开（默认）：只剩无属性的 readme.txt
+        assert_eq!(names(true, true), vec!["readme.txt".to_string()]);
+        // 只关 hide_hidden：只带 HIDDEN 的回来
+        assert_eq!(
+            names(true, false),
+            vec!["readme.txt".to_string(), "hidefile.txt".to_string()]
+        );
+        // 只关 hide_system：只带 SYSTEM 的回来
+        assert_eq!(
+            names(false, true),
+            vec!["readme.txt".to_string(), "pagefile.sys".to_string()]
+        );
+        // 都关：四条全在
+        assert_eq!(
+            names(false, false),
+            vec![
+                "readme.txt".to_string(),
+                "pagefile.sys".to_string(),
+                "hidefile.txt".to_string(),
+                "syshidefile.dat".to_string(),
+            ]
+        );
     }
 
     #[test]

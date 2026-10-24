@@ -14,6 +14,7 @@ export interface SearchOptions {
   fuzzy: boolean;
   pinyin: boolean;
   hide_system: boolean;
+  hide_hidden: boolean;
 }
 
 export interface SearchRequest {
@@ -84,4 +85,5 @@ export const DEFAULT_OPTS: SearchOptions = {
   fuzzy: true,
   pinyin: true,
   hide_system: true,
+  hide_hidden: true,
 };
