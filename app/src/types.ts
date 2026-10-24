@@ -14,6 +14,7 @@ export interface SearchOptions {
   fuzzy: boolean;
   pinyin: boolean;
   hide_system: boolean;
+  hide_hidden: boolean;
 }
 
 export interface SearchRequest {
@@ -85,11 +86,14 @@ export interface EngineClient {
   open(id: number, index: number, action: OpenAction): Promise<void>;
 }
 
-// UI 侧复用的常量
+// UI 侧复用的常量。
+// hide_* 两字段**必须成对派生**——设置页只有一个"显示系统/隐藏文件"开关（UI_SPEC §4.8），
+// 接线时写 `hide_system = hide_hidden = !开关`；只派生一个会漏掉纯隐藏文件（.gitignore 这类）。
 export const DEFAULT_OPTS: SearchOptions = {
   case_sensitive: false,
   regex_default: false,
   fuzzy: true,
   pinyin: true,
   hide_system: true,
+  hide_hidden: true,
 };
