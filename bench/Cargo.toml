@@ -7,4 +7,16 @@ publish = false
 
 [dependencies]
 ff-core = { path = "../crates/ff-core" }
-# criterion 由 Track D 添加（DESIGN §2.1 测试/基准清单）。
+# windows：仅 memprobe 的 GetProcessMemoryInfo 使用（DESIGN §1.3 内存实测）。
+# 版本范围遵循 DESIGN §2.1 的 ">=0.59, <=0.62" 约定；docs.rs 当前最新 0.62.2。
+# 许可证：MIT OR Apache-2.0（与 windows crate 一致）。
+windows = { version = "0.62", features = [
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# criterion 0.8（docs.rs 最新 0.8.2，2026-02-04；Apache-2.0 OR MIT）。
+criterion = "0.8"
+
+# [[bench]] 声明随 bench/benches/*.rs 一并添加（依赖 Track B 的 ff-core API）。

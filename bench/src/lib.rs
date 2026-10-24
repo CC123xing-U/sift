@@ -24,6 +24,9 @@
 
 use std::fmt;
 
+#[cfg(windows)]
+pub mod meminfo;
+
 /// 基准默认随机种子（ASCII "SIFT"）。所有基准数字以此种子复现。
 pub const DEFAULT_SEED: u64 = 0x5349_4654;
 
