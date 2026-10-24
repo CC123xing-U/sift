@@ -3,10 +3,11 @@
 //! 本文件所有测试默认 `#[ignore]`（涉及真实卷/权限/环境），手动运行：
 //! `cargo test -p sift-tests -- --ignored`。
 //!
-//! 不实现 M2 的 USN 逻辑（DESIGN §13-M2 才是增量读写）。
+//! 真实 USN 增量（`NtfsVolumeScanner::read_changes`，DESIGN §5.3）需管理员 + 真实 NTFS 卷 + 已启用 Journal，不在本文件的 CI 测试内。
 //!
-//! 依赖 Track A 的 `ff-ntfs` 公开 API。A 尚未提交卷枚举 API 时，
-//! 相关测试以「最简可编译形式 + TODO(a-ntfs) 注释」占位，A 提交后适配。
+//! 其**纯逻辑**（记录解析、reason 合并、读错误分派）由 `ff-ntfs` 的 `usn` 模块单测覆盖；
+//! 卷枚举等真实 IO 由下面的 `#[ignore]` 冒烟测试承载，手动运行：
+//! `cargo test -p sift-tests -- --ignored`（需管理员）。
 
 use ff_ntfs::{RawEntry, ScanError, ScanMeta, VolumeId, VolumeScanner};
 
@@ -39,15 +40,19 @@ impl VolumeScanner for FakeScanner {
         _from_usn: i64,
         _journal_id: u64,
     ) -> ff_ntfs::Result<(Vec<ff_ntfs::Change>, i64)> {
-        // M1 契约：本轮允许且应当返回 Unsupported（DESIGN §5.1 注释）。
-        Err(ScanError::Unsupported("M1 未实现".to_string()))
+        // 内存假实现：契约允许用 Unsupported 占位（DESIGN §5.1 注释）。
+        // 真实实现见 `NtfsVolumeScanner::read_changes`（DESIGN §5.3）。
+        Err(ScanError::Unsupported(
+            "内存假扫描器不提供 USN 增量".to_string(),
+        ))
     }
 }
 
-/// `VolumeScanner` 契约：`full_scan` 流式喂条目；`read_changes` 在 M1 返回 Unsupported。
+/// `VolumeScanner` 契约：`full_scan` 流式喂条目；内存假实现的 `read_changes` 按契约
+/// 返回 Unsupported（真实实现走 USN 管线，见 `NtfsVolumeScanner::read_changes`）。
 /// 不依赖真实卷，随常规 `cargo test` 运行（与 B 的单元测试互补，不重复）。
 #[test]
-fn scanner_contract_full_scan_streams_and_read_changes_unsupported() {
+fn scanner_contract_full_scan_streams_and_fake_read_changes_unsupported() {
     let scanner = FakeScanner {
         entries: vec![
             RawEntry {
@@ -87,8 +92,8 @@ fn scanner_contract_full_scan_streams_and_read_changes_unsupported() {
     assert_eq!(seen[0].name, "Users");
     assert_eq!(seen[1].name, "readme.txt");
     match scanner.read_changes(&vol, 0, 0) {
-        Err(ScanError::Unsupported(_)) => {} // M1 预期行为
-        other => panic!("M1 的 read_changes 应返回 Unsupported，得到: {other:?}"),
+        Err(ScanError::Unsupported(_)) => {} // 内存假实现的预期行为
+        other => panic!("假扫描器的 read_changes 应返回 Unsupported，得到: {other:?}"),
     }
 }
 
@@ -103,13 +108,13 @@ fn raw_volume_open_smoke() {
 
 /// 冒烟：枚举 NTFS 卷（ff-ntfs M0 交付面）。
 ///
-/// TODO(a-ntfs)：Track A 提交卷枚举公开 API（预计 `ff_ntfs::list_ntfs_volumes()`
-/// 或类似签名）后，将本测试切换为真实调用并断言：
+/// 卷枚举公开 API 已交付（`ff_ntfs::enumerate_volumes()`）。本用例保持最简可编译形式：
+/// 真实调用会打开卷设备，属管理员环境的手动验证项——
+/// **在管理员终端手动运行 `cargo test -p sift-tests -- --ignored` 时按下面 TODO 的断言
+/// 扩充为真实调用**：
 /// - 返回值非空（至少 C:）；
 /// - 每个 `VolumeId` 的 `Display` 含序列号；
 /// - 对第一个卷调用 `full_scan`，条目数 > 0 且耗时 < 旧版基线 69s 的两倍（宽松）。
-///
-/// 当前 A 尚未提交该 API，本测试以最简形式保持编译通过。
 #[test]
 #[ignore = "需要管理员权限与真实 NTFS 卷（DESIGN §14）；卷枚举 API 待 Track A 提交后启用"]
 fn volume_enumeration_smoke() {

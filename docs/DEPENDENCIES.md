@@ -12,5 +12,9 @@
 | memchr | 2.8.3 | Unlicense OR MIT | `memmem` 子串快速路径（替代逐条 `contains`） | ff-core | 2026-10-24 |
 | rustc-hash | 2.1.3 | MIT OR Apache-2.0 | `FxHasher` 名称→id 反查索引（避免标准 HashMap 开销） | ff-core | 2026-10-24 |
 | criterion | 0.8.2 | Apache-2.0 OR MIT | 合成数据 criterion 基准（§14，dev-dependency） | sift-bench | 2026-10-24 |
+| time | 0.3.55 | MIT OR Apache-2.0 | `ntfs-reader` 的 `OffsetDateTime` → FILETIME 转换（§4.1/§5.1 时间单位） | ff-ntfs | 2026-10-24 |
+| tracing | 0.1.44 | MIT | USN 跳过的 V3/未知版本记录与解析中断的日志（§5.3；§2.1 准入） | ff-ntfs | 2026-10-24 |
 
 > 说明：`windows` 会连带拉入 `windows-sys` / `windows-numerics` 等子 crate（均为 MIT OR Apache-2.0）；`ff-core`/`ff-match` 保持 `#![forbid(unsafe_code)]`，仅依赖纯逻辑 crate；`ntfs-reader`/`windows` 经 `#[cfg(windows)]` 隔离，非 Windows 平台下 `ff-ntfs` 仍编译通过但不含实扫逻辑。
+>
+> `tracing` 只作为**库依赖**引入（DESIGN §2.1 已列入准入技术栈）：`ff-ntfs` 不引入订阅者（`tracing-subscriber`），后者归上层 `app` / `ff-service`（M3/M6）负责，避免库替应用决定日志输出方式。

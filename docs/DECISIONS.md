@@ -47,3 +47,19 @@
 28. **多个位置参数拼成一个查询串**：`ff-cli search C: my docs` → 查询串 `my docs`；理由是查询语法里空格即 AND，与 UI 输入行为保持一致（用户直接输入即 AND）。
 29. **本轮合并无 `Cargo.lock` 冲突**：E、M2 均未改动各自 `Cargo.toml`（ff-engine 早已依赖 ff-core/ff-ntfs；windows features 已含 `Win32_System_Ioctl`），F 复用了已存在的 ff-cli→ff-engine 依赖。合并顺序 E→M2→F。
 30. **Track F 由 Orchestrator 直接实现而非再派 agent**：该任务紧耦合刚落地的 `InProcessEngine` API，上下文已在手，且依赖顺序上无法与 E 并行；并行收益低于往返成本。
+
+## 第三轮 · 文档合规审查出的 Blocker 修复（2026-10-24，`fix/ntfs-gaps`）
+
+> 来源：`doc-audit` 对照 DESIGN.md 的审查结论（B1/B2/B3 + 文档过期）。本轮只修 Rust 侧与文档，不改冻结契约类型。
+
+31. **USN 读错误码分派放进 `usn` 纯逻辑**：新增 `win_err::{ERROR_HANDLE_EOF=38, ERROR_MORE_DATA=234, ERROR_JOURNAL_ENTRY_DELETED=1397}`、`ReadOutcome` 与 `classify_read_outcome(code)`（`crates/ff-ntfs/src/usn.rs`），`win32.rs` 只做分派。理由：这是纯数值判据，放纯逻辑模块才能跨平台进 CI 单测（沿用决策 26——真实 IO 不进 CI）。
+32. **`ERROR_HANDLE_EOF` = 干净结束（DESIGN §5.3）**：`read_usn_journal` 遇 EOF 返回**已累积的记录 + 最后已知的续读位置**（`Ok`），不再当错误；一段都没读到时续读位置回退为请求起点（`from_usn`），语义是"没有新东西可读"——这是增量轮询最常态路径，此前会抛 `ScanError::Io` 导致 `read_changes` 永远失败。
+33. **`ERROR_JOURNAL_ENTRY_DELETED` → `ScanError::JournalUnavailable`**：让上层按 §5.3 重建条件（丢弃增量、全量重建）处理，而不是笼统的 Io 错误。
+34. **Win32 码提取不再靠掩码猜**：`win32_code()` 取 `HRESULT` 低 16 位后**用 `HRESULT::from_win32` 反验**（`windows-result` 定义 `(error & 0xFFFF) | (7<<16) | 0x8000_0000`），`debug_assert` 保证取法正确；依据写进注释。
+35. **引入 `tracing 0.1.44`（DESIGN §2.1 准入，无需再批）**：V3（ReFS 128 位 FRN）跳过、未知版本跳过、解析提前停止（`stopped_at`）三处改为 `tracing::warn!` 输出，落实 §5.3「记录日志并忽略」。`ff-ntfs` **只依赖 `tracing`**，订阅者（`tracing-subscriber`）归上层 `app` / `ff-service`（M3/M6），避免库替应用决定日志输出方式。已按 §0.2 登记 `docs/DEPENDENCIES.md`。（注：此前计数被 `scanner.rs` 静默丢弃。）
+36. **建索引阶段应用最小排除集**：`$RECYCLE.BIN`、`System Volume Information`——**只按目录名匹配、大小写不敏感**（`is_excluded(name, is_dir)`），避免误伤同名文件；依据 DESIGN §5.2「排除规则在建索引时应用」。**预期影响**：真实卷条目数会下降（回收站内容不再入索引），后续 BENCH 的真实卷数字应以此为基准，不要与修复前的 849,366 / 878,732 直接比较。
+37. **`SearchOptions::hide_system` 接通**：此前是死字段（只有 TS 侧镜像）。现在 `InProcessEngine::search` 在汇总命中时过滤 `flags::SYSTEM` 条目（默认 `true`），落实 §5.2「默认可在设置中隐藏」这条路。
+38. **父 FRN 也要过 `mask_frn`**：`usn::record_to_change` 生成的 `RawEntry.parent_frn` 此前未掩码（只掩码了自身 `frn`），与 §5.3「用作键时统一 `& 0x0000_FFFF_FFFF_FFFF`」不一致；已改并补单测。
+39. **清理"文档说没做、其实做了"的过期口径**：`ff-ntfs/src/lib.rs`（`read_changes` 属 M2 / 返回 Unsupported）、`scanner.rs` 模块头、`usn.rs` 模块头（"M2 落地时二选一"）、`tests/tests/windows_integration.rs`（M1 口径注释、测试名、`TODO(a-ntfs)`）。`volume_enumeration_smoke` 保持 `#[ignore]`，TODO 改为"管理员终端手动运行 `cargo test -p sift-tests -- --ignored` 时扩充为真实调用"。
+40. **CLI 逐步补齐（补审计 Minor 19）**：当前只有 `scan` + `search`；`index` / `bench` / `dump`（DESIGN §3）属后续里程碑，各自随对应里程碑落地。
+41. **`FRN_MASK` 在 `ff-core`（`entry.rs`）与 `ff-ntfs`（`usn.rs`）各定义一份**：已知重复，暂不收敛——已有跨 crate 单测 `frn_mask_low_48_bits_matches_ff_core` 守卫一致性，收敛需引入共享常量 crate，收益低于成本。

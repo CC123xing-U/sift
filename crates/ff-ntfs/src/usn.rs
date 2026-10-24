@@ -1,18 +1,19 @@
-//! USN Journal 纯逻辑（DESIGN §5.3）：FRN 掩码 · 记录字节解析 · reason 合并规则。
+//! USN Journal 纯逻辑（DESIGN §5.3）：FRN 掩码 · 记录字节解析 · reason 合并规则 · 读错误分派。
 //!
 //! 本模块**不依赖 Windows、不需要管理员权限**，全部逻辑可完整单测。
-//! `VolumeScanner::read_changes` 本体属 M2；按本轮任务要求，M2 需要的纯逻辑提前交付：
+//! M2 已落地：`VolumeScanner::read_changes`（`scanner.rs`）走「裸 `FSCTL_READ_USN_JOURNAL`
+//! （`win32::read_usn_journal`）+ 本模块解析」这条路，未使用 ntfs-reader 的 `Journal`。
+//! 本模块交付的纯逻辑：
 //!
 //! - [`mask_frn`]：FRN 用作键时统一屏蔽高 16 位序列号（DESIGN §5.3）；
 //! - [`parse_usn_journal_buffer`]：从 `FSCTL_READ_USN_JOURNAL` 的输出字节切片**独立解析**
-//!   记录（V2 全字段；V3/ReFS 的 128 位 FRN 记录跳过并计数——DESIGN §5.3 要求忽略不崩溃；
-//!   损坏记录报告后停止，已解析部分仍可用）；
+//!   记录（V2 全字段；V3/ReFS 的 128 位 FRN 记录跳过并计数——DESIGN §5.3 要求忽略不崩溃，
+//!   计数由调用方记录日志；损坏记录报告后停止，已解析部分仍可用）；
+//! - [`classify_read_outcome`]：`DeviceIoControl` 的 Win32 错误码分派（DESIGN §5.3 关键坑：
+//!   `ERROR_HANDLE_EOF` 是**正常结束**而不是错误）；
 //! - [`merge_usn_events`]：把解析出的记录按 reason 合并成 [`UsnEvent`]
 //!   （只在 `CLOSE` 记录上产出事件；先判 `FILE_DELETE`；重命名以 `RENAME_NEW_NAME` 为准，
 //!   `RENAME_OLD_NAME` 忽略）。
-//!
-//! M2 落地时二选一：ntfs-reader 的 `Journal`（支持 `NextUsn::Custom` 续读）或裸
-//! `FSCTL_READ_USN_JOURNAL` + 本模块解析；无论哪条路，合并规则都是本模块这份。
 
 use crate::{Change, RawEntry};
 
@@ -22,6 +23,45 @@ pub const FRN_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 /// FRN 用作键时取低 48 位（屏蔽高 16 位序列号）。
 pub const fn mask_frn(frn: u64) -> u64 {
     frn & FRN_MASK
+}
+
+/// Win32 错误码（与 `Win32::Foundation::WIN32_ERROR` 同值；此处自定以保证跨平台可单测）。
+pub mod win_err {
+    /// `ERROR_HANDLE_EOF`：已读到日志末尾——**正常结束**，不是错误（DESIGN §5.3）。
+    pub const ERROR_HANDLE_EOF: u32 = 38;
+    /// `ERROR_MORE_DATA`：记录超出输出缓冲，需按缓冲头部给出的下一条 USN 续读。
+    pub const ERROR_MORE_DATA: u32 = 234;
+    /// `ERROR_JOURNAL_ENTRY_DELETED`：请求的 USN 已被回收（日志被截断 / 重建），需重新基准。
+    pub const ERROR_JOURNAL_ENTRY_DELETED: u32 = 1397;
+}
+
+/// `FSCTL_READ_USN_JOURNAL` 的一次调用结果分派（DESIGN §5.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOutcome {
+    /// 调用成功（本段已干净读完）。
+    Success,
+    /// `ERROR_MORE_DATA`：本段有效但记录未读完，需续读。
+    MoreData,
+    /// `ERROR_HANDLE_EOF`：读到日志末尾，干净结束（无新记录也走这里）。
+    EndOfJournal,
+    /// `ERROR_JOURNAL_ENTRY_DELETED`：需丢弃该卷增量、全量重建。
+    JournalEntryDeleted,
+    /// 其他 Win32 错误码（原值保留，交给调用方转成 `ScanError`）。
+    Failed(u32),
+}
+
+/// 把 `DeviceIoControl` 返回的 Win32 错误码分派为 [`ReadOutcome`]。
+///
+/// 放在本模块（而非 `win32.rs`）是为了跨平台可单测：判据是**纯数值**，
+/// 不需要真实卷、不需要管理员权限。
+pub fn classify_read_outcome(code: u32) -> ReadOutcome {
+    match code {
+        0 => ReadOutcome::Success,
+        win_err::ERROR_MORE_DATA => ReadOutcome::MoreData,
+        win_err::ERROR_HANDLE_EOF => ReadOutcome::EndOfJournal,
+        win_err::ERROR_JOURNAL_ENTRY_DELETED => ReadOutcome::JournalEntryDeleted,
+        other => ReadOutcome::Failed(other),
+    }
 }
 
 /// USN reason 位（取值与 Win32 `USN_REASON_*` 一致）。
@@ -314,7 +354,9 @@ pub fn record_to_change(record: &ParsedUsnRecord) -> Option<Change> {
             attrs,
         } => Some(Change::Upsert(RawEntry {
             frn,
-            parent_frn,
+            // 父 FRN 同样要屏蔽高 16 位序列号：它在 ff-core 里用作 frn_map 的键，
+            // 与自身 frn 必须同一口径（DESIGN §5.3「用作键时统一掩码」）。
+            parent_frn: mask_frn(parent_frn),
             name: name.unwrap_or_default(),
             is_dir,
             attrs,
@@ -411,6 +453,32 @@ mod tests {
         assert_eq!(mask_frn(0), 0);
         // 序列号只影响高 16 位
         assert_eq!(mask_frn(0x0002_DEAD_BEEF_CAFE), 0x0000_DEAD_BEEF_CAFE);
+    }
+
+    #[test]
+    fn classify_read_outcome_all_branches() {
+        use win_err::*;
+        assert_eq!(classify_read_outcome(0), ReadOutcome::Success);
+        assert_eq!(
+            classify_read_outcome(ERROR_MORE_DATA),
+            ReadOutcome::MoreData
+        );
+        assert_eq!(
+            classify_read_outcome(ERROR_HANDLE_EOF),
+            ReadOutcome::EndOfJournal,
+            "读到日志末尾是正常结束，不是错误（DESIGN §5.3）"
+        );
+        assert_eq!(
+            classify_read_outcome(ERROR_JOURNAL_ENTRY_DELETED),
+            ReadOutcome::JournalEntryDeleted
+        );
+        // 未知码原值保留
+        assert_eq!(classify_read_outcome(5), ReadOutcome::Failed(5));
+        assert_eq!(classify_read_outcome(1), ReadOutcome::Failed(1));
+        assert_eq!(
+            classify_read_outcome(u32::MAX),
+            ReadOutcome::Failed(u32::MAX)
+        );
     }
 
     #[test]
@@ -706,6 +774,32 @@ mod tests {
                 assert_eq!(e.mtime, 1_300_000_000_000_000_000);
                 assert_eq!(e.ctime, 1_300_000_000_000_000_000);
                 assert_eq!(e.atime, 1_300_000_000_000_000_000);
+            }
+            other => panic!("期望 Upsert，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_to_change_masks_parent_frn() {
+        // 父 FRN 带高 16 位序列号：与自身 frn 同一口径屏蔽（DESIGN §5.3）
+        let buf = journal_buffer(
+            0,
+            &[v2_record(
+                100,
+                0x0001_0000_0000_0028,
+                0x0003_0000_0000_0100,
+                reason::FILE_CREATE | reason::CLOSE,
+                0x20,
+                "子目录",
+            )],
+        );
+        let parsed = parse_usn_journal_buffer(&buf);
+        assert_eq!(parsed.stopped_at, None);
+        let changes = records_to_changes(&parsed.records);
+        match &changes[0] {
+            Change::Upsert(e) => {
+                assert_eq!(e.frn, 0x28, "自身 frn 屏蔽高 16 位");
+                assert_eq!(e.parent_frn, 0x100, "父 frn 也要屏蔽高 16 位");
             }
             other => panic!("期望 Upsert，得到 {other:?}"),
         }

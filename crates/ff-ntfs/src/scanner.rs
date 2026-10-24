@@ -1,8 +1,11 @@
-//! `VolumeScanner` 的 NTFS 实现（DESIGN §5.1 / §5.2）。
+//! `VolumeScanner` 的 NTFS 实现（DESIGN §5.1 / §5.2 / §5.3）。
 //!
-//! M0 范围：
+//! 已落地：
 //! - `full_scan`：`MftScan` 流式扫 MFT（不把整个 `$MFT` 读进内存），逐条喂 [`RawEntry`]；
-//! - `read_changes`：属 M2，本轮返回 [`ScanError::Unsupported`]，不留空实现。
+//!   扫描**前**先记录 USN Journal 位置（§5.2，顺序不能反），并在建索引阶段应用最小排除集
+//!   （§5.2 排除规则）；
+//! - `read_changes`：真实 USN 增量（§5.3）——`win32::read_usn_journal` 拉原始记录流，
+//!   经 `usn` 模块解析为 [`Change`]。需管理员权限 + 真实 NTFS 卷 + 已启用 Journal。
 
 use std::time::Instant;
 
@@ -15,6 +18,35 @@ use crate::{usn, win32, Change, RawEntry, Result, ScanError, ScanMeta, VolumeId,
 
 /// FILETIME 纪元差：1601-01-01 → 1970-01-01，单位 100ns。
 const EPOCH_DIFFERENCE_TICKS: i128 = 116_444_736_000_000_000;
+
+/// 建索引阶段的最小排除集（DESIGN §5.2：排除规则在建索引时应用）。
+///
+/// 只按**目录名**匹配、大小写不敏感：这些目录里的内容不应进索引（回收站、系统还原/卷信息）。
+/// 元数据文件（`$MFT` / `$Bitmap` 等）按 §5.2 保留（Everything 也能搜到），不在本集合内。
+const EXCLUDED_DIR_NAMES: &[&str] = &["$recycle.bin", "system volume information"];
+
+/// 目录名是否命中排除集（DESIGN §5.2）。
+///
+/// 只对**目录**生效：避免误伤取了同名目录名的普通文件（回收站/卷信息目录只有目录形态）。
+fn is_excluded(name: &str, is_dir: bool) -> bool {
+    is_dir
+        && EXCLUDED_DIR_NAMES
+            .iter()
+            .any(|d| name.eq_ignore_ascii_case(d))
+}
+
+/// 条目是否应被排除：自身命中 [`is_excluded`]，或其父目录已被排除（**子树连带**）。
+///
+/// `excluded_frns` 收集"已被排除的目录"的掩码 FRN。只排除目录自身而不连带子树的话，
+/// 子条目的 `parent_frn` 会解析不到，被挂到根下并计入 §5.2 的警告计数、路径也是错的。
+fn is_excluded_subtree(
+    name: &str,
+    is_dir: bool,
+    parent_frn: u64,
+    excluded_frns: &FxHashSet<u64>,
+) -> bool {
+    is_excluded(name, is_dir) || excluded_frns.contains(&mask_frn(parent_frn))
+}
 
 /// `VolumeScanner` 的 NTFS 具体实现（无配置，单元结构）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -42,6 +74,8 @@ impl VolumeScanner for NtfsVolumeScanner {
         let mut frn_set: FxHashSet<u64> = FxHashSet::default();
         frn_set.reserve(scan.record_count() as usize);
         let mut parent_counts: FxHashMap<u64, u64> = FxHashMap::default();
+        // 已被排除的目录（掩码 FRN）：其子树一并排除，见 [`is_excluded_subtree`]。
+        let mut excluded_frns: FxHashSet<u64> = FxHashSet::default();
 
         let mut entries: u64 = 0;
         while let Some(chunk) = scan.next_chunk().map_err(map_ntfs_error)? {
@@ -53,13 +87,23 @@ impl VolumeScanner for NtfsVolumeScanner {
                 let frn = file.reference();
                 let parent_frn = name.parent_reference();
                 let standard = file.standard_information();
+                let name = name.to_string();
+                let is_dir = file.is_directory();
+                // DESIGN §5.2：排除规则在建索引时应用。排除目录时其**整棵子树**一并排除
+                // （否则子条目的 parent 找不到、会被挂到根下并计入警告计数）。
+                if is_excluded_subtree(&name, is_dir, parent_frn, &excluded_frns) {
+                    if is_dir {
+                        excluded_frns.insert(mask_frn(frn));
+                    }
+                    continue;
+                }
 
                 sink(RawEntry {
                     frn,
                     parent_frn,
                     // Display 是尽力而为的 UTF-8（未配对代理 → U+FFFD）；
                     // to_os_string 无损但契约的 name 是 String。
-                    name: name.to_string(),
+                    name,
                     is_dir: file.is_directory(),
                     attrs: standard.map_or(0, |s| s.file_attributes()),
                     size: default_stream_size(&file),
@@ -127,6 +171,30 @@ impl VolumeScanner for NtfsVolumeScanner {
 
         let buf = win32::read_usn_journal(&device_path, from_usn, info.journal_id)?;
         let parsed = usn::parse_usn_journal_buffer(&buf);
+        // DESIGN §5.3：V3（ReFS 128 位 FRN）与未知版本记录要**记录日志并忽略**（不崩溃）；
+        // 解析被迫停止（损坏记录 / 缓冲截断）同样要留下痕迹，已解析部分仍然可用。
+        if parsed.v3_skipped > 0 {
+            tracing::warn!(
+                volume = %vol,
+                v3_skipped = parsed.v3_skipped,
+                "跳过 V3（ReFS，128 位 FRN）USN 记录：本项目只支持 NTFS V2"
+            );
+        }
+        if parsed.unsupported_version_skipped > 0 {
+            tracing::warn!(
+                volume = %vol,
+                unsupported_version_skipped = parsed.unsupported_version_skipped,
+                "跳过未知主版本的 USN 记录"
+            );
+        }
+        if let Some(reason) = &parsed.stopped_at {
+            tracing::warn!(
+                volume = %vol,
+                parsed_records = parsed.records.len(),
+                reason = %reason,
+                "USN 记录解析提前停止（已解析部分仍可用）"
+            );
+        }
         let changes = usn::records_to_changes(&parsed.records);
         Ok((changes, parsed.next_usn))
     }
@@ -223,6 +291,45 @@ mod tests {
             serial,
             drive: Some(drive),
         }
+    }
+
+    #[test]
+    fn excluded_subtree_covers_children() {
+        // 父目录被排除 → 子树连带排除（否则子条目的 parent 解析不到、被挂到根下）
+        let mut excluded: FxHashSet<u64> = FxHashSet::default();
+        excluded.insert(0x40); // 已被排除的目录（$Recycle.Bin）
+        assert!(is_excluded_subtree("$R12345.txt", false, 0x40, &excluded));
+        assert!(is_excluded_subtree("sub", true, 0x40, &excluded));
+        // 父 FRN 带序列号也能命中（内部按掩码比较）
+        assert!(is_excluded_subtree(
+            "$I12345.txt",
+            false,
+            0x0007_0000_0000_0040,
+            &excluded
+        ));
+        // 不在被排除子树内、名字也不命中 → 保留
+        assert!(!is_excluded_subtree("readme.txt", false, 5, &excluded));
+        assert!(!is_excluded_subtree("Windows", true, 5, &excluded));
+    }
+
+    #[test]
+    fn excluded_dirs_only_when_is_dir() {
+        // 排除集只命中目录（DESIGN §5.2）：避免误伤取了同名目录名的普通文件。
+        assert!(is_excluded("$Recycle.Bin", true));
+        assert!(is_excluded("$recycle.bin", true)); // 大小写不敏感
+        assert!(is_excluded("System Volume Information", true));
+        assert!(!is_excluded("$Recycle.Bin", false), "文件不应被排除");
+        assert!(!is_excluded("System Volume Information", false));
+    }
+
+    #[test]
+    fn normal_dirs_and_metadata_files_kept() {
+        // 元数据文件按 §5.2 保留；普通目录一概保留。
+        assert!(!is_excluded("$MFT", false));
+        assert!(!is_excluded("$Bitmap", false));
+        assert!(!is_excluded("Windows", true));
+        assert!(!is_excluded("回收站备份", true));
+        assert!(!is_excluded("$RECYCLE.BIN.bak", true));
     }
 
     #[test]
