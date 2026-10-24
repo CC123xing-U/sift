@@ -6,4 +6,24 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-# Track A 添加：ntfs-reader（MFT 读取）、windows（Win32：卷枚举 / USN Journal / 权限）。
+# Track A 添加（M0）。版本已对照 docs.rs / crates.io 2026-10-24 确认：
+# - ntfs-reader 0.6.0（2026-10-01 发布，MSRV 1.88.0，本地工具链 1.97.1 满足）：
+#   MFT 全量/流式扫描 + USN Journal，MIT OR Apache-2.0。
+# - windows 0.62：Win32 绑定（卷枚举 / USN Journal FSCTL / 进程内存），MIT OR Apache-2.0。
+#   feature 按所用模块最小化勾选；ntfs-reader 自身还会带上 Foundation/Security/IO/FileSystem/Ioctl。
+# - rustc-hash 2.1：FxHash（DESIGN §2.1 清单内），FRN 集合与父计数用，MIT OR Apache-2.0。
+# - time 0.3：ntfs-reader 的时间戳返回 OffsetDateTime，转回 FILETIME（契约单位）用，MIT OR Apache-2.0。
+ntfs-reader = "0.6.0"
+rustc-hash = "2.1"
+time = "0.3"
+
+[target."cfg(windows)".dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+]

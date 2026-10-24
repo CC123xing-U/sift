@@ -145,3 +145,28 @@ pub trait VolumeScanner {
         journal_id: u64,
     ) -> Result<(Vec<Change>, i64)>;
 }
+
+// —— Track A（M0）实现模块 ————————————————————————————————————
+//
+// 以下仅为模块声明与再导出，冻结契约类型（VolumeId / RawEntry / Change /
+// ScanMeta / ScanError / VolumeScanner）未做任何改动。
+
+/// USN Journal 纯逻辑（FRN 掩码 · 记录字节解析 · reason 合并规则）。
+/// M2 构建块，本轮按任务要求提前交付并覆盖单元测试；不依赖 Windows。
+pub mod usn;
+
+/// `NtfsVolumeScanner`：`VolumeScanner` 的 NTFS 实现（M0：`full_scan`）。
+#[cfg(windows)]
+pub mod scanner;
+
+/// Win32 封装（卷枚举 / USN Journal / 进程内存），DESIGN §0.5 平台隔离。
+#[cfg(windows)]
+pub mod win32;
+
+#[cfg(windows)]
+pub use scanner::{device_path_for, NtfsVolumeScanner};
+#[cfg(windows)]
+pub use win32::{
+    enumerate_volumes, peak_working_set_bytes, query_usn_journal, query_volume_by_root,
+    working_set_bytes, UsnJournalInfo, VolumeInfo,
+};
