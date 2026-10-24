@@ -296,6 +296,9 @@
 
 - 交互：**单选**（radio 语义，`aria-pressed`），默认"全部"；再点一次选中项 = 取消回到"全部"。【自行决定：理由 = 多选筛选与查询语言的组合语义复杂，单选覆盖 80% 场景】
 - 与输入框的关系：**输入框是唯一真源**。点 chip 把对应修饰符写入输入框（同类修饰符替换，如已有 `ext:jpg` 时点"文档"则替换之）；手动编辑输入框后 chip 选中态随之失效。【自行决定：理由 = 避免"chip 状态 + 查询文本"双真源不一致】
+- **阶段依赖（重要）**：上表的 `folder:` / `ext:` 修饰符在 DESIGN §7.2 中列为 **M4 必做**。本轮原型由 MockEngine 在 TS 侧自行实现这两个修饰符，故 chips 可用；但接上真实 Rust 引擎（M3 的 Tauri 外壳 + 尚未完成 M4 的 ff-core）时，点 chip 写入的 `ext:` 会命中 `ff_core::query::validate_term` 的 `ParseError`（`crates/ff-core/src/query.rs:107-118`），`InProcessEngine` 会返回 `parse_error: Some(..)` 且 `total: 0`（`crates/ff-engine/src/inprocess.rs:166-177`），UI 表现为**明确的语法错误条 + 0 结果**，不是静默无结果——这是 M4 未实现的正常表现，不算规格违背。【doc-audit 更正 + team-lead 裁定 A：本次不动引擎】
+- **M3 接线前的处置**：二选一——(a) 把 `ext:` / `folder:` 从 M4 提前到 M3 一并实现；(b) 未能提前则 M3 接线时把 6 个筛选 chip 置灰，并在 chip 悬浮提示中说明"依赖 M4 的 ext:/folder: 修饰符，暂不可用"。不得保留"能点但必报语法错误"的中间状态。【team-lead 裁定 A】
+
 - 映射表：
 
 | Chip | 写入的查询修饰符 |
@@ -373,7 +376,9 @@
 - 列表容器 `aria-busy="true"`。【自行决定：a11y】
 
 ### 4.6 错误状态（ErrorState）
-- 输入级：`parse_error` → 输入框下方错误条（`bg-error`、错误图标、`位置 x：语法错误` 文案，DESIGN §7.3 提供位置）。【DESIGN §7.3】
+- 输入级：`parse_error` → 输入框下方错误条（`bg-error`、错误图标、`第 x 位：语法错误` 文案，DESIGN §7.3 提供位置）。【DESIGN §7.3】
+  - **位置为 0-based 下标，展示时 +1 转 1-based**（`i18n.parseError` / `parseErrorWith` 负责），不得把原始下标直接当"第几位"念给用户。
+  - **文案优先用引擎给的 `message`**：`parse_error.message` 非空时显示 `第 x 位：<message>`；为空时才回退到默认文案 `第 x 位：语法错误，请检查查询`。引擎侧的 `message` 始终会给出具体原因（如"未实现"），UI 不得丢弃它再自行猜测。【M20】
 - 引擎级：status = Error → 底栏错误文案 + 托盘气泡通知一次；列表区显示错误态（图标 + `索引出错：xxx` + `重试` 按钮，action = `rescan`）。【DESIGN §9 + 自行决定】
 
 ### 4.7 托盘菜单（TrayMenu）
@@ -428,7 +433,7 @@
 | `Alt+Enter` | 属性（**M7**；本期保留键位但置灰/无操作，不提示） | DESIGN §11.1 |
 | `Esc` | 输入框有内容 → 清空并取消当前搜索；已为空 → 隐藏窗口 | DESIGN §11.1（"清空 / 隐藏"的两段式展开） |
 | `Ctrl+F` | 聚焦输入框（窗口已唤出时） | DESIGN §11.1 |
-| `Tab` / `Shift+Tab` | 焦点在 输入框 → chips → 列表 → 输入框 间循环（Shift 反向） | DESIGN §11.1 + 自行决定：完整循环序 |
+| `Tab` / `Shift+Tab` | 焦点序：`输入框 → ✕ → ⚙ → chips（1 站）→ 列头（4 站）→ 列表（1 站）→ 回到输入框` 循环（Shift 反向） | DESIGN §11.1 + 自行决定：完整循环序 |
 | `Home` / `End` | 跳到首行 / 末行 | 自行决定（列表标准行为） |
 | `PageUp` / `PageDown` | 上/下翻一屏 | 自行决定 |
 | 可打印字符 | 列表聚焦时直接输入 → 焦点转入输入框（保留已输入内容） | 自行决定（Everything 习惯） |
@@ -444,7 +449,7 @@
 
 1. **焦点样式清晰可见**：所有可交互元素聚焦时 2px `border-focus` 环 + 2px 偏移（对比度见 §2.2 非文字表）；结果行键盘焦点 = 选中行本身的选中样式 + 环；Tab 顺序与视觉顺序一致。【自行决定】
 2. **对比度**：正文与背景 ≥4.5:1，关键组合实测值见 §2.2（全部通过）；实现后任何色值变更必须重算并保持达标。【自行决定：任务要求实测并写入】
-3. **不只靠颜色表达状态**：选中行 = 底色 + 左侧 3px 指示条；排序 = `▲/▼` 字符 + `aria-sort`；错误 = 图标 + 文字；扫描中 = 进度百分比文字；高亮 = 黄底 + 加粗；chip 选中 = 实底填充 vs 描边（形状差异）。【自行决定：a11y】
+3. **不只靠颜色表达状态**：选中行 = 底色 + 左侧 3px 指示条；排序 = `▲/▼` 字符 + 列头按钮 `aria-pressed`（`aria-sort` 只合法于 `columnheader`/`rowheader`，本列表非 `role="table"`，故不使用，见 §3.6）；错误 = 图标 + 文字；扫描中 = 进度百分比文字；高亮 = 黄底 + 加粗；chip 选中 = 实底填充 vs 描边（形状差异）。【自行决定：a11y】
 4. **深浅色跟随系统**：`prefers-color-scheme`；同时设置 `color-scheme: light dark` 使滚动条/表单控件跟随。不提供手动覆盖（从简）。【DESIGN §11.1 + 自行决定】
 5. **虚拟滚动约定**：使用 `@tanstack/react-virtual`（DESIGN §2.1）。一次只渲染可见窗口；取数范围为**可见窗口 ±1 屏**（DESIGN §11.1）；行高固定 32px；滚动停止后才发 `range` 请求（滚动中以旧数据渲染），快速滚动时丢弃未返回的窗口请求；`offset` 越界返回空数组由 UI 优雅处理。【DESIGN §11.1 + 自行决定：滚动节流策略】
 6. **语义与播报**：列表 `role="listbox"`、行 `role="option"` + `aria-selected`；加载中列表 `aria-busy`；底栏命中数 `aria-live="polite"` 完整短语播报；图标按钮（⚙/✕）有 `aria-label`（"设置"/"清空"）；装饰性图标 `aria-hidden`。【自行决定：a11y】
@@ -471,6 +476,15 @@ UI 依赖的四个方法（TS 同名同结构）：
 | 接口方法 | 返回 |
 |---|---|
 | `search(req: SearchRequest)` | `SearchSummary { id, total, elapsed_ms, parse_error }` |
+
+- **`ParseError` 必须与 Rust 侧逐字段对应**（M19）：
+
+  | Rust `ff_core::ParseError` | TS `ParseError` | 说明 |
+  |---|---|---|
+  | `message: String` | `message: string` | 引擎给出的具体原因，UI 必须原样展示（§4.6） |
+  | `span: Range<usize>` | `span: { start: number; end: number }` | 半开区间 `[start, end)`；TS 没有 `Range`，逐字段展开为对象，不做类型擦除 |
+
+  `Range<usize>` 在 TS 侧没有等价类型，若图省事把 `span` 擦成 `number` 或整个 `ParseError` 擦成 `string`，M3 接线时 `invoke` 的 JSON 反序列化会直接在两侧同时报错，且错误点分散在 UI 各处难以定位——故契约必须在原型阶段就写全。【M19】
 | `range(id: RequestId, offset: number, limit: number)` | `ResultRow[]` |
 | `cancel(id: RequestId)` | `void` |
 | `status()` | `EngineStatus`（各卷 Scanning(进度)/Ready/Error、条目数、最后保存时间） |
@@ -582,9 +596,29 @@ UI 依赖的四个方法（TS 同名同结构）：
 1. 顶部不确定进度条用 `background-position` 做动画（非 transform/opacity），且时长 1.4s 与 §4.5 的"160ms 循环位移"口径不一——需先定 §2.6 的 `--dur-progress` token。
 2. `range` 取数未做"滚动停止后才发请求"的节流，快速滚动时会有在途请求（§6.5 承诺的节流策略）。
 3. 设置项仅存内存（跨视图切换保留），**落盘与列宽/窗口尺寸持久化待 M3 接 Tauri 后实现**（DESIGN §11.1）。
-4. Tab 链里 4 个列头仍是 4 个独立 Tab stop（chips 已用 `role="toolbar"` + roving tabindex 合并为 1 站）。暂保留列头独立，以保证排序的键盘可达性。
+4. ~~Tab 链里 4 个列头仍是 4 个独立 Tab stop~~ → **已定：列头保持 4 个独立 Tab stop，不是待办**。理由 = 列头是排序的唯一键盘入口，把它们移出 Tab 链会直接导致排序键盘不可达（a11y 倒退）；chips 已用 `role="toolbar"` + roving tabindex 合并为 1 站。完整焦点序写入 §5。
 5. 全局热键在原型里硬编码 `Ctrl+Alt+Space`，尚未接设置项里录制的组合键；双击 Ctrl 唤出待 M3。
 6. 缺失的动效 token：`--ease-in`、`--dur-window-in/out`、`--dur-progress`（窗口动画本身属 M3）。
+
+**必须在 M3 接真实 Tauri 引擎前完成的契约类缺口（M19–M21）——均已完成**：
+
+| 编号 | 缺口 | 状态 |
+|---|---|---|
+| M19 | `ParseError` 契约与 Rust 侧不对形（Rust `span: Range<usize>` vs TS 侧擦成单点；UI 侧缺 `message`） | 已完成，写入 §7.1 |
+| M20 | UI 把引擎给出的 `message` 丢掉，自行显示"语法错误"，会把"引擎未实现"误报成"用户输错了" | 已完成，写入 §4.6 |
+| M21 | 位置 0-based 但中文文案按 1-based 呈现，差 1 位 | 已完成，写入 §4.6 + `i18n.parseError` |
+
+- 另注：**M1（设置页完整交互）经 team-lead 降级为记录待办**，但已在 `680fdfb` 中实现完毕（体积分组/双拼/语言/热键录制/排除路径/开源许可/索引位置），故本条不列为缺口。
+
+**M3 接线时必须补上的设置项 → `SearchOptions` 映射（当前原型刻意不接，不做假行为）**：
+
+| 设置项 | `SearchOptions` 字段 | 注意 |
+|---|---|---|
+| 显示系统/隐藏文件 | `hide_system` | **语义相反**：UI 开关为"显示"，字段为"隐藏"，接线时必须取反，否则开关方向会反 |
+| 模糊匹配 | `fuzzy` | 同名字段 |
+| 拼音匹配 | `pinyin` | 同名字段 |
+
+- 原型阶段 `App.tsx` 一律传常量 `DEFAULT_OPTS`，三个开关只改界面状态、**不产生可观测行为**：MockEngine 不消费 `opts`，若硬造一份"看起来生效"的过滤，等于用假行为掩盖真实链路未通。故保持不接，并在本表留痕，等 M3 接真实引擎时一次性接上——届时 `hide_system` 已由 ntfs 侧修为真正生效字段（`crates/ff-engine/src/inprocess.rs:193`，默认 `true`），开关会有真实可观测效果，可据此做断言。【doc-audit 提示 + 自行决定：不造假】
 
 ---
 
