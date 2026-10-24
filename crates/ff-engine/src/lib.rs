@@ -5,9 +5,12 @@
 //! 落盘调度、`InProcess` 实现）属 M2，不在本轮范围。
 
 pub mod api;
+pub mod inprocess;
 
 pub use api::{
     EngineClient, EngineError, EngineStatus, OpenAction, ParseError, RequestId, Result, ResultRow,
     SearchOptions, SearchRequest, SearchSummary, SortKey, SortSpec, VolumeId, VolumeState,
     VolumeStatus,
 };
+
+pub use inprocess::InProcessEngine;
