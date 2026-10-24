@@ -68,26 +68,27 @@ function comboFromEvent(e: React.KeyboardEvent): string | null {
 // 未接线项在原型里点了只改界面状态、不产生任何行为。
 // 必须**在可见 UI 上标出来**（UI_SPEC §4.8）——只写进文档或 title 悬停不够：
 // 用户点开关后界面有反馈、结果却不变，界面本身就在撒谎。
-const PENDING_NOTE = 'M3 接线后生效';
+// 每个未接线项必须**在可见 UI 上**写明它真实的生效里程碑（UI_SPEC §4.8.1）：
+// 不得统一套用同一个标签——否则在对应里程碑交付时，旧标签会变成新的谎言。
 
 function Toggle({
   label,
   on,
   disabled = false,
-  pending = false,
+  pendingNote,
   onToggle,
 }: {
   label: string;
   on: boolean;
   disabled?: boolean;
-  pending?: boolean;
+  pendingNote?: string;
   onToggle: (next: boolean) => void;
 }) {
   return (
     <div className={'set-row' + (disabled ? ' disabled' : '')}>
       <span>
         {label}
-        {pending && <span className="pending-tag">{PENDING_NOTE}</span>}
+        {pendingNote && <span className="pending-tag">{pendingNote}</span>}
       </span>
       <button
         type="button"
@@ -95,7 +96,7 @@ function Toggle({
         aria-checked={on}
         // 无障碍名里也带上阶段说明：与 M5/M6 占位项（"（M5 提供）"）口径一致，
         // 且可见文字是完整无障碍名的前缀，满足 WCAG 2.5.3 Label in Name。
-        aria-label={pending ? `${label}，${PENDING_NOTE}` : label}
+        aria-label={pendingNote ? `${label}，${pendingNote}` : label}
         disabled={disabled}
         className={'toggle' + (on ? ' on' : '')}
         onClick={() => onToggle(!on)}
@@ -266,14 +267,14 @@ export default function Settings({ onBack, state, patch }: Props) {
             label="显示系统/隐藏文件"
             on={state.showHidden}
             onToggle={setFlag('showHidden')}
-            pending
+            pendingNote="M3 接线后生效"
           />
         </section>
 
         <section className="set-group">
           <h2 className="set-group-title">匹配</h2>
-          <Toggle label="模糊匹配" on={state.fuzzy} onToggle={setFlag('fuzzy')} pending />
-          <Toggle label="拼音匹配" on={state.pinyin} onToggle={setFlag('pinyin')} pending />
+          <Toggle label="模糊匹配" on={state.fuzzy} onToggle={setFlag('fuzzy')} pendingNote="M5 生效" />
+          <Toggle label="拼音匹配" on={state.pinyin} onToggle={setFlag('pinyin')} pendingNote="M5 生效" />
           <fieldset className="set-fieldset">
             <legend className="set-block-label">双拼方案</legend>
             {SHUANGPIN.map((s) => (
