@@ -86,3 +86,14 @@
 54. **代码缺口：`InProcessEngine` 未实现 DESIGN §9 的「60 秒无访问释放命中集合」**（`api.rs:124` 引用该口径）：当前只在发起新搜索时 `clear()`（`inprocess.rs:161`），`cancel` 只置取消位，命中集合无超时回收，长会话下 `results` 只增不减。建议落点：`crates/ff-engine/src/inprocess.rs::search_impl` 或后台清理线程。
 55. **代码缺口：`SearchOptions::fuzzy` / `pinyin` 仍是死字段**（`api.rs:55-57` 声明默认 `true`，但 T2 / T3 属 M5，`ff-match` 尚无拼音 / 模糊匹配器，`search` 未读这两个字段）。与决策 37 修复 `hide_system` 是同类问题。建议：M5 接线时一并接通；若 M5 前想避免误导，可把字段注释改为「预留，M5 生效」。
 56. **可选改进（本轮未改）**：DESIGN §13-M0 要求「列出 `ntfs-reader` 的限制」，限制清单实际在 `crates/ff-ntfs/NOTES.md:33-40`，`BENCH.md` 的 M0 节（`BENCH.md:16`）只给了指引、正文未列。本轮不搬运，避免两处口径漂移；如希望 BENCH.md 自包含，可在其 M0 节补一行摘要 + 链接。
+
+### 第三轮 · 收尾修正：未接线开关的里程碑标签错配（2026-10-24，`fix/pending-labels`）
+
+> 来源：doc-audit 在 #55 之后指出——上一轮 `15c9673` 给三个未接线 toggle 统一打了「M3 接线后生效」常量是**错的**：`模糊匹配` / `拼音匹配` 属 **M5**（T2 / T3，DESIGN §8.1 / §13），不是 M3。若统一标 M3，M3 交付时这两个项会带上**新的谎言**，且用户会误以为 M3 已提供模糊/拼音。
+
+57. **未接线开关按真实里程碑分别标注**：`Settings.tsx` 的 `Toggle` 组件原先用单一常量 `PENDING_NOTE = 'M3 接线后生效'` 套在所有三个 toggle 上。改为 per-toggle 的 `pendingNote?: string` 属性：
+    - `显示系统/隐藏文件` → `pendingNote="M3 接线后生效"`（T 属 M3，正确）；
+    - `模糊匹配` / `拼音匹配` → `pendingNote="M5 生效"`（T2 / T3 属 M5）。
+    同步更新 `UI_SPEC.md` §4.8.1：① 表格拆成「M3」与「M5」两行；② 新增硬性规则「**不得统一套用同一个里程碑标签**——每个未接线项必须标出它真实的生效里程碑，以 DESIGN 的里程碑归属为准」；③ §6.3 小结的表述由「三个 toggle 都标 M3」改为「分别标 M3 / M5」。
+    **验证**：`tsc -b` + `vite build` 绿；产物 bundle 中 `M3 接线后生效` ×1、`M5 生效` ×2，确认分别进了构建产物。commit `c4ead97`，合并 `4950a91`。
+    **与 #55 的关系**：#55 把引擎侧 `fuzzy` / `pinyin` 注释降级为「预留，M5 生效」；本条把 UI 侧标签对齐为同一个 M5，两处口径一致，杜绝"引擎说 M5、界面说 M3"的矛盾。
