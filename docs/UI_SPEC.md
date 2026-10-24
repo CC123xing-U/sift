@@ -368,7 +368,7 @@
 | 索引未就绪 | status = Scanning 且无历史结果 | 进度环；`正在建立索引… 45%`；辅助：`索引就绪后自动搜索，可先输入关键词` | 【DESIGN §9 status + 自行决定】 |
 
 ### 4.5 加载状态（LoadingState）
-- 列表区顶部 2px `accent` 不确定进度条（indeterminate，160ms 循环位移动画，reduced-motion 下静态）。【自行决定】
+- 列表区顶部 2px `accent` 不确定进度条（indeterminate，仅用 `transform: translateX` 做位移动画——遵守 §2.6「只动 opacity / transform」，不动画 `background-position`；循环时长由 `--dur-progress`（1.4s）控制，reduced-motion 下 `display:none` 静态）。【自行决定 + §10 待办 #1 已解决】
 - 新搜索 summary 未返回前**保留上一次结果**（不清空、不置灰），避免闪烁；
   **已发起搜索、summary 未到达且超过 300ms** 时显示 3 行骨架行（`bg-subtle` 圆角块，静态、无 shimmer 动画）；
   滚动中尚未取到的行渲染为**空白行**（不显示骨架），避免快速滚动时满屏闪烁。
@@ -610,8 +610,8 @@ UI 依赖的四个方法（TS 同名同结构）：
 
 **已知待办（本轮 UI 规范审查后确认暂不处理）**：
 
-1. 顶部不确定进度条用 `background-position` 做动画（非 transform/opacity），且时长 1.4s 与 §4.5 的"160ms 循环位移"口径不一——需先定 §2.6 的 `--dur-progress` token。
-2. `range` 取数未做"滚动停止后才发请求"的节流，快速滚动时会有在途请求（§6.5 承诺的节流策略）。
+1. ~~顶部不确定进度条用 `background-position` 做动画（非 transform/opacity），且时长 1.4s 与 §4.5 的"160ms 循环位移"口径不一——需先定 §2.6 的 `--dur-progress` token。~~ → **已解决**：进度条改为 `transform: translateX` 动画（满足 §2.6），新增 `--dur-progress: 1.4s` token（§2.6），§4.5 口径一并澄清；原"160ms"是确定条循环值的误用。
+2. ~~`range` 取数未做"滚动停止后才发请求"的节流，快速滚动时会有在途请求（§6.5 承诺的节流策略）。~~ → **已解决**：`ResultArea` 的可见窗口取数改为 90ms 防抖，effect 每次滚动帧重跑会重置计时器，故只在滚动停止后发 `range` 请求，滚动中以已加载旧数据渲染（§6.5）。
 3. 设置项仅存内存（跨视图切换保留），**落盘与列宽/窗口尺寸持久化待 M3 接 Tauri 后实现**（DESIGN §11.1）。
 4. ~~Tab 链里 4 个列头仍是 4 个独立 Tab stop~~ → **已定：列头保持 4 个独立 Tab stop，不是待办**。理由 = 列头是排序的唯一键盘入口，把它们移出 Tab 链会直接导致排序键盘不可达（a11y 倒退）；chips 已用 `role="toolbar"` + roving tabindex 合并为 1 站。完整焦点序写入 §5。
 5. 全局热键在原型里硬编码 `Ctrl+Alt+Space`，尚未接设置项里录制的组合键；双击 Ctrl 唤出待 M3。

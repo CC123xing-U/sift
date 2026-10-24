@@ -54,6 +54,11 @@
   --dur-instant: 80ms;
   --dur-fast: 120ms;
   --dur-base: 160ms;
+  /* 顶部不确定进度条循环时长（UI_SPEC §4.5 / §10 待办 #1）：
+     §2.6 未单列此 token，原 §4.5 写的"160ms 循环位移"是确定条循环的典型值误用——
+     不确定进度条需要肉眼可辨的扫描感，1.4s 才合理。这里落地 --dur-progress
+     解决 §10 待办 #1 的"需先定 token"，实现侧统一引用，不再硬编码 1.4s。 */
+  --dur-progress: 1.4s;
   --ease-out: cubic-bezier(0.1, 0.9, 0.2, 1);
 
   --window-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
@@ -290,23 +295,34 @@ body {
   min-height: 0;
   background: var(--bg-surface);
 }
+/* 顶部不确定进度条（UI_SPEC §4.5）：只动 transform（不动画 background-position），
+   满足 §2.6「只动 opacity / transform」与 reduced-motion 友好。时长走 --dur-progress。 */
 .topprogress {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  background-size: 40% 100%;
-  animation: indet 1.4s var(--ease-out) infinite;
+  overflow: hidden;
   z-index: 2;
+}
+.topprogress::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 35%;
+  background: var(--accent);
+  transform: translateX(-100%);
+  animation: indet var(--dur-progress) var(--ease-out) infinite;
 }
 @keyframes indet {
   0% {
-    background-position: -40% 0;
+    transform: translateX(-100%);
   }
   100% {
-    background-position: 140% 0;
+    transform: translateX(300%);
   }
 }
 

@@ -50,6 +50,10 @@ interface Props {
 type Panel = 'list' | 'scanning' | 'emptyQuery' | 'noResult' | 'searchingEmpty' | 'error';
 
 const PAGE = 15;
+// 滚动停止后才发 range 请求（UI_SPEC §6.5 / §10 待办 #2）。
+// effect 在每次滚动帧都会重跑，用此防抖把实际请求推迟到滚动停止后，
+// 滚动中以已加载的旧数据渲染，避免快速滚动时大量在途请求。
+const RANGE_DEBOUNCE_MS = 90;
 const COLS: { key: SortKey; label: string; cls: string }[] = [
   { key: 'name', label: I18N.cols[0], cls: 'c-name' },
   { key: 'path', label: I18N.cols[1], cls: 'c-path' },
@@ -76,6 +80,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   } = props;
 
   const parentRef = useRef<HTMLDivElement>(null);
+  const rangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selected, setSelected] = useState(0);
   const selectedRef = useRef(0);
   selectedRef.current = selected;
@@ -112,7 +117,14 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   }, [currentId]);
 
   // 加载可见窗口内缺失的行（UI_SPEC §6.5：可见 ±1 屏，按 id 丢弃旧回包）。
+  // 滚动停止后才真正发 range 请求：effect 在每次滚动帧都会重跑，这里用防抖把实际
+  // 请求推迟到滚动停止后（RANGE_DEBOUNCE_MS），滚动中以已加载的旧数据渲染，
+  // 避免快速滚动时大量在途请求（§10 待办 #2）。
   useEffect(() => {
+    if (rangeTimer.current) {
+      clearTimeout(rangeTimer.current);
+      rangeTimer.current = null;
+    }
     if (!currentId || total === 0 || items.length === 0) return;
     const first = items[0].index;
     const last = items[items.length - 1].index;
@@ -122,16 +134,25 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     const lo = missing[0];
     const hi = missing[missing.length - 1];
     const id = currentId;
-    engine.range(id, lo, hi - lo + 1).then((batch) => {
-      if (id !== currentId) return;
-      setRows((prev) => {
-        const next = { ...prev };
-        batch.forEach((r, k) => {
-          next[lo + k] = r;
+    rangeTimer.current = setTimeout(() => {
+      rangeTimer.current = null;
+      engine.range(id, lo, hi - lo + 1).then((batch) => {
+        if (id !== currentId) return;
+        setRows((prev) => {
+          const next = { ...prev };
+          batch.forEach((r, k) => {
+            next[lo + k] = r;
+          });
+          return next;
         });
-        return next;
       });
-    });
+    }, RANGE_DEBOUNCE_MS);
+    return () => {
+      if (rangeTimer.current) {
+        clearTimeout(rangeTimer.current);
+        rangeTimer.current = null;
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, total, items, engine]);
 
