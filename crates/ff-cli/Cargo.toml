@@ -1,0 +1,11 @@
+[package]
+name = "ff-cli"
+description = "Sift 命令行调试工具（DESIGN §3：scan / search / bench / dump）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ff-core = { path = "../ff-core" }
+ff-ntfs = { path = "../ff-ntfs" }
+ff-engine = { path = "../ff-engine" }

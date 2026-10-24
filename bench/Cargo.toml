@@ -1,0 +1,10 @@
+[package]
+name = "sift-bench"
+description = "Sift 合成数据生成器 + criterion 基准（DESIGN §14，Track D 所有）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ff-core = { path = "../crates/ff-core" }
+# criterion 由 Track D 添加（DESIGN §2.1 测试/基准清单）。

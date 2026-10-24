@@ -1,0 +1,9 @@
+[package]
+name = "ff-match"
+description = "Sift 匹配器封装：子串 / 模糊 / 拼音（统一 trait，纯逻辑）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+# Track B 按 DESIGN.md §2.1 清单添加（memchr 等；nucleo-matcher / ib-pinyin 属 M5）。

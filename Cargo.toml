@@ -1,0 +1,23 @@
+# Sift 工作区清单（产品名 Sift；crate 前缀 ff-* 沿用 DESIGN.md §3 与分工表）。
+#
+# 本文件由 Orchestrator 所有：workspace 成员与 profile 在此冻结。
+# 各 crate 在自己目录的 Cargo.toml 中登记依赖（版本由引入方核对 docs.rs 后确定，
+# 并上报给 Orchestrator 登记到 docs/DEPENDENCIES.md）。
+# 不得引入 DESIGN.md §2.1 清单之外的重量级依赖；确需引入先向用户提出理由。
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/ff-core",
+    "crates/ff-match",
+    "crates/ff-ntfs",
+    "crates/ff-engine",
+    "crates/ff-cli",
+    "bench",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

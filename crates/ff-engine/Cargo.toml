@@ -1,0 +1,11 @@
+[package]
+name = "ff-engine"
+description = "Sift 引擎：卷管理 · Base+Overlay · 后台合并 · 落盘调度 · 对外 EngineClient 实现"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ff-core = { path = "../ff-core" }
+ff-match = { path = "../ff-match" }
+ff-ntfs = { path = "../ff-ntfs" }

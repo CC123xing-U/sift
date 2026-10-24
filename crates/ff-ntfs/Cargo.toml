@@ -1,0 +1,9 @@
+[package]
+name = "ff-ntfs"
+description = "Sift NTFS 卷读取：MFT 全量扫描 + USN 增量（封装 ntfs-reader / windows）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+# Track A 添加：ntfs-reader（MFT 读取）、windows（Win32：卷枚举 / USN Journal / 权限）。

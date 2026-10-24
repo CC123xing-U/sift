@@ -1,0 +1,11 @@
+[package]
+name = "sift-tests"
+description = "Sift 工作区级集成测试（Track D 所有）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ff-core = { path = "../crates/ff-core" }
+ff-ntfs = { path = "../crates/ff-ntfs" }
+# Track D 按需补充 ff-match / ff-engine / criterion 等。

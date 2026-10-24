@@ -1,0 +1,9 @@
+[package]
+name = "ff-core"
+description = "Sift 引擎核心：索引数据结构 · 查询解析 · 求值 · 评分 · 持久化格式（纯逻辑）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+# Track B 按 DESIGN.md §2.1 清单添加（rayon / memchr / rustc-hash 等），并上报 Orchestrator 登记。
