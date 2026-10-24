@@ -23,9 +23,17 @@ export interface SearchRequest {
   opts: SearchOptions;
 }
 
+/**
+ * 查询解析错误 —— 逐字段镜像 `ff_core::ParseError`
+ * （`crates/ff-core/src/lib.rs:36-41`）。
+ *
+ * Rust 侧为 `span: Range<usize>`（**字节**区间 `[start, end)`）。此处保持同形，
+ * 不做 `pos` 简化：M3 经 IPC 拿到真实引擎错误时不需要再改一次类型，
+ * 也避免"UI 侧字段与契约不同名"的隐性漂移。
+ */
 export interface ParseError {
   message: string;
-  pos: number;
+  span: { start: number; end: number };
 }
 
 export interface SearchSummary {

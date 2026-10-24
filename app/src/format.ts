@@ -12,9 +12,20 @@ export function formatTime(ms: number | null): string {
   const d = new Date(ms);
   const now = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
-  const hm = `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  // UI_SPEC §2.5：同年 `M-d HH:mm`，跨年 `yyyy-M-d HH:mm`（月/日不补零）。
+  const hm = `${d.getMonth() + 1}-${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
   if (d.getFullYear() === now.getFullYear()) return hm;
   return `${d.getFullYear()}-${hm}`;
+}
+
+/** 完整时间，用于修改时间列的 tooltip（UI_SPEC §2.5）。 */
+export function formatTimeFull(ms: number | null): string {
+  if (ms == null) return '';
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()} ${p(d.getHours())}:${p(
+    d.getMinutes(),
+  )}:${p(d.getSeconds())}`;
 }
 
 export function formatHHMM(ms: number | null): string {
