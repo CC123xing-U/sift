@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use time::OffsetDateTime;
 
 use crate::usn::mask_frn;
-use crate::{win32, RawEntry, Result, ScanError, ScanMeta, VolumeId, VolumeScanner};
+use crate::{usn, win32, Change, RawEntry, Result, ScanError, ScanMeta, VolumeId, VolumeScanner};
 
 /// FILETIME 纪元差：1601-01-01 → 1970-01-01，单位 100ns。
 const EPOCH_DIFFERENCE_TICKS: i128 = 116_444_736_000_000_000;
@@ -96,16 +96,39 @@ impl VolumeScanner for NtfsVolumeScanner {
         })
     }
 
-    /// USN 增量读取（DESIGN §5.3）属 M2，本轮未实现。
+    /// USN 增量读取（DESIGN §5.3，M2 真实实现）。
+    ///
+    /// 流程：解析设备路径 → 校验 journal id 未变且 `from_usn` 仍在日志内 →
+    /// `read_usn_journal` 拉取原始记录流 → `usn` 解析成 [`Change`] → 返回
+    /// `(changes, new_next_usn)`。实时路径需管理员权限 + 真实 NTFS 卷。
     fn read_changes(
         &self,
-        _vol: &VolumeId,
-        _from_usn: i64,
-        _journal_id: u64,
-    ) -> Result<(Vec<crate::Change>, i64)> {
-        Err(ScanError::Unsupported(
-            "USN 增量读取属 M2，本轮未实现".to_string(),
-        ))
+        vol: &VolumeId,
+        from_usn: i64,
+        journal_id: u64,
+    ) -> Result<(Vec<Change>, i64)> {
+        let device_path = device_path_for(vol)?;
+
+        // 先查当前 journal：校验 id 一致（日志未被重建），并拿到权威 next_usn / first_usn。
+        let info = win32::query_usn_journal(&device_path)?;
+        if journal_id != 0 && info.journal_id != journal_id {
+            return Err(ScanError::JournalUnavailable(format!(
+                "journal id 不匹配（传入 {journal_id:#018x}，当前 {:#018x}），日志已被重建，需重新全量扫描",
+                info.journal_id
+            )));
+        }
+        // from_usn 早于日志首条：该位置记录已回收，无法续读，需重新基准。
+        if from_usn < info.first_usn {
+            return Err(ScanError::JournalUnavailable(format!(
+                "from_usn {from_usn} 早于日志首条 {first_usn}，记录已回收，需重新全量扫描",
+                first_usn = info.first_usn
+            )));
+        }
+
+        let buf = win32::read_usn_journal(&device_path, from_usn, info.journal_id)?;
+        let parsed = usn::parse_usn_journal_buffer(&buf);
+        let changes = usn::records_to_changes(&parsed.records);
+        Ok((changes, parsed.next_usn))
     }
 }
 
@@ -230,14 +253,28 @@ mod tests {
     }
 
     #[test]
-    fn read_changes_is_unsupported_in_m0() {
-        let scanner = NtfsVolumeScanner;
-        let err = scanner
-            .read_changes(&vol('C', 1), 0, 0)
-            .expect_err("M0 的 read_changes 必须返回 Unsupported");
-        match err {
-            ScanError::Unsupported(msg) => assert!(msg.contains("M2")),
-            other => panic!("期望 Unsupported，得到 {other:?}"),
+    fn read_changes_contract_uses_usn_pipeline() {
+        // 不碰真实卷：只验证纯逻辑转换管线（usn::records_to_changes）在 scanner 侧可用。
+        // 真实 IO 路径（需要管理员 + 真实 NTFS 卷 + USN Journal）放在手动/feature 验证，
+        // 不在此 CI 单测内。
+        let records = [crate::usn::ParsedUsnRecord {
+            usn: 1,
+            file_frn: 0x0001_0000_0000_0064,
+            parent_frn: 5,
+            reason: crate::usn::reason::FILE_CREATE | crate::usn::reason::CLOSE,
+            file_attributes: crate::usn::FILE_ATTRIBUTE_DIRECTORY,
+            timestamp: 1_300_000_000_000_000_000,
+            name: "目录".into(),
+            major_version: 2,
+        }];
+        let changes = crate::usn::records_to_changes(&records);
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            crate::Change::Upsert(e) => {
+                assert_eq!(e.frn, 0x64);
+                assert!(e.is_dir);
+            }
+            other => panic!("期望 Upsert，得到 {other:?}"),
         }
     }
 }
