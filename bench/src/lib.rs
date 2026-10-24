@@ -475,6 +475,48 @@ pub fn synth_iter(cfg: &SynthConfig) -> SynthIter {
     SynthIter::new(cfg)
 }
 
+/// 用合成数据构建 `VolumeIndex`（criterion 基准 / memprobe / 集成测试共用）。
+///
+/// 先推入**虚拟根**（`frn=1, parent_frn=0, name="."`）：
+/// - 与 ff-core 单测样本形态一致，`root_id` 存在、parent 链完整；
+/// - 因此 `entry_count() == cfg.count + 1`（含根本身）。
+///   不推根时，挂在根下的约 `1/dir_ratio` 个文件会 unresolved（路径仍正确，
+///   但 `unresolved_parents()` 计数偏高，基准日志会失真）。
+pub fn build_index(cfg: &SynthConfig) -> ff_core::VolumeIndex {
+    use ff_core::attrs;
+    use ff_core::{EntryInput, IndexBuilder, VolumeInfo};
+    let vol = VolumeInfo {
+        drive: Some('D'),
+        ..Default::default()
+    };
+    let mut b = IndexBuilder::new(vol);
+    b.push(EntryInput {
+        frn: 1,
+        parent_frn: 0,
+        name: ".".to_string(),
+        is_dir: true,
+        attrs: attrs::FILE_ATTRIBUTE_DIRECTORY,
+        size: 0,
+        mtime: 0,
+        ctime: 0,
+        atime: 0,
+    });
+    for e in SynthIter::new(cfg) {
+        b.push(EntryInput {
+            frn: e.frn,
+            parent_frn: e.parent_frn,
+            name: e.name,
+            is_dir: e.is_dir,
+            attrs: e.attrs,
+            size: e.size,
+            mtime: e.mtime,
+            ctime: e.ctime,
+            atime: e.atime,
+        });
+    }
+    b.finish()
+}
+
 /// 名字是否含 CJK 统一表意文字（用于测试断言，与 `HAS_CJK` 语义一致）。
 pub fn name_has_cjk(name: &str) -> bool {
     name.chars().any(|c| {

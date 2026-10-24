@@ -19,4 +19,10 @@ windows = { version = "0.62", features = [
 # criterion 0.8（docs.rs 最新 0.8.2，2026-02-04；Apache-2.0 OR MIT）。
 criterion = "0.8"
 
-# [[bench]] 声明随 bench/benches/*.rs 一并添加（依赖 Track B 的 ff-core API）。
+[[bench]]
+name = "build_index"
+harness = false
+
+[[bench]]
+name = "search_bench"
+harness = false
