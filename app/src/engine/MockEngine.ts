@@ -75,8 +75,12 @@ export class MockEngine implements EngineClient {
 
     const pq = parseQuery(req.query);
     if (pq.error) {
-      // 与 Rust 侧 ParseError 同形：span 为 [start, end) 区间。
-      const pe: ParseError = { message: '语法错误，请检查查询', span: pq.error.span };
+      // 优先透出解析器给出的具体原因（如"修饰符语法尚未支持"），
+      // 缺 message 时才回落到通用文案——M20：别把"我们没实现"说成"你写错了"。
+      const pe: ParseError = {
+        message: pq.error.message || '语法错误，请检查查询',
+        span: pq.error.span,
+      };
       return new Promise((res) =>
         setTimeout(() => res({ id, total: 0, elapsed_ms: 1, parse_error: pe }), 10),
       );
