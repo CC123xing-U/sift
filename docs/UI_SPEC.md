@@ -407,7 +407,7 @@
 | 常规 | 全局热键 | 录制按钮（默认 `Ctrl+Alt+Space`） | DESIGN §11.2 |
 | 索引 | 索引卷选择 | checkbox 列表（本机 NTFS 卷） | DESIGN §11.3 |
 | 索引 | 排除路径 | 可增删的路径列表 | DESIGN §11.3 |
-| 索引 | 显示系统/隐藏文件 | toggle | DESIGN §11.3 |
+| 索引 | 显示系统/隐藏文件 | toggle | DESIGN §11.3（**一个 toggle 驱动引擎 `hide_system` + `hide_hidden` 两字段**，取反派生，详见 §10） |
 | 匹配 | 模糊匹配 | toggle（默认开） | DESIGN §8.1/11.3 |
 | 匹配 | 拼音匹配 | toggle（默认开） | DESIGN §8.1/11.3 |
 | 匹配 | 双拼方案 | radio（默认关） | DESIGN §11.3 |
@@ -614,24 +614,19 @@ UI 依赖的四个方法（TS 同名同结构）：
 
 | 设置项 | `SearchOptions` 字段 | 注意 |
 |---|---|---|
-| 显示系统/隐藏文件 | `hide_system`（见下方"口径未决"） | **语义相反**：UI 开关为"显示"，字段为"隐藏"，接线时必须取反 |
+| 显示系统/隐藏文件 | `hide_system` **+** `hide_hidden`（**一个 toggle 驱动两个字段**） | **语义相反**：UI 开关为"显示"，字段为"隐藏"，接线时取反；**且必须成对派生**：`hide_system = hide_hidden = !开关` |
 | 模糊匹配 | `fuzzy` | 同名字段 |
 | 拼音匹配 | `pinyin` | 同名字段 |
 
-- **口径未决（三条走法，待 team-lead 裁定）**：`flags` 里 `HIDDEN = 1<<1` 与 `SYSTEM = 1<<2` 是两个独立位（`crates/ff-core/src/entry.rs:22-26`），而 `hide_system` **只判 `SYSTEM`**（`crates/ff-engine/src/inprocess.rs:193`）。UI 与 DESIGN §11.3 都把"显示系统/隐藏文件"当**一项**，于是单开关与单字段对不上：
+- **口径已裁定 = 走法 ①（team-lead 拍板，引擎侧 `685b7f7` 已落地）**：`flags` 中 `HIDDEN = 0x2`、`SYSTEM = 0x4` 是两个独立位（`crates/ff-core/src/entry.rs:22-26`）；原先 `hide_system` 只判 `SYSTEM`，导致 `.gitignore` 这类纯隐藏文件无论怎么拨开关都会出现。现引擎新增 `hide_hidden`，二者各判一位（`crates/ff-engine/src/inprocess.rs:193-199`），**UI 文案"显示系统/隐藏文件"与行为终于一致**——原先"实际只控 SYSTEM"的警告撤销。
+  - **引擎刻意没有合成 `SYSTEM|HIDDEN` 掩码常量**，而是保留两个独立判断：M4 若把 UI 拆成两个 toggle，各映射一个字段即可，引擎不必再动。故当前"一个 toggle → 两个字段"是**过渡形态**，M4 拆与不拆都不受阻。
+  - 类型镜像位置：`SearchOptions` 定义在 `crates/ff-engine/src/api.rs:49`，**不在 ff-core**；TS 侧 `types.ts` 已同步加 `hide_hidden`，`DEFAULT_OPTS` 两字段均为 `true`（与引擎默认一致）。
 
-  | 走法 | 做法 | 代价 |
-  |---|---|---|
-  | ①（UI 侧推荐） | 引擎加 `hide_hidden: bool`，单个 toggle 同时按 `SYSTEM | HIDDEN` 过滤 | 引擎 +1 字段、+1 处 `|`；TS `SearchOptions` 同步加 `hide_hidden`；UI 文案与控件**不变** |
-  | ② | UI 拆成"显示系统文件"/"显示隐藏文件"两个 toggle，各映射一个字段 | UI +1 控件；与 DESIGN §11.3"一项"的口径不符；两者同时打开的排列组合用户基本用不上 |
-  | ③ | 都不做，UI 文案改成"显示系统文件"，表里注明只控 `SYSTEM` | 零改动，但彻底放弃"显示隐藏文件"能力 |
-
-  **UI 侧推荐 ①**：改动集中在引擎一处，UI 文案与控件不动，`§4.8` 的控件清单也无需改；② 为了一个几乎没人用的排列组合去加控件，且要改 DESIGN 口径；③ 是让文案去迁就实现，等于永久放弃一项用户会预期存在的能力。**注意 ① 下是一个 UI 开关映射到两个字段**（`hide_system = hide_hidden = !开关`），接线时必须成对派生，只派生一个字段会继续漏掉纯隐藏文件。
-
-- **已确认的事实（与走法无关，M3 冒烟据此断言）**：
+- **M3 冒烟据此断言的事实**：
   - `RawEntry.attrs` 取自 USN 记录的 `file_attributes`（`crates/ff-ntfs/src/usn.rs:323`），**不是默认 0**，故过滤真实有效、断言有意义。
   - 该过滤**对目录同样生效**（带 `SYSTEM` 属性的目录也被剔除），不是只管文件。
-  - `$RECYCLE.BIN` / `System Volume Information` 是**建索引期硬排除**（ntfs F2），根本进不了索引，**与本 toggle 无关**。M3 冒烟不要用回收站里的文件去验"打开开关就该看到"——必然失败。
+  - 引擎单测已覆盖 3 条属性向量 × 4 种开关组合（无属性 / 只 SYSTEM / 只 HIDDEN / 两者都有），ff-engine 13 → 15 条测试。
+  - **防呆**：`$RECYCLE.BIN` / `System Volume Information` 是**建索引期硬排除**（ntfs F2），根本进不了索引，**与本 toggle 无关**。M3 冒烟不要用回收站里的文件去验"打开开关就该看到"——必然失败。
 
 - 原型阶段 `App.tsx` 一律传常量 `DEFAULT_OPTS`，三个开关只改界面状态、**不产生可观测行为**：MockEngine 不消费 `opts`，若硬造一份"看起来生效"的过滤，等于用假行为掩盖真实链路未通。故保持不接，并在本表留痕，等 M3 接真实引擎时一次性接上。【doc-audit 提示 + 自行决定：不造假】
 
