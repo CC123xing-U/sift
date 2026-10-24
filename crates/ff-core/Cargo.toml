@@ -6,4 +6,10 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-# Track B 按 DESIGN.md §2.1 清单添加（rayon / memchr / rustc-hash 等），并上报 Orchestrator 登记。
+# Track B 按 DESIGN.md §2.1 清单添加，版本已核对 docs.rs / crates.io：
+# - ff-match（path）：T1 子串匹配器 + arena 并行扫描（DESIGN §3 允许的依赖方向）。
+# - rayon 1.12（MIT OR Apache-2.0）：AND 候选集并行校验。
+# - rustc-hash 2.1（MIT OR Apache-2.0）：FRN → EntryId 表（FxHashMap，不落盘）。
+ff-match = { path = "../ff-match" }
+rayon = "1.12"
+rustc-hash = "2.1"

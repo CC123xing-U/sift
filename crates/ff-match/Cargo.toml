@@ -6,4 +6,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-# Track B 按 DESIGN.md §2.1 清单添加（memchr 等；nucleo-matcher / ib-pinyin 属 M5）。
+# Track B 按 DESIGN.md §2.1 清单添加，版本已核对 docs.rs / crates.io：
+# - memchr 2.8（MIT OR Apache-2.0）：memmem 子串搜索，不自写 Boyer-Moore。
+# - rayon 1.12（MIT OR Apache-2.0）：名字 arena 按 0x00 边界切块并行扫描。
+# nucleo-matcher / ib-pinyin 属 M5（DESIGN §8.1），不在本轮。
+memchr = "2.8"
+rayon = "1.12"
