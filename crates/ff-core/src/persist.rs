@@ -164,7 +164,7 @@ impl<'a> Reader<'a> {
         F: FnMut(&[u8]) -> T,
     {
         let byte_len = self.u64()? as usize;
-        if byte_len % elem != 0 {
+        if !byte_len.is_multiple_of(elem) {
             return None;
         }
         let raw = self.take(byte_len)?;
@@ -262,33 +262,33 @@ impl VolumeIndex {
         if names_lower.len() != names.len() {
             return None;
         }
-        let name_off = r.slice(4, |b| u32_from(b))?;
+        let name_off = r.slice(4, u32_from)?;
         let n = name_off.len();
-        let parent = r.slice(4, |b| u32_from(b))?;
+        let parent = r.slice(4, u32_from)?;
         if parent.len() != n {
             return None;
         }
-        let flags = r.slice(2, |b| u16_from(b))?;
+        let flags = r.slice(2, u16_from)?;
         if flags.len() != n {
             return None;
         }
-        let frn = r.slice(8, |b| u64_from(b))?;
+        let frn = r.slice(8, u64_from)?;
         if frn.len() != n {
             return None;
         }
-        let size = r.slice(8, |b| u64_from(b))?;
+        let size = r.slice(8, u64_from)?;
         if size.len() != n {
             return None;
         }
-        let mtime = r.slice(8, |b| i64_from(b))?;
+        let mtime = r.slice(8, i64_from)?;
         if mtime.len() != n {
             return None;
         }
-        let ctime = r.slice(8, |b| i64_from(b))?;
+        let ctime = r.slice(8, i64_from)?;
         if ctime.len() != n {
             return None;
         }
-        let atime = r.slice(8, |b| i64_from(b))?;
+        let atime = r.slice(8, i64_from)?;
         if atime.len() != n {
             return None;
         }

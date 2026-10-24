@@ -97,3 +97,16 @@
     同步更新 `UI_SPEC.md` §4.8.1：① 表格拆成「M3」与「M5」两行；② 新增硬性规则「**不得统一套用同一个里程碑标签**——每个未接线项必须标出它真实的生效里程碑，以 DESIGN 的里程碑归属为准」；③ §6.3 小结的表述由「三个 toggle 都标 M3」改为「分别标 M3 / M5」。
     **验证**：`tsc -b` + `vite build` 绿；产物 bundle 中 `M3 接线后生效` ×1、`M5 生效` ×2，确认分别进了构建产物。commit `c4ead97`，合并 `4950a91`。
     **与 #55 的关系**：#55 把引擎侧 `fuzzy` / `pinyin` 注释降级为「预留，M5 生效」；本条把 UI 侧标签对齐为同一个 M5，两处口径一致，杜绝"引擎说 M5、界面说 M3"的矛盾。
+
+## 第四轮 · M2 持久化 + 增量落地（feat/m2-persistence，2026-10-24）
+
+> 来源：M2-②/③/④ 实现收尾（DESIGN §13-M2）。M2-① 持久化格式已于 `05a9509` 落地（零依赖 FFIX + 自 CRC32 + 原子写 + 容错 load），本轮补齐 Overlay / 后台轮询 / JournalUnavailable 重建 / 60s 回收 / 落盘接线。
+
+58. **持久化零依赖（不引入 serde / zstd / crc 第三方 crate）**：FFIX 格式手写二进制布局，`crc32` 自实现（查表法），写用「临时文件 + `rename`」原子提交，载入做长度/魔数/CRC 容错（损坏返回 `None` 让上层重建）。理由：DESIGN §2.1 准入且 §6 明确「优化路径（rkyv + mmap）M2 之后才考虑」，压缩（zstd）与零拷贝（rkyv/mmap）均**显式推迟**到后续里程碑；零依赖让 `ff-core` 维持平台无关、可跨平台编译/测试（与决策 6 的 `forbid(unsafe_code)` 同目标）。已在 `docs/DEPENDENCIES.md` 确认本轮未新增 crate。
+59. **`InProcessEngine` 全量重写落地 M2 全部行为（保留 15 个旧单测 + 新增 4 个）**：
+    - M2-② Base + Overlay：`Overlay { added_or_changed: FxHashMap<u64,OverlayEntry>, deleted: FxHashSet<u64> }`（`overlay.rs` 新模块）；`search` 合并 Base 命中（跳过 `overlay.deleted`、被 overlay override 的 frn）与 Overlay 命中（`overlay_matches` + `flags()`），`resolve_row` 走 `overlay_full_path` / `overlay_highlight`，`stale_meta` 时 `size`/`mtime` 置 `None`。
+    - M2-② 后台轮询 + 落盘：`background_loop` 每 100ms slice 调 `poll_all`（读 `read_changes` → `overlay.apply` → 更新 `next_usn`；`overlay.len() > 50,000` 触发 `merge_overlay_into_base`）→ `maybe_save`（`SAVE_INTERVAL=10s` 节流）→ `reap_stale`（`RESULT_TTL=60s` 回收命中集，落实决策 54）；`status().last_saved` 由 `now_filetime()` 填入。
+    - M2-③ `JournalUnavailable → rebuild`：`poll_volume` 捕获 `Err(ScanError::JournalUnavailable(_))` 调 `rebuild_volume`（丢弃 overlay + 用记录点 `journal_id/next_usn` 全量重建）；端到端由单测 `journal_unavailable_triggers_rescan` 覆盖。
+    - M2-④ 落盘接线：`save_volume`/`save_all` 写 `<serial>.ffix`，`load_all` 启动时读回；`set_save_dir` 由 `ff-cli`/上层设置。
+60. **`empty()` 不 spawn 后台线程 + `FakeScanner` 确定性驱动，规避后台线程竞争**：`InProcessEngine::empty()`（测试构造器）**不启动** `background_loop`，改暴露 `set_scanner(Box<dyn VolumeScanner>)` + `poll_once(vid)`，使单测能向 `FakeScanner`（持有 `changes/next_usn/full/unavailable` 字段）注入合成变更并**确定性**触发 `apply`/`rebuild`，无后台线程与时间竞争。`FakeScanner::read_changes` 在 `unavailable=true` 时返回 `JournalUnavailable`。4 个新增单测：`overlay_upsert_reflected_in_search`、`overlay_remove_excluded_from_search`、`journal_unavailable_triggers_rescan`、`engine_persistence_roundtrip`。
+61. **门禁全绿（提交前）**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0（修掉 persist.rs 8 处 `redundant_closure` + `manual_is_multiple_of`、entry.rs `too_many_arguments`）；`cargo test --workspace` 退出 0（ff-engine 19 个单测全过，含 4 个新增）。**M2 端到端实机项（真实 journal 增量延迟 ≤1s、重启载入 ≤0.5s、强制 kill 后仍能载入）需管理员 + 真实 NTFS 卷，不进 CI（沿用决策 26），留待 M2 收尾实机复核。**

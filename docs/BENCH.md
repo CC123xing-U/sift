@@ -88,3 +88,33 @@
 > **口径说明**：M0 在同一真实卷上的朴素子串 `ntdll` 基线为 88.022 ms，走 SoA 索引后 `search` 为 1 ms。二者口径不同（朴素为逐条 `to_lowercase().contains`，含大量临时分配；索引走 memchr/rayon 并行 `memmem` 且结果已是 id），数量级差异可作参照，但不应作为严格的加速比。
 >
 > **未采集项**：本轮未测量端到端峰值内存（留给后续实机复核）。合成 2M 的内存实测（238.5 MB / 峰值 255.5 MB）见上节。
+
+## M2 · 持久化 + 增量（feat/m2-persistence，2026-10-24）
+
+> **口径**：M2 的真实卷端到端项（真实 journal 增量延迟、重启载入计时、强制 kill 演练）需管理员 + 真实 NTFS 卷，**不进 CI**（决策 26）。以下为 CI 单测覆盖 + 设计参数，真实计时待 M2 收尾实机复核（见 DESIGN §13-M2「状态」）。
+
+### CI 单测覆盖（ff-engine，`cargo test -p ff-engine`，19 个单测）
+
+| 验证点 | 单测 | 覆盖内容 |
+|---|---|---|
+| Overlay upsert 反映到搜索 | `overlay_upsert_reflected_in_search` | `FakeScanner` 注入 upsert → `search` 命中新增条目 |
+| Overlay remove 从搜索排除 | `overlay_remove_excluded_from_search` | `FakeScanner` 注入 delete → `search` 不再命中 |
+| journal 失效触发全量重建 | `journal_unavailable_triggers_rescan` | `FakeScanner.unavailable=true` → `JournalUnavailable` → `rebuild_volume` 重建索引且结果一致 |
+| 持久化 roundtrip | `engine_persistence_roundtrip` | `save_all` 写 `<serial>.ffix` → `load_all` 读回 → `query` 命中一致 |
+
+### 设计参数（落地值，非实测性能）
+
+| 参数 | 值 | 说明 |
+|---|---:|---|
+| `MERGE_THRESHOLD` | 50,000 | Overlay 条目数超此阈值触发 `merge_overlay_into_base` |
+| 后台轮询 slice | 100 ms | `background_loop` 每轮 `poll_all → maybe_save → reap_stale` |
+| `SAVE_INTERVAL` | 10 s | 落盘节流，避免每次变更都写盘 |
+| `RESULT_TTL` | 60 s | 命中集无访问回收（落实决策 54，#54 缺口关闭） |
+| FFIX 容错 | 长度/魔数/CRC 校验 | 损坏文件 `load` 返回 `None` → 上层重建，**不崩溃** |
+
+### 待实机复核（不在 CI）
+
+- 重启载入 ≤ 0.5s：设计目标，真实大卷计时待补。
+- 被索引卷 create/rename/move/delete 后 ≤ 1s 搜索结果正确：单测覆盖逻辑，真实 journal 端到端需管理员实机。
+- 保存中强制结束进程仍能载入：self-CRC32 损坏检测 + 降级重建设计已落地，CI 有容错 `load` 路径（损坏→`None`），实机 kill 演练待补。
+- 合并期间持续搜索 p99 延迟：merger 在阈值触发、同步但边界有限，p99 待实机测。

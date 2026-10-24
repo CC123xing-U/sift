@@ -221,6 +221,7 @@ dependencies = [
  "ff-core",
  "ff-match",
  "ff-ntfs",
+ "rustc-hash",
 ]
 
 [[package]]

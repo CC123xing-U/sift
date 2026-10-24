@@ -9,3 +9,4 @@ publish = false
 ff-core = { path = "../ff-core" }
 ff-match = { path = "../ff-match" }
 ff-ntfs = { path = "../ff-ntfs" }
+rustc-hash = "2.1"

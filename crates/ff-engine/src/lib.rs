@@ -10,11 +10,13 @@
 
 pub mod api;
 pub mod inprocess;
+pub mod overlay;
 
 pub use api::{
     EngineClient, EngineError, EngineStatus, OpenAction, ParseError, RequestId, Result, ResultRow,
     SearchOptions, SearchRequest, SearchSummary, SortKey, SortSpec, VolumeId, VolumeState,
     VolumeStatus,
 };
+pub use overlay::{Overlay, OverlayEntry};
 
 pub use inprocess::InProcessEngine;

@@ -351,6 +351,7 @@ impl VolumeIndex {
     /// 已是解析后的 `EntryId`），且无法从列还原全量扫描期的诊断计数，故
     /// `unresolved_parents` / `duplicate_frns` 置 0（仅为诊断信息，不影响查询）。
     /// FRN 映射 / `cjk_ids` / `path_prefix` / `root_id` 由列重建。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_raw(
         volume: VolumeInfo,
         names: Vec<u8>,
