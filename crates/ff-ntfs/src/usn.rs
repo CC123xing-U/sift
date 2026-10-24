@@ -14,6 +14,8 @@
 //! M2 落地时二选一：ntfs-reader 的 `Journal`（支持 `NextUsn::Custom` 续读）或裸
 //! `FSCTL_READ_USN_JOURNAL` + 本模块解析；无论哪条路，合并规则都是本模块这份。
 
+use crate::{Change, RawEntry};
+
 /// FRN 掩码：屏蔽高 16 位序列号，保留低 48 位记录号（DESIGN §5.3）。
 pub const FRN_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
@@ -290,6 +292,46 @@ pub fn merge_usn_events(records: &[ParsedUsnRecord]) -> Vec<UsnEvent> {
         .iter()
         .filter_map(classify_usn_record)
         .collect::<Vec<_>>()
+}
+
+/// 把一条解析后的记录转换为契约 [`Change`]（reason 合并规则见 [`classify_usn_record`]）。
+///
+/// - 无事件（非 `CLOSE` 中间记录 / 关闭但无已知 reason）→ `None`；
+/// - `FILE_DELETE` → `Change::Remove { frn }`（frn 已掩码）；
+/// - 其余（创建 / 改名 / 写入 / 元数据）→ `Change::Upsert(RawEntry)`。
+///
+/// USN 记录**不含**文件大小与可靠时间戳：`size` 置 0，三时间戳统一用记录的
+/// `timestamp`（FILETIME）。消费方应据此标记 `STALE_META` 并在后台补齐
+/// （DESIGN §4.3）；`name` 为 `None` 时保留原条目名字（非改名事件不带名字）。
+pub fn record_to_change(record: &ParsedUsnRecord) -> Option<Change> {
+    match classify_usn_record(record)? {
+        UsnEvent::Remove { frn } => Some(Change::Remove { frn }),
+        UsnEvent::Upsert {
+            frn,
+            parent_frn,
+            name,
+            is_dir,
+            attrs,
+        } => Some(Change::Upsert(RawEntry {
+            frn,
+            parent_frn,
+            name: name.unwrap_or_default(),
+            is_dir,
+            attrs,
+            size: 0,
+            mtime: record.timestamp,
+            ctime: record.timestamp,
+            atime: record.timestamp,
+        })),
+    }
+}
+
+/// 把解析后的记录序列按顺序转换为 [`Change`] 序列（过滤掉无事件的记录）。
+///
+/// 供 `scanner.rs::read_changes` 在 M2 落地时使用；与 [`merge_usn_events`] 共用同一份
+/// reason 合并规则，只是输出类型不同（契约 [`Change`] vs 内部 [`UsnEvent`]）。
+pub fn records_to_changes(records: &[ParsedUsnRecord]) -> Vec<Change> {
+    records.iter().filter_map(record_to_change).collect()
 }
 
 #[cfg(test)]
@@ -629,6 +671,81 @@ mod tests {
             major_version: 2,
         }];
         assert!(merge_usn_events(&records).is_empty());
+    }
+
+    #[test]
+    fn record_to_change_upsert_builds_raw_entry() {
+        // 合成一条 V2 记录：目录、FILE_CREATE|CLOSE、带文件名。
+        let buf = journal_buffer(
+            0,
+            &[v2_record(
+                100,
+                0x0001_0000_0000_0028,
+                5,
+                reason::FILE_CREATE | reason::CLOSE,
+                FILE_ATTRIBUTE_DIRECTORY,
+                "目录",
+            )],
+        );
+        let parsed = parse_usn_journal_buffer(&buf);
+        assert_eq!(parsed.stopped_at, None);
+        assert_eq!(parsed.records.len(), 1);
+
+        let changes = records_to_changes(&parsed.records);
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            Change::Upsert(e) => {
+                // frn 取低 48 位：高 16 位序列号被屏蔽。
+                assert_eq!(e.frn, 0x28);
+                assert_eq!(e.parent_frn, 5);
+                assert_eq!(e.name, "目录");
+                assert!(e.is_dir, "FILE_ATTRIBUTE_DIRECTORY 应判为目录");
+                assert_eq!(e.attrs, FILE_ATTRIBUTE_DIRECTORY);
+                assert_eq!(e.size, 0, "USN 记录不含 size");
+                // 三时间戳统一用记录的 TimeStamp 字段。
+                assert_eq!(e.mtime, 1_300_000_000_000_000_000);
+                assert_eq!(e.ctime, 1_300_000_000_000_000_000);
+                assert_eq!(e.atime, 1_300_000_000_000_000_000);
+            }
+            other => panic!("期望 Upsert，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_to_change_delete_is_remove() {
+        let buf = journal_buffer(
+            0,
+            &[v2_record(
+                100,
+                0x0000_0000_0000_00C8,
+                5,
+                reason::FILE_DELETE | reason::CLOSE,
+                0,
+                "gone.txt",
+            )],
+        );
+        let parsed = parse_usn_journal_buffer(&buf);
+        let changes = records_to_changes(&parsed.records);
+        assert_eq!(changes, vec![Change::Remove { frn: 0xC8 }]);
+    }
+
+    #[test]
+    fn record_to_change_ignores_non_close_intermediate() {
+        // 只有 FILE_CREATE 没有 CLOSE 的中间记录不应产出事件。
+        let buf = journal_buffer(
+            0,
+            &[v2_record(100, 9, 5, reason::FILE_CREATE, 0x20, "x.txt")],
+        );
+        let parsed = parse_usn_journal_buffer(&buf);
+        assert!(records_to_changes(&parsed.records).is_empty());
+    }
+
+    #[test]
+    fn frn_mask_low_48_bits_matches_ff_core() {
+        // 与 ff-core 一致：高 16 位序列号被屏蔽。
+        assert_eq!(mask_frn(0x0001_0000_DEAD_BEEF), 0x0000_0000_DEAD_BEEF);
+        // 0x0001_0000_DEAD_BEEF 低 48 位 == 0x0000_0000_DEAD_BEEF
+        assert_eq!(mask_frn(0x0001_0000_DEAD_BEEF), 0xDEAD_BEEF);
     }
 
     #[test]
