@@ -21,6 +21,15 @@
 14. **本轮 UI 范围**：Track C 只交付 `docs/UI_SPEC.md` 并停下等批准（用户工作流 §5 第 2 步）；前端原型（`app/`，vite + React + TS + MockEngine）批准后再做。`app/` 本轮不进 Rust workspace（Tauri 外壳属 M3）。
 15. **engine 实现不在本轮**：ff-engine 本轮只冻结 `api.rs`；`InProcess` 实现、Base+Overlay、落盘属 M2，因此 ff-cli 的 `search` 子命令也留下轮。
 
-## 合并期追加
+## 合并期追加（2026-10-24 第一轮收尾）
 
-（合并时记录：依赖登记、BENCH 数据来源、修复记录等）
+16. **Track B 三处 API 偏离冻结片段，Orchestrator 审查后接受**：
+    - `IndexBuilder::new(VolumeInfo)`：构造函数接收 `VolumeInfo`（而非冻结片段里未定的入参）；理由：索引必须携带卷元数据，且 `VolumeInfo` 已在决策 4 归 ff-core。
+    - `write_path(&self, id, buf: &mut Vec<u8>) -> bool`：返回 `bool`（路径成功写出为 true，遇环/越界为 false），与 DESIGN §4.2「路径现算、失败可降级」一致；原冻结片段未规定返回值。
+    - `highlight_ranges(id, &q) -> Vec<Range<usize>>`：作为 `VolumeIndex` 的方法（而非独立函数），与 `search`/`write_path` 同簇；理由：高亮依赖索引内部 arena，方法形态更内聚。
+    - 上述三点均为**实现形态**调整，未改动跨 crate 契约类型（`Query`/`ParseError`/`EntryId`/`NONE`）。
+17. **`CancelToken` 对齐冻结签名**：Track B 初版为独立 `AtomicBool`，合并前改为 `pub struct CancelToken(Arc<AtomicBool>)`，与 `ff-engine::api` 的共享取消语义一致；已在 `ff-core::cancel` 导出。
+18. **依赖登记**：见 `docs/DEPENDENCIES.md`（ntfs-reader / windows / rayon / memchr / rustc-hash / criterion 全部登记）。
+19. **BENCH 数据来源**：合成数据 2M 实测由 Track D 记录于 `docs/BENCH.md`「M1 合成数据」；真实卷 M0（C: 849,366 条 / 5.312s）由 Orchestrator 追加于同文件「M0 真实卷摸底」，原始明细见 `crates/ff-ntfs/NOTES.md`。
+20. **合并顺序与冲突处理**：按 A→B→D（C 已先入 main）顺序合并；A、D 均因 `Cargo.lock` 与 main 冲突，统一以 `cargo generate-lockfile` 重新解析（无语义冲突，仅依赖集合并集）。ff-core/ff-match 由 B 独家拥有，D 的覆盖层已剔除后才合并（见下条）。
+21. **Track D 的 ff-core/ff-match 覆盖层已剔除**：D 的分支在 B 之前切出，为编译基准曾把 B 的 ff-core/ff-match 源码整块拷入工作树；合并前已用 `git checkout agent/b --` 取权威版本验证通过，再把覆盖层 `reset`+`clean` 还原，仅提交 `bench/`+`tests/`+`BENCH.md`+`Cargo.lock`，未污染核心 crate。

@@ -11,9 +11,23 @@
 - 磁盘：HP SSD EX900 1TB（固定盘）+ WD P40 Game Drive 1TB（外置）；工作区位于 D: 卷
 - 采集日：2026-10-24（Orchestrator 采集，Track D 可补充磁盘型号细目）
 
-## M0 · 真实卷摸底（Track A）
+## M0 · 真实卷摸底（Track A，真实 NTFS 卷）
 
-（合并时由 Orchestrator 追加）
+> 原始明细见 `crates/ff-ntfs/NOTES.md`。以下为一次实机摸底（release、管理员权限、单次实测），不是多次平均或稳定性能承诺。
+
+- 机器：Windows 10 专业工作站版 x64；AMD Ryzen 5 5600U（6 核 / 12 线程）；15.3 GB 内存；C: 为固定 NTFS 卷（非工作区所在盘，工作区在 D:）。
+- 运行：`ff-cli scan C: ntdll`（先 `FSCTL_QUERY_USN_JOURNAL` 记录 journal_id/next_usn，再两遍读 `$MFT`）。
+- 卷序列号：`0x9EA0C151`；扫描前 USN：Journal ID `133932538930439016`，Next USN `24804370080`。
+
+| 条目数 | 指标 | 实测值 |
+|---|---:|---:|
+| 849,366 | 全量耗时（含 USN 查询 + MFT 两遍 + 写入 `Vec<RawEntry>`，不含卷枚举/搜索） | 5.312 s |
+| 849,366 | 父解析警告（挂到根下的条目） | 0 |
+| 849,366 | 扫描后峰值 Working Set | 142.66 MiB（149,585,920 B） |
+| 849,366 | 扫描后当前 Working Set | 106.86 MiB（112,054,272 B） |
+| — | 朴素子串 `ntdll`（逐条 `to_lowercase().contains`，命中 60 条） | 88.022 ms |
+
+> 说明：M0 朴素搜索未走后续 memchr/rayon 快速路径，仅作基线对照；真实索引建立耗时以 M0 的 5.312 s 为准，合成 200 万档的 1.08 s 为不同（合成、SoA、流式）口径，二者不可直接比较。
 
 ## M1 · 合成数据（Track D）
 
