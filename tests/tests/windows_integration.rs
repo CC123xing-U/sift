@@ -116,7 +116,7 @@ fn raw_volume_open_smoke() {
 /// - 每个 `VolumeId` 的 `Display` 含序列号；
 /// - 对第一个卷调用 `full_scan`，条目数 > 0 且耗时 < 旧版基线 69s 的两倍（宽松）。
 #[test]
-#[ignore = "需要管理员权限与真实 NTFS 卷（DESIGN §14）；卷枚举 API 待 Track A 提交后启用"]
+#[ignore = "需要管理员权限与真实 NTFS 卷（DESIGN §14）；卷枚举的真实调用只在此手动模式下进行"]
 fn volume_enumeration_smoke() {
     // 最简可编译形式：验证契约类型可用；Display 含序列号。
     let vol = VolumeId {

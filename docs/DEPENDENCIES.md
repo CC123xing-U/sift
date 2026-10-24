@@ -7,10 +7,10 @@
 | 名称 | 版本 | 许可证 | 用途 | 引入 crate | 登记日 |
 |---|---|---|---|---|---|
 | ntfs-reader | 0.6.0 | MIT OR Apache-2.0 | MFT 分块读取（§5，M0 全量扫描） | ff-ntfs | 2026-10-24 |
-| windows | 0.62.2 | MIT OR Apache-2.0 | Win32 封装：卷枚举 / USN Journal / `GetProcessMemoryInfo` / 设备路径 | ff-ntfs | 2026-10-24 |
-| rayon | 1.12.0 | MIT OR Apache-2.0 | 名字 arena 并行扫描（§7 子串/AND） | ff-core | 2026-10-24 |
-| memchr | 2.8.3 | Unlicense OR MIT | `memmem` 子串快速路径（替代逐条 `contains`） | ff-core | 2026-10-24 |
-| rustc-hash | 2.1.3 | MIT OR Apache-2.0 | `FxHasher` 名称→id 反查索引（避免标准 HashMap 开销） | ff-core | 2026-10-24 |
+| windows | 0.62.2 | MIT OR Apache-2.0 | Win32 封装：卷枚举 / USN Journal / `GetProcessMemoryInfo` / 设备路径 | ff-ntfs、sift-bench（memprobe 进程内存） | 2026-10-24（第三轮补登 sift-bench） |
+| rayon | 1.12.0 | MIT OR Apache-2.0 | 名字 arena 并行扫描（§7 子串/AND）；AND 候选并行校验 | ff-core、ff-match | 2026-10-24（第三轮补登 ff-match） |
+| memchr | 2.8.3 | Unlicense OR MIT | `memmem` 子串快速路径（替代逐条 `contains`） | ff-match（经 ff-core 的 ff-match 依赖间接使用） | 2026-10-24（第三轮更正引入 crate） |
+| rustc-hash | 2.1.3 | MIT OR Apache-2.0 | `FxHasher` 名称→id 反查索引（避免标准 HashMap 开销） | ff-core、ff-ntfs（FRN 集合 / 父计数） | 2026-10-24（第三轮补登 ff-ntfs） |
 | criterion | 0.8.2 | Apache-2.0 OR MIT | 合成数据 criterion 基准（§14，dev-dependency） | sift-bench | 2026-10-24 |
 | time | 0.3.55 | MIT OR Apache-2.0 | `ntfs-reader` 的 `OffsetDateTime` → FILETIME 转换（§4.1/§5.1 时间单位） | ff-ntfs | 2026-10-24 |
 | tracing | 0.1.44 | MIT | USN 跳过的 V3/未知版本记录与解析中断的日志（§5.3；§2.1 准入） | ff-ntfs | 2026-10-24 |

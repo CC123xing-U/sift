@@ -66,3 +66,23 @@
 42. **chips 与 M4 修饰符的阶段错配 —— 取 A（UI 侧标注 + M3 前置禁用），本次不动引擎**：UI_SPEC §3.4 的 7 个 chips 写入 `ext:` / `folder:`，而 DESIGN §7.2（`DESIGN.md:258`）把二者列为 **M4 必做**，M1/M3 引擎不支持。点 chip 会命中 `ff-core::query` 的 `ParseError`（"修饰符语法尚未支持，计划 M4"），经 `SearchSummary::parse_error` 由 UI 弹**明确的语法错误条 + 0 结果**——是 M4 未实现的正常表现，**不构成 DESIGN 违背**（§7.3 的"容错降级"针对的是"正在打字的半成品输入"，实现已对未闭合引号降级）。当前原型由 MockEngine 自行实现这两个修饰符，故 chips 在原型里可用（有意，非越界实现）。
     **M3 接真实 Tauri 引擎前必须二选一**：① chips 置灰并说明原因（与 §3.4 删「全文」留 M7 同一先例）——**当前取 ①**；② 把 `ext:` / `folder:` 提前进 M3 引擎——属里程碑范围调整，需用户确认。**M3 开工前须复核本条。**
 43. **新增 `SearchOptions::hide_hidden`（team-lead 裁定走 ①）**：决策 37 接通的 `hide_system` 只过滤 `flags::SYSTEM`（0x4），而 DESIGN §11.3 / UI_SPEC 设置项写的是一项「隐藏系统/隐藏文件」——只带 `FILE_ATTRIBUTE_HIDDEN`（0x2）的文件仍会出现，开关拨了看不到变化。**当前形态：一个 toggle 同时驱动 `hide_system` 与 `hide_hidden`**，二者默认均为 `true`。引擎侧写两个**独立**判断（`inprocess.rs`），不合并成 `SYSTEM | HIDDEN` 掩码常量——M4 若把 UI 拆成两个 toggle，各映射一个字段即可，引擎不必再动。`hide_system` 的默认 `true` 与「`hide_system = !UI开关`」的取反方向**保持不变**（已核对：引擎默认 true ↔ UI 开关默认 false）。
+
+### 第三轮 · 文档复验修正（doc-verify，2026-10-24）
+
+> 来源：第三轮的独立复验（换一批眼睛复核 DESIGN §13 的 M0/M1/M2 验收项，并全仓搜索文档 / 注释与代码的矛盾）。
+> 本轮只改 `.md` 与注释，**未改任何 `.rs` / `.ts` 逻辑代码**；门禁（`cargo fmt --all -- --check` / `cargo test --workspace`）保持绿。
+> 编号接上文（#43 由 team-lead 的 `hide_hidden` 条目占用），故本节从 #44 起。
+
+44. **`crates/ff-ntfs/NOTES.md` 开头口径更正**：原文「`read_changes` 返回 `ScanError::Unsupported`，未实现 USN 增量」已过期——决策 25 之后 `NtfsVolumeScanner::read_changes`（`scanner.rs:148`）已真实实现。改为保留 M0 摸底原文 + 加注「已实现，但尚未被 `ff-engine` / `ff-cli` 接线」。理由：NOTES.md 是 M0 当时的实测记录，直接改写会让历史口径失真，故只加注。
+45. **`crates/ff-engine/src/lib.rs` 模块头重写**：原文「本轮（第一轮）只冻结 `api` 契约；引擎实现（卷管理、Base+Overlay、后台合并、落盘调度、`InProcess` 实现）属 M2，不在本轮范围」已过期——`inprocess.rs` 已交付 `InProcess`（`search` / `range` / `cancel` / `status` / `rescan` / `open` 全通）。改为「已落地 / 仍未落地」两段，并点明 `EngineStatus::last_saved` 恒为 `None`（无落盘）。理由：模块头是判断「这块做没做」的第一入口，过期描述比缺失更有害。
+46. **`bench/src/lib.rs` 模块头删除过期 `TODO(b-core)`**：`SynthEntry::into_entry_input` 从未存在、也不再需要——`build_index`（`bench/src/lib.rs:485`）直接构造 `ff_core::EntryInput`；改为指向 `build_index`。理由：Track B 早已交付 `EntryInput`，TODO 指向一个不存在的函数。
+47. **`tests/tests/windows_integration.rs` 的 `volume_enumeration_smoke` ignore 理由**：去掉「卷枚举 API 待 Track A 提交后启用」——`ff_ntfs::enumerate_volumes()` 已交付且已被 `ff-cli` 使用（同文件注释第 111 行亦如此声明）；改为「卷枚举的真实调用只在此手动模式下进行」。理由：ignore 的真实理由是需管理员权限，不是 API 未交付。
+48. **DESIGN.md §0 与 §3 的路径更正**：`docs/reference/` 目录不存在，三份参考文档实际在 `docs/` 根（`01-Everything-功能实现文档.md` / `02-Listary-功能实现文档.md` / `03-重写指南-取长补短.md`）；§3 目录树同时补上 `ui-reference/`（界面参考图）。理由：引用不存在的路径会让新读者找不到背景文档。
+49. **DESIGN.md §3 的 ff-cli 子命令列表更正**：由「index / search / bench / dump」改为「scan / search（已实现）；bench / dump 待后续里程碑（见 DECISIONS #40）」。理由：`index` 从未实现，全量扫描摸底实际由 `scan` 承担（决策 40），`bench` / `dump` 亦未落地。
+50. **`docs/DEPENDENCIES.md` 依赖登记更正**（版本已与 `Cargo.lock` 逐条核对，8 个 crate 全部一致）：`memchr` 的实际引入 crate 是 `ff-match`（原登记为 `ff-core`）；`rayon` 补登 `ff-match`；`rustc-hash` 补登 `ff-ntfs`（`scanner.rs` 的 FRN 集合 / 父计数）；`windows` 补登 `sift-bench`（`memprobe` 的 `GetProcessMemoryInfo`）。理由：DESIGN §0.2 要求登记簿与实际依赖一致，否则许可证与影响面排查会漏。
+51. **`bench/Cargo.toml` 注释更正**：删除「版本范围遵循 DESIGN §2.1 的 `>=0.59, <=0.62` 约定」——DESIGN §2.1 只规定用 `windows` crate，从未规定版本范围（全仓检索无此约定）。理由：引用不存在的约束会让后续维护者误以为存在版本上限。
+52. **决策 29 的记录更正（历史条目不改，此处更正）**：`VolumeIndex::highlight_ranges` 实际返回 `Vec<Range<u32>>`（`crates/ff-core/src/highlight.rs:21`），不是决策 29 写的 `Vec<Range<usize>>`；与 `ff_engine::api::ResultRow::name_matches: Vec<Range<u32>>`（`api.rs:107`）一致。
+53. **M2 复验结论（代码缺口，非文档可修，须用户确认是否补做）**：DESIGN §13-M2 的验收项里只有两项落地——排除规则（`scanner.rs:26`，决策 36）与 `read_changes` 真实实现（`scanner.rs:148`，决策 25）。持久化（§6）、Base+Overlay（§4.3）、后台合并、`read_changes` 的调用方、以及「journal id / next_usn 失效触发全量重建」的端到端行为**均未实现**：全仓无 `FFIX` / `zstd` / 落盘代码；`ff-engine` 与 `ff-cli` 没有任何 `read_changes` 调用点；`read_changes` 内部的失效判定（`scanner.rs:158` / `scanner.rs:165` 返回 `JournalUnavailable`）无人消费。`BENCH.md` 因此没有任何 M2 数据。理由：如实记录，避免把「库层已实现」当成「里程碑已达成」。
+54. **代码缺口：`InProcessEngine` 未实现 DESIGN §9 的「60 秒无访问释放命中集合」**（`api.rs:124` 引用该口径）：当前只在发起新搜索时 `clear()`（`inprocess.rs:161`），`cancel` 只置取消位，命中集合无超时回收，长会话下 `results` 只增不减。建议落点：`crates/ff-engine/src/inprocess.rs::search_impl` 或后台清理线程。
+55. **代码缺口：`SearchOptions::fuzzy` / `pinyin` 仍是死字段**（`api.rs:55-57` 声明默认 `true`，但 T2 / T3 属 M5，`ff-match` 尚无拼音 / 模糊匹配器，`search` 未读这两个字段）。与决策 37 修复 `hide_system` 是同类问题。建议：M5 接线时一并接通；若 M5 前想避免误导，可把字段注释改为「预留，M5 生效」。
+56. **可选改进（本轮未改）**：DESIGN §13-M0 要求「列出 `ntfs-reader` 的限制」，限制清单实际在 `crates/ff-ntfs/NOTES.md:33-40`，`BENCH.md` 的 M0 节（`BENCH.md:16`）只给了指引、正文未列。本轮不搬运，避免两处口径漂移；如希望 BENCH.md 自包含，可在其 M0 节补一行摘要 + 链接。

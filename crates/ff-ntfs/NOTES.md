@@ -1,6 +1,11 @@
 # ff-ntfs M0 实测与 ntfs-reader 发现
 
-日期：2026-10-24。范围仅含 MFT 全量扫描和 M0 朴素子串搜索；`VolumeScanner::read_changes` 返回 `ScanError::Unsupported`，未实现 USN 增量。
+日期：2026-10-24。范围含 MFT 全量扫描和 M0 朴素子串搜索。
+
+> 口径更正（第三轮文档复验）：USN 增量**已实现**——`NtfsVolumeScanner::read_changes`（`src/scanner.rs`）走
+> `FSCTL_READ_USN_JOURNAL` + `usn` 模块解析，不再返回 `ScanError::Unsupported`（见 `docs/DECISIONS.md` 决策 25）。
+> 本文件保留的是 M0 当时的摸底口径；**USN 增量尚未被 `ff-engine` / `ff-cli` 接线调用**，M2 的
+> Base+Overlay、后台合并与持久化（DESIGN §6）仍未落地。
 
 ## ntfs-reader 版本与接口
 

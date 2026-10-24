@@ -3,7 +3,7 @@
 > 项目暂名 **Sift**（可改）。一个 Windows 本地文件搜索工具：
 > **Everything 式的内存索引与速度 + Listary 式的匹配体验（模糊 / 拼音 / 评分排序）**。
 >
-> **本文档是权威。** `docs/reference/` 里的三份分析文档（01-Everything、02-Listary、03-重写指南）只作背景参考；
+> **本文档是权威。** `docs/` 下的三份分析文档（`01-Everything-功能实现文档.md`、`02-Listary-功能实现文档.md`、`03-重写指南-取长补短.md`）只作背景参考；
 > 两者冲突时，以本文档为准。第 2.3 节列出了参考文档里**不要照抄**的内容。
 
 ---
@@ -115,13 +115,14 @@ sift/
 │  ├─ ff-engine/   把以上粘合：卷管理、Base+Overlay、后台合并、落盘调度、对外 trait 实现
 │  ├─ ff-ipc/      协议类型（serde）· 命名管道 server/client · HTTP server（M6）
 │  ├─ ff-service/  Windows 服务外壳（M6）
-│  └─ ff-cli/      命令行调试工具：index / search / bench / dump
+│  └─ ff-cli/      命令行调试工具：scan / search（已实现）；bench / dump 待后续里程碑（见 DECISIONS #40）
 ├─ app/            Tauri v2（src-tauri/ 与 React TS 前端 src/）
 ├─ bench/          合成数据生成器 + criterion 基准
 └─ docs/
    ├─ DESIGN.md    （本文件）
    ├─ DECISIONS.md  BENCH.md  DEPENDENCIES.md
-   └─ reference/   （三份原始分析文档，只读）
+   ├─ 01-Everything-功能实现文档.md / 02-Listary-功能实现文档.md / 03-重写指南-取长补短.md（三份原始分析文档，只读）
+   └─ ui-reference/（界面参考图）
 ```
 
 依赖方向：`ff-engine → ff-ntfs, ff-core, ff-match`；`ff-ipc → ff-engine`；`app → ff-engine 或 ff-ipc`。`ff-core` 与 `ff-match` 不依赖任何其他本项目 crate（`ff-match` 可被 `ff-core` 依赖或并列，保持无环）。

@@ -18,8 +18,8 @@
 //!
 //! # 与 ff-core 的关系
 //! 产出 [`SynthEntry`]，字段与 `ff_core::EntryInput` / `ff_ntfs::RawEntry`
-//! （DESIGN §4.1 / §5.1）一一对应。待 Track B 提交 `EntryInput` 后，
-//! 转换点集中在 [`SynthEntry::into_entry_input`]（TODO(b-core)）。
+//! （DESIGN §4.1 / §5.1）一一对应；转换点集中在 [`build_index`]
+//! （`EntryInput` 已在 ff-core 交付，直接构造、不再需要中间转换函数）。
 //! 时间戳单位与 ff-ntfs 契约一致：Windows FILETIME（i64，100ns，1601 纪元）。
 
 use std::fmt;

@@ -156,7 +156,8 @@ pub trait VolumeScanner {
 // ScanMeta / ScanError / VolumeScanner）未做任何改动。
 
 /// USN Journal 纯逻辑（FRN 掩码 · 记录字节解析 · reason 合并规则）。
-/// M2 构建块，本轮按任务要求提前交付并覆盖单元测试；不依赖 Windows。
+/// M2 已落地：`scanner::NtfsVolumeScanner::read_changes` 的解析层就是本模块；
+/// 已覆盖单元测试，不依赖 Windows（可在任意平台跑）。
 pub mod usn;
 
 /// `NtfsVolumeScanner`：`VolumeScanner` 的 NTFS 实现（`full_scan` + `read_changes`）。
