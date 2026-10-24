@@ -52,8 +52,12 @@ pub struct SearchOptions {
     /// 查询是否默认按正则解释（`regex:`，M4 细化；当前仅随请求传递）。
     pub regex_default: bool,
     /// 启用模糊匹配 tier T3（默认 true，见 DESIGN §8.1）。
+    /// **预留字段，M5 生效**：T3 属 M5（DESIGN §8.1 / §13），`ff-match` 尚无模糊匹配器，
+    /// `InProcessEngine::search` **当前不读此字段**——默认值 `true` 不代表模糊匹配已可用。
     pub fuzzy: bool,
     /// 启用拼音匹配 tier T2（默认 true，见 DESIGN §8.1）。
+    /// **预留字段，M5 生效**：T2 属 M5（DESIGN §8.1 / §13），`ff-match` 尚无拼音匹配器，
+    /// `InProcessEngine::search` **当前不读此字段**——默认值 `true` 不代表拼音匹配已可用。
     pub pinyin: bool,
     /// 隐藏系统文件（DESIGN §5.2：`$MFT` 等元数据默认可在设置中隐藏）。
     /// 只过滤 `flags::SYSTEM`（`FILE_ATTRIBUTE_SYSTEM`）；不过滤隐藏属性。
