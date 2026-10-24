@@ -1,20 +1,21 @@
 //! 协作式取消令牌（DESIGN §2.2-6：每次按键取消上一次搜索）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// 取消令牌：长循环定期检查（DESIGN §7.3：约每 4K 条一次）。
 ///
-/// `Clone` 语义为**共享同一标志**（内部 `AtomicBool`），便于把同一令牌
-/// 交给搜索线程与 UI 线程。
+/// 内部 `Arc<AtomicBool>`：`Clone` 廉价且**共享同一标志**
+/// （Orchestrator 冻结签名），可分别交给 UI 线程与搜索线程。
 #[derive(Debug, Default)]
 pub struct CancelToken {
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl CancelToken {
     pub fn new() -> Self {
         Self {
-            cancelled: AtomicBool::new(false),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -37,7 +38,7 @@ impl CancelToken {
 impl Clone for CancelToken {
     fn clone(&self) -> Self {
         Self {
-            cancelled: AtomicBool::new(self.cancelled.load(Ordering::SeqCst)),
+            cancelled: Arc::clone(&self.cancelled),
         }
     }
 }
@@ -65,23 +66,26 @@ mod tests {
     }
 
     #[test]
-    fn clone_is_independent_snapshot() {
+    fn clone_shares_state() {
+        // 冻结签名：内部 Arc<AtomicBool>，Clone 廉价且共享同一标志
         let t = CancelToken::new();
         let c = t.clone();
-        t.cancel();
-        // 克隆是快照，不随原令牌变化（引擎按需选择共享引用或快照）
         assert!(!c.is_cancelled());
+        t.cancel();
+        assert!(c.is_cancelled()); // 克隆随原令牌一起取消
+        c.reset();
+        assert!(!t.is_cancelled()); // 反向亦然
     }
 
     #[test]
     fn cancel_from_thread() {
         let t = CancelToken::new();
-        let t2 = CancelToken::new();
+        let c = t.clone();
         std::thread::spawn(move || {
-            t2.cancel();
+            c.cancel();
         })
         .join()
         .unwrap();
-        assert!(!t.is_cancelled());
+        assert!(t.is_cancelled());
     }
 }
