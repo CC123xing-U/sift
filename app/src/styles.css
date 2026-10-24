@@ -31,6 +31,17 @@
   --icon-default: #595959;
   --window-border: #e9e9e9;
 
+  /* 控件态（UI_SPEC §2.1 / §2.2）：
+     关闭态轨道取 border-hover #8F8F8F（复用现有 token，3.23:1），
+     旋钮为白色 → 控件轮廓与旋钮位置在白底上均 ≥3:1。 */
+  --toggle-track-off: #8f8f8f;
+  --knob-bg: #ffffff;
+  /* 浅色开启态轨道 = accent #0067C0，白旋钮 5.67:1。 */
+  --knob-bg-on: #ffffff;
+
+  /* 预览外壳底色（浏览器原型里模拟桌面，Tauri 阶段不使用） */
+  --preview-bg: #6f6f6f;
+
   /* 字体栈（UI_SPEC §2.3） */
   --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei",
     "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
@@ -75,6 +86,15 @@
     --error: #ff99a4;
     --icon-default: #c6c6c6;
     --window-border: #2e2e2e;
+
+    /* 深色：关闭态保持 #4D4D4D 轨道 + 白旋钮（8.45:1）；
+       开启态为 accent #60CDFF 轨道，旋钮改用 text-on-accent #1B1B1B（9.58:1，
+       与"选中 chip = accent 实底 + 深字"同一套语言）。 */
+    --toggle-track-off: #4d4d4d;
+    --knob-bg: #ffffff;
+    --knob-bg-on: #1b1b1b;
+
+    --preview-bg: #6f6f6f;
     --window-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
   }
 }
@@ -91,12 +111,39 @@ body {
 
 body {
   font-family: var(--font-sans);
-  background: #6f6f6f;
+  background: var(--preview-bg);
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
+}
+
+/* 仅供屏幕阅读器：视觉隐藏但仍可被读屏与 aria-live 播报 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 窗口隐藏后的唤出入口（原型模拟全局热键；M3 起由 Tauri 处理） */
+.relaunch {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--window-border);
+  border-radius: 4px;
+  padding: 8px 16px;
+  min-height: 24px;
+  cursor: pointer;
 }
 
 /* 浮动窗口（UI_SPEC §3.1） */
@@ -118,6 +165,7 @@ body {
 
 /* 顶栏：输入 + chips */
 .topbar {
+  position: relative; /* 错误条浮层的定位参照 */
   background: var(--bg-app);
   padding: 8px 12px 0;
   flex: 0 0 auto;
@@ -172,6 +220,10 @@ body {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
+.iconbtn:active {
+  background: var(--bg-subtle);
+  transform: scale(0.94);
+}
 
 .chips {
   display: flex;
@@ -195,6 +247,9 @@ body {
 .chip:hover {
   border-color: var(--border-hover);
 }
+.chip:active {
+  transform: scale(0.97);
+}
 .chip-on {
   background: var(--bg-chip-selected);
   border-color: var(--bg-chip-selected);
@@ -202,12 +257,17 @@ body {
   font-weight: 500;
 }
 
+/* 错误条：绝对定位浮层，避免撑高顶栏导致列表跳动（UI_SPEC §3.3） */
 .errorbar {
+  position: absolute;
+  top: 52px;
+  left: 12px;
+  right: 12px;
+  z-index: 3;
   display: flex;
   align-items: center;
   gap: 6px;
   height: 28px;
-  margin: 4px 0 6px;
   padding: 0 10px;
   background: var(--bg-error);
   color: var(--text-error);
@@ -247,9 +307,11 @@ body {
   }
 }
 
+/* UI_SPEC §2.5 / §3.1：四列最小占用 140+110+68+116 = 434px，
+   连同左右内边距 24px 后远小于最小窗口宽 640px，无需断点隐藏列。 */
 .colhead {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 240px 72px 132px;
+  grid-template-columns: minmax(140px, 1fr) minmax(110px, 1fr) 68px 116px;
   align-items: center;
   height: 24px;
   padding: 0 12px;
@@ -261,6 +323,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  height: 24px; /* WCAG 2.2 AA 2.5.8：目标尺寸 ≥24×24 */
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -273,12 +336,16 @@ body {
 .col:hover {
   color: var(--text-primary);
 }
+.col:active {
+  transform: scale(0.97);
+}
 .col.c-size,
 .col.c-mod {
   justify-content: flex-end;
 }
 .sortind {
-  font-size: 9px;
+  font-size: 12px; /* UI_SPEC §2.3.2：不出现 11px 以下文字 */
+  line-height: 1;
   color: var(--accent);
 }
 
@@ -286,6 +353,7 @@ body {
   position: relative;
   flex: 1 1 auto;
   overflow-y: auto;
+  overflow-x: hidden;
   outline: none;
 }
 .row {
@@ -294,11 +362,11 @@ body {
   left: 0;
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 240px 72px 132px;
+  grid-template-columns: minmax(140px, 1fr) minmax(110px, 1fr) 68px 116px;
   align-items: center;
   padding: 0 12px;
   border-bottom: 1px solid var(--border-subtle);
-  cursor: default;
+  cursor: pointer;
   contain: layout style;
 }
 .row:hover {
@@ -310,6 +378,11 @@ body {
 }
 .row.sel:hover {
   background: var(--bg-selected-hover);
+}
+/* 焦点环画在行内边（负偏移），避免被滚动容器裁切 */
+.row:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
 }
 .row .c-name {
   display: flex;
@@ -354,14 +427,6 @@ body {
   color: var(--text-on-highlight);
   font-weight: 600;
   border-radius: 2px;
-}
-.dirbadge {
-  flex: 0 0 auto;
-  font-size: 10px;
-  color: var(--text-tertiary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 3px;
-  padding: 0 3px;
 }
 .skel {
   height: 12px;
@@ -413,15 +478,19 @@ body {
   color: var(--text-accent);
   font-size: 12px;
   font-family: var(--font-sans);
-  cursor: pointer;
-  padding: 2px 4px;
+  min-height: 24px; /* WCAG 2.2 AA 2.5.8 */
+  padding: 4px 8px;
   border-radius: 3px;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 .linkbtn:hover {
   text-decoration: underline;
+}
+.linkbtn:active {
+  transform: scale(0.97);
 }
 
 /* 底栏 */
@@ -471,9 +540,13 @@ body {
 .backbtn:hover {
   background: var(--bg-hover);
 }
+.backbtn:active {
+  transform: scale(0.97);
+}
 .settings-title {
   font-size: 16px;
   font-weight: 600;
+  margin: 0;
 }
 .settings-body {
   flex: 1 1 auto;
@@ -487,7 +560,7 @@ body {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-secondary);
-  margin-bottom: 12px;
+  margin: 0 0 12px;
 }
 .set-row {
   display: flex;
@@ -500,16 +573,98 @@ body {
 .set-row.disabled {
   opacity: 0.5;
 }
+/* 可变高度的设置块（卷/排除路径/语言等成组控件） */
+.set-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.set-block-label {
+  font-weight: 500;
+  font-size: 13px;
+  padding: 0;
+}
+.set-fieldset {
+  border: none;
+  margin: 0;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.checkbox-row,
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.exclude-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.exclude-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+}
+.exclude-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.exclude-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pathinput {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+}
+.pathinput::placeholder {
+  color: var(--text-tertiary);
+}
+.pathinput:focus {
+  border-color: var(--border-focus);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--border-focus);
+}
 .toggle {
   width: 40px;
   height: 20px;
+  border: none;
+  padding: 0;
   border-radius: 10px;
-  background: var(--border-strong);
+  background: var(--toggle-track-off);
   position: relative;
+  flex: 0 0 auto;
+  cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out);
 }
 .toggle.on {
   background: var(--accent);
+}
+.toggle:disabled {
+  cursor: not-allowed;
 }
 .toggle .knob {
   position: absolute;
@@ -518,10 +673,11 @@ body {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--knob-bg);
   transition: transform var(--dur-fast) var(--ease-out);
 }
 .toggle.on .knob {
+  background: var(--knob-bg-on);
   transform: translateX(20px);
 }
 .hotkey,
@@ -531,6 +687,21 @@ body {
   border: 1px solid var(--border-subtle);
   border-radius: 4px;
   padding: 2px 8px;
+}
+.hotkey-btn {
+  min-height: 24px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+.hotkey-btn:hover {
+  border-color: var(--border-hover);
+}
+.hotkey-btn:active {
+  transform: scale(0.97);
+}
+.hotkey-btn.recording {
+  border-color: var(--accent);
+  color: var(--text-accent);
 }
 
 /* 焦点可达性 */

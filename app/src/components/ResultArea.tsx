@@ -18,7 +18,7 @@ import {
 } from '../types';
 import { I18N } from '../i18n';
 import { EmptyIcon, FileIcon, FolderIcon, RetryIcon, WarnIcon } from '../icons';
-import { formatSize, formatTime } from '../format';
+import { formatSize, formatTime, formatTimeFull } from '../format';
 
 export interface ResultAreaHandle {
   moveSelection(delta: number): void;
@@ -26,6 +26,7 @@ export interface ResultAreaHandle {
   home(): void;
   end(): void;
   open(action: OpenAction): void;
+  hasSelection(): boolean;
 }
 
 interface Props {
@@ -87,8 +88,27 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   });
   const items = virtualizer.getVirtualItems();
 
+  /** roving tabindex：把 DOM 焦点移到指定行。 */
+  const focusRow = (i: number) => {
+    parentRef.current?.querySelector<HTMLElement>(`#sift-row-${i}`)?.focus();
+  };
+  const listHasFocus = () =>
+    !!parentRef.current && parentRef.current.contains(document.activeElement);
+
+  const move = (next: number) => {
+    const clamped = Math.max(0, Math.min(total - 1, next));
+    const keepFocusInList = listHasFocus();
+    setSelected(clamped);
+    virtualizer.scrollToIndex(clamped, { align: 'auto' });
+    // 焦点已在列表内时焦点跟随选中行；焦点在输入框时不动，保证还能继续打字。
+    if (keepFocusInList) requestAnimationFrame(() => focusRow(clamped));
+  };
+
   useEffect(() => {
+    const keepFocusInList = listHasFocus();
     setSelected(0);
+    if (keepFocusInList) requestAnimationFrame(() => focusRow(0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId]);
 
   // 加载可见窗口内缺失的行（UI_SPEC §6.5：可见 ±1 屏，按 id 丢弃旧回包）。
@@ -115,12 +135,6 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, total, items, engine]);
 
-  const move = (next: number) => {
-    const clamped = Math.max(0, Math.min(total - 1, next));
-    setSelected(clamped);
-    virtualizer.scrollToIndex(clamped, { align: 'auto' });
-  };
-
   useImperativeHandle(
     ref,
     () => ({
@@ -133,6 +147,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
         if (i >= total) return;
         engine.open(currentId, i, action);
       },
+      hasSelection: () => total > 0,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [total, currentId, engine, virtualizer],
@@ -141,6 +156,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   const scanning = status.volumes.some((v) => v.state === 'scanning');
   const errored = status.volumes.some((v) => v.state === 'error');
   const emptyQuery = query.trim() === '';
+  const scanProgress = Math.max(0, ...status.volumes.map((v) => v.progress ?? 0));
 
   let panel: Panel = 'list';
   if (errored && !scanning) panel = 'error';
@@ -154,29 +170,34 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     else onSort({ key, descending: true });
   };
 
+  // 骨架行只在"新搜索首屏且尚无任何行"时出现（UI_SPEC §4.5），
+  // 滚动中缺失的行渲染为空白行，避免快速滚动时满屏闪烁。
+  const firstScreenSkeleton = Object.keys(rows).length === 0;
+
   return (
     <div className="resultarea">
       {requested && <div className="topprogress" aria-hidden="true" />}
 
       {panel === 'list' ? (
         <>
-          <div className="colhead" role="row">
+          <div className="colhead" role="group" aria-label={I18N.a11y.sorting}>
             {COLS.map((c) => {
               const active = sort.key === c.key;
-              const aria = active
-                ? sort.descending
-                  ? 'descending'
-                  : 'ascending'
-                : 'none';
+              const dir = sort.descending ? '降序' : '升序';
               return (
                 <button
                   key={c.key}
                   className={'col ' + c.cls}
                   onClick={() => onHeaderClick(c.key)}
-                  aria-sort={aria}
+                  aria-pressed={active}
+                  aria-label={active ? `${c.label}，${dir}` : `${c.label}，未排序`}
                 >
                   <span>{c.label}</span>
-                  {active && <span className="sortind">{sort.descending ? '▼' : '▲'}</span>}
+                  {active && (
+                    <span className="sortind" aria-hidden="true">
+                      {sort.descending ? '▼' : '▲'}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -187,9 +208,13 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
             ref={parentRef}
             role="listbox"
             aria-label={I18N.a11y.list}
-            tabIndex={0}
+            aria-busy={requested}
+            aria-activedescendant={`sift-row-${selected}`}
           >
-            <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+            <div
+              style={{ height: virtualizer.getTotalSize(), position: 'relative' }}
+              role="presentation"
+            >
               {items.map((vi) => {
                 const i = vi.index;
                 const r = rows[i];
@@ -197,14 +222,21 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
                 return (
                   <div
                     key={i}
+                    id={`sift-row-${i}`}
                     className={'row' + (isSel ? ' sel' : '')}
                     role="option"
                     aria-selected={isSel}
+                    aria-posinset={i + 1}
+                    aria-setsize={total}
+                    tabIndex={isSel ? 0 : -1}
                     style={{ transform: `translateY(${vi.start}px)`, height: 32 }}
-                    onClick={() => setSelected(i)}
+                    onClick={() => {
+                      setSelected(i);
+                      focusRow(i);
+                    }}
                     onDoubleClick={() => engine.open(currentId, i, 'open')}
                   >
-                    <RowContent row={r} />
+                    <RowContent row={r} skeleton={firstScreenSkeleton && i < 3} />
                   </div>
                 );
               })}
@@ -215,6 +247,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
         <EmptyState
           panel={panel}
           query={query}
+          progress={scanProgress}
           onClearFilter={onClearFilter}
           onRescan={onRescan}
         />
@@ -223,8 +256,10 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   );
 });
 
-function RowContent({ row }: { row: ResultRow | undefined }) {
+function RowContent({ row, skeleton }: { row: ResultRow | undefined; skeleton: boolean }) {
   if (!row) {
+    // 无骨架时渲染空白行（不显示 12px 灰块）。
+    if (!skeleton) return null;
     return (
       <>
         <span className="c-name skel" />
@@ -236,16 +271,17 @@ function RowContent({ row }: { row: ResultRow | undefined }) {
   }
   return (
     <>
-      <span className="c-name">
+      <span className="c-name" title={row.name}>
         <span className="ficon">{row.is_dir ? <FolderIcon /> : <FileIcon />}</span>
         <NameHL name={row.name} ranges={row.name_matches} />
-        {row.is_dir && <span className="dirbadge">文件夹</span>}
       </span>
       <span className="c-path" title={row.dir}>
         {row.dir}
       </span>
       <span className="c-size mono">{formatSize(row.size)}</span>
-      <span className="c-mod mono">{formatTime(row.mtime)}</span>
+      <span className="c-mod mono" title={formatTimeFull(row.mtime)}>
+        {formatTime(row.mtime)}
+      </span>
     </>
   );
 }
@@ -266,11 +302,13 @@ function NameHL({ name, ranges }: { name: string; ranges: MatchRange[] }) {
 function EmptyState({
   panel,
   query,
+  progress,
   onClearFilter,
   onRescan,
 }: {
   panel: Panel;
   query: string;
+  progress: number;
   onClearFilter: () => void;
   onRescan: () => void;
 }) {
@@ -278,7 +316,7 @@ function EmptyState({
     return (
       <div className="empty">
         <span className="ring" aria-hidden="true" />
-        <div className="empty-main">正在建立索引…</div>
+        <div className="empty-main">{I18N.scanning(progress)}</div>
         <div className="empty-sub">索引就绪后自动搜索，可先输入关键词</div>
       </div>
     );

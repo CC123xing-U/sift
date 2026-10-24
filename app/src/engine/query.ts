@@ -10,7 +10,8 @@ export interface ParsedQuery {
   folderOnly: boolean;
   /** 普通 AND/OR 子句（不含修饰符）。 */
   clauses: string[][];
-  error: { pos: number } | null;
+  /** 与 Rust 侧同形：`span` 为字节区间 `[start, end)`。 */
+  error: { span: { start: number; end: number } } | null;
 }
 
 export function parseQuery(q: string): ParsedQuery {
@@ -24,7 +25,13 @@ export function parseQuery(q: string): ParsedQuery {
       : trimmed.endsWith('|')
         ? trimmed.length - 1
         : trimmed.indexOf('||');
-    return { exts: null, folderOnly: false, clauses: [], error: { pos } };
+    // 出错位置即越界的 `|` 所在下标，span 覆盖该字符（与 Rust 端 span 语义对齐）。
+    return {
+      exts: null,
+      folderOnly: false,
+      clauses: [],
+      error: { span: { start: pos, end: pos + 1 } },
+    };
   }
 
   const tokens = trimmed.split(/\s+/);

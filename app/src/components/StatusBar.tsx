@@ -34,10 +34,19 @@ export default function StatusBar({ summary, requested, query, status }: Props) 
     right = '';
   }
 
+  // 渲染与播报分离：可见节点被 aria-hidden，播报节点只念"找到 N 个结果"（不含耗时）。
+  const announce =
+    !requested && summary && query.trim() !== '' ? I18N.foundA11y(summary.total) : '';
+
   return (
     <div className="statusbar">
-      <span className="status-left" aria-live="polite">
-        {left}
+      <span className="status-left">
+        <span className="mono" aria-hidden="true">
+          {left}
+        </span>
+        <span className="sr-only" aria-live="polite">
+          {announce}
+        </span>
       </span>
       <span className="status-right">{right}</span>
     </div>

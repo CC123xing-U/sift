@@ -75,7 +75,8 @@ export class MockEngine implements EngineClient {
 
     const pq = parseQuery(req.query);
     if (pq.error) {
-      const pe: ParseError = { message: '语法错误，请检查查询', pos: pq.error.pos };
+      // 与 Rust 侧 ParseError 同形：span 为 [start, end) 区间。
+      const pe: ParseError = { message: '语法错误，请检查查询', span: pq.error.span };
       return new Promise((res) =>
         setTimeout(() => res({ id, total: 0, elapsed_ms: 1, parse_error: pe }), 10),
       );
@@ -153,7 +154,12 @@ export class MockEngine implements EngineClient {
   }
 
   status(): EngineStatus {
-    return this.statusState;
+    // 返回浅拷贝：本对象在扫描过程中被就地修改，若直接返回同一引用，
+    // React 的 setState 会因 Object.is 判等而跳过重渲染，索引进度永远不更新。
+    return {
+      ...this.statusState,
+      volumes: this.statusState.volumes.map((v) => ({ ...v })),
+    };
   }
 
   async rescan(_volume?: string | null): Promise<void> {
