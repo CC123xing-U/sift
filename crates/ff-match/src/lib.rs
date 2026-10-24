@@ -6,3 +6,9 @@
 //! # 平台约束（DESIGN §0.5）
 //! 纯逻辑 crate：任何平台可编译、可单测；禁用 `unsafe`。
 #![forbid(unsafe_code)]
+
+pub mod matcher;
+pub mod scan;
+
+pub use matcher::{Matcher, SubstringMatcher, Tier};
+pub use scan::scan_names;
