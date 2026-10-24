@@ -33,3 +33,17 @@
 19. **BENCH 数据来源**：合成数据 2M 实测由 Track D 记录于 `docs/BENCH.md`「M1 合成数据」；真实卷 M0（C: 849,366 条 / 5.312s）由 Orchestrator 追加于同文件「M0 真实卷摸底」，原始明细见 `crates/ff-ntfs/NOTES.md`。
 20. **合并顺序与冲突处理**：按 A→B→D（C 已先入 main）顺序合并；A、D 均因 `Cargo.lock` 与 main 冲突，统一以 `cargo generate-lockfile` 重新解析（无语义冲突，仅依赖集合并集）。ff-core/ff-match 由 B 独家拥有，D 的覆盖层已剔除后才合并（见下条）。
 21. **Track D 的 ff-core/ff-match 覆盖层已剔除**：D 的分支在 B 之前切出，为编译基准曾把 B 的 ff-core/ff-match 源码整块拷入工作树；合并前已用 `git checkout agent/b --` 取权威版本验证通过，再把覆盖层 `reset`+`clean` 还原，仅提交 `bench/`+`tests/`+`BENCH.md`+`Cargo.lock`，未污染核心 crate。
+
+## 第二轮 · InProcess 引擎 / USN 增量 / CLI（2026-10-24）
+
+> 本轮用双 agent 并行：Track E（InProcess 引擎）与 Track M2（USN 增量）互不依赖、同时开工；Track F（`ff-cli search`）依赖 E，由 Orchestrator 在 E 合并后直接实现。全部在隔离 worktree（`.worktrees/e` / `.worktrees/m2` / `.worktrees/f`）完成后入 main。
+
+22. **多卷命中的表示：`Vec<(VolumeId, EntryId)>`**：命中标明所属卷，`range`/`open` 据此回到对应 `VolumeIndex` 取字段。契约（`EngineClient` trait）未规定内部形态，故由实现自选；已要求 `InProcessEngine` 保持跨平台（无 `cfg(windows)` 外的平台代码）。
+23. **Score 排序在 M1 退化为 entry_id 升序**：DESIGN §8.2 评分不在 M1 范围，无分数可排；Name/Path/Size/Modified 均已按真值排序。待 M2/M5 引入评分后补齐，届时 Score 降序语义回归。
+24. **`open` 语义：InProcess 下 `CopyPath` 暂返回 `Ok(())`**。理由：复制到剪贴板是 UI 层行为（DESIGN §12 由 UI 进程执行），引擎只负责解析出完整路径；Open/OpenFolder 在 Windows 下确有 `explorer` 行为。非 Windows 分支返回 `Ok(())`，保证跨平台可编译。
+25. **`read_changes`（M2）真实实现已落地**：`FSCTL_READ_USN_JOURNAL` + `READ_USN_JOURNAL_DATA_V0` 经 `DeviceIoControl` 读原始记录流，按 `RecordLength` 逐条解析。USN 记录**不含文件大小与可靠时间戳**（已知 Windows 行为），故生成的 `RawEntry` 置 `size=0`、三时间戳统一取记录 `TimeStamp`（FILETIME），消费方应按 DESIGN §4.3 标记 `STALE_META` 后台补齐。
+26. **USN 实时路径不在 CI 验证**：真实 `read_changes` 需管理员权限 + 真实 NTFS 卷 + 已启用 Journal，CI 不满足。**只允许纯逻辑单测**（合成 `USN_RECORD` 字节 → `Change`）进 CI；不得新增依赖真实 IO 的 `#[test]`。
+27. **ff-cli 参数解析继续手写**（沿用决策 8，不引入 clap）：本轮子命令增至 2 个（scan/search）仍属简单，`--max/--sort/--asc/--case` 手写解析并把**跨平台解析函数**与平台相关执行分离，使参数解析可在任意平台被单测覆盖。
+28. **多个位置参数拼成一个查询串**：`ff-cli search C: my docs` → 查询串 `my docs`；理由是查询语法里空格即 AND，与 UI 输入行为保持一致（用户直接输入即 AND）。
+29. **本轮合并无 `Cargo.lock` 冲突**：E、M2 均未改动各自 `Cargo.toml`（ff-engine 早已依赖 ff-core/ff-ntfs；windows features 已含 `Win32_System_Ioctl`），F 复用了已存在的 ff-cli→ff-engine 依赖。合并顺序 E→M2→F。
+30. **Track F 由 Orchestrator 直接实现而非再派 agent**：该任务紧耦合刚落地的 `InProcessEngine` API，上下文已在手，且依赖顺序上无法与 E 并行；并行收益低于往返成本。
