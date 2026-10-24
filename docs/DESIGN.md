@@ -435,6 +435,12 @@ pub trait EngineClient: Send + Sync {
   - 保存过程中强制结束进程，下次启动仍能载入旧文件或触发重建，**不崩溃**；
   - 手动让 journal id / next_usn 失效，能正确触发全量重建；
   - 合并期间持续搜索，不出现长时间阻塞（记录 p99 延迟）。
+- **状态（2026-10-24，`feat/m2-persistence`，见 DECISIONS #58–#61）**：
+  - 持久化格式 FFIX 已落地（M2-① `05a9509` + 本轮接线）：零依赖、自 CRC32、原子写、`load` 容错（`None`→重建）。`save_volume`/`save_all`/`load_all` + `set_save_dir` 已接通；`EngineStatus::last_saved` 由 `now_filetime()` 填充。
+  - Overlay（Base+Overlay 合并）与后台 `read_changes` 轮询（100ms slice，`MERGE_THRESHOLD=50,000` 触发 `merge_overlay_into_base`）已落地；`overlay_upsert_reflected_in_search` / `overlay_remove_excluded_from_search` 单测覆盖 create/delete 反映。
+  - `JournalUnavailable → rebuild_volume` 端到端由 `journal_unavailable_triggers_rescan` 单测覆盖。
+  - `engine_persistence_roundtrip` 单测覆盖 FFIX 写→载→`query` 命中一致。
+  - **实机项（真实 journal 增量 ≤1s、重启载入 ≤0.5s、强制 kill 后仍载入、合并 p99）需管理员 + 真实 NTFS 卷，不进 CI（决策 26），留待 M2 收尾实机复核**——代码路径已具备，仅差实机计时与 kill 演练。
 
 ### M3 能用的 UI（提前，开始自用）
 - Tauri 窗口 + 全局热键 + 托盘 + 虚拟滚动列表 + 基本快捷键；`InProcess` 实现的 `EngineClient`。

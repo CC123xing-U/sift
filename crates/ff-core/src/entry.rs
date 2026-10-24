@@ -344,6 +344,66 @@ impl VolumeIndex {
     pub(crate) fn path_prefix_bytes(&self) -> &[u8] {
         &self.path_prefix
     }
+
+    /// 由原始列 + 卷元数据重建索引（落盘载入共用，见 `persist` 模块）。
+    ///
+    /// 与 `IndexBuilder::finish` 不同：本函数**不重新解析 parent**（存储的 `parent`
+    /// 已是解析后的 `EntryId`），且无法从列还原全量扫描期的诊断计数，故
+    /// `unresolved_parents` / `duplicate_frns` 置 0（仅为诊断信息，不影响查询）。
+    /// FRN 映射 / `cjk_ids` / `path_prefix` / `root_id` 由列重建。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_raw(
+        volume: VolumeInfo,
+        names: Vec<u8>,
+        names_lower: Vec<u8>,
+        name_off: Vec<u32>,
+        parent: Vec<u32>,
+        flags: Vec<u16>,
+        frn: Vec<u64>,
+        size: Vec<u64>,
+        mtime: Vec<i64>,
+        ctime: Vec<i64>,
+        atime: Vec<i64>,
+    ) -> VolumeIndex {
+        let n = name_off.len();
+        let mut frn_map: FxHashMap<u64, EntryId> =
+            FxHashMap::with_capacity_and_hasher(n, Default::default());
+        for (i, &f) in frn.iter().enumerate() {
+            match frn_map.entry(f & FRN_MASK) {
+                HashMapEntry::Occupied(_) => {}
+                HashMapEntry::Vacant(v) => {
+                    v.insert(i as EntryId);
+                }
+            }
+        }
+        let root_id = parent.iter().position(|&p| p == NONE).map(|i| i as EntryId);
+        let cjk_ids: Vec<EntryId> = flags
+            .iter()
+            .enumerate()
+            .filter(|(_, &f)| f & flags::HAS_CJK != 0)
+            .map(|(i, _)| i as EntryId)
+            .collect();
+        let path_prefix = volume.path_prefix();
+        VolumeIndex {
+            volume,
+            names,
+            names_lower,
+            name_off,
+            parent,
+            flags,
+            frn,
+            size,
+            mtime,
+            ctime,
+            atime,
+            frn_map,
+            cjk_ids,
+            path_prefix,
+            root_id,
+            unresolved_parents: 0,
+            duplicate_frns: 0,
+        }
+    }
 }
 
 #[cfg(test)]
