@@ -82,10 +82,12 @@ fn from_wide(buf: &[u16]) -> String {
 
 /// 从 `windows` crate 的错误里取出**原始 Win32 错误码**。
 ///
-/// `windows_core::Error` 对 Win32 失败包的是 `HRESULT_FROM_WIN32(code)`：
-/// `windows-result` 的 `HRESULT::from_win32` 定义为
-/// `(error & 0xFFFF) | (7 << 16) | 0x8000_0000`，即低 16 位就是原始 Win32 码。
-/// 这里取低 16 位后**再用 `from_win32` 反验一次**，确认取法正确（不是靠掩码猜）。
+/// `windows_core::Error` 对 Win32 失败包的是 `HRESULT_FROM_WIN32(code)`。依据
+/// `windows-result 0.4.1`（`windows-core 0.62.2` 的依赖，`pub use windows_result::*`）
+/// 的 `src/hresult.rs`：`from_win32(error)` = `(error & 0x0000_FFFF) | (7 << 16) | 0x8000_0000`
+/// （`error as i32 <= 0` 时原样返回），即**低 16 位就是原始 Win32 码**。
+/// 该版本只提供 `from_win32`，**没有反向 API**，故取低 16 位是唯一姿势；
+/// 为免"靠掩码猜"，取完再用同一个 `from_win32` **反验**：不符即在 debug 下立刻断言失败。
 fn win32_code(e: &windows::core::Error) -> u32 {
     let code = (e.code().0 as u32) & 0xFFFF;
     debug_assert_eq!(
