@@ -63,3 +63,5 @@
 39. **清理"文档说没做、其实做了"的过期口径**：`ff-ntfs/src/lib.rs`（`read_changes` 属 M2 / 返回 Unsupported）、`scanner.rs` 模块头、`usn.rs` 模块头（"M2 落地时二选一"）、`tests/tests/windows_integration.rs`（M1 口径注释、测试名、`TODO(a-ntfs)`）。`volume_enumeration_smoke` 保持 `#[ignore]`，TODO 改为"管理员终端手动运行 `cargo test -p sift-tests -- --ignored` 时扩充为真实调用"。
 40. **CLI 逐步补齐（补审计 Minor 19）**：当前只有 `scan` + `search`；`index` / `bench` / `dump`（DESIGN §3）属后续里程碑，各自随对应里程碑落地。
 41. **`FRN_MASK` 在 `ff-core`（`entry.rs`）与 `ff-ntfs`（`usn.rs`）各定义一份**：已知重复，暂不收敛——已有跨 crate 单测 `frn_mask_low_48_bits_matches_ff_core` 守卫一致性，收敛需引入共享常量 crate，收益低于成本。
+42. **chips 与 M4 修饰符的阶段错配 —— 取 A（UI 侧标注 + M3 前置禁用），本次不动引擎**：UI_SPEC §3.4 的 7 个 chips 写入 `ext:` / `folder:`，而 DESIGN §7.2（`DESIGN.md:258`）把二者列为 **M4 必做**，M1/M3 引擎不支持。点 chip 会命中 `ff-core::query` 的 `ParseError`（"修饰符语法尚未支持，计划 M4"），经 `SearchSummary::parse_error` 由 UI 弹**明确的语法错误条 + 0 结果**——是 M4 未实现的正常表现，**不构成 DESIGN 违背**（§7.3 的"容错降级"针对的是"正在打字的半成品输入"，实现已对未闭合引号降级）。当前原型由 MockEngine 自行实现这两个修饰符，故 chips 在原型里可用（有意，非越界实现）。
+    **M3 接真实 Tauri 引擎前必须二选一**：① chips 置灰并说明原因（与 §3.4 删「全文」留 M7 同一先例）——**当前取 ①**；② 把 `ext:` / `folder:` 提前进 M3 引擎——属里程碑范围调整，需用户确认。**M3 开工前须复核本条。**
