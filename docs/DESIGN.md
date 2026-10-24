@@ -396,6 +396,8 @@ pub trait EngineClient: Send + Sync {
 
 索引卷选择 · 排除路径 · 隐藏系统/隐藏文件 · 热键 / 双击 Ctrl 开关 · 模糊 / 拼音开关与双拼方案 · 评分规则（M5）· HTTP API 开关与 token（M6）· 语言（中 / 英）。
 
+**「隐藏系统/隐藏文件」是一个 toggle，同时驱动两个引擎字段**：`SearchOptions.hide_system`（过滤 `flags::SYSTEM`，`FILE_ATTRIBUTE_SYSTEM` 0x4）与 `SearchOptions.hide_hidden`（过滤 `flags::HIDDEN`，`FILE_ATTRIBUTE_HIDDEN` 0x2），两者默认均为 `true`。引擎侧保持两个独立判断而非合并成一个掩码，便于后续若把 UI 拆成两个 toggle 时不必再动引擎。
+
 ---
 
 ## 12. 权限与服务形态
