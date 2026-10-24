@@ -65,25 +65,37 @@ function comboFromEvent(e: React.KeyboardEvent): string | null {
   return parts.join('+');
 }
 
+// 未接线项在原型里点了只改界面状态、不产生任何行为。
+// 必须**在可见 UI 上标出来**（UI_SPEC §4.8）——只写进文档或 title 悬停不够：
+// 用户点开关后界面有反馈、结果却不变，界面本身就在撒谎。
+const PENDING_NOTE = 'M3 接线后生效';
+
 function Toggle({
   label,
   on,
   disabled = false,
+  pending = false,
   onToggle,
 }: {
   label: string;
   on: boolean;
   disabled?: boolean;
+  pending?: boolean;
   onToggle: (next: boolean) => void;
 }) {
   return (
     <div className={'set-row' + (disabled ? ' disabled' : '')}>
-      <span>{label}</span>
+      <span>
+        {label}
+        {pending && <span className="pending-tag">{PENDING_NOTE}</span>}
+      </span>
       <button
         type="button"
         role="switch"
         aria-checked={on}
-        aria-label={label}
+        // 无障碍名里也带上阶段说明：与 M5/M6 占位项（"（M5 提供）"）口径一致，
+        // 且可见文字是完整无障碍名的前缀，满足 WCAG 2.5.3 Label in Name。
+        aria-label={pending ? `${label}，${PENDING_NOTE}` : label}
         disabled={disabled}
         className={'toggle' + (on ? ' on' : '')}
         onClick={() => onToggle(!on)}
@@ -250,13 +262,18 @@ export default function Settings({ onBack, state, patch }: Props) {
             ))}
           </fieldset>
           <ExcludePaths paths={state.excludes} onChange={(excludes) => patch({ excludes })} />
-          <Toggle label="显示系统/隐藏文件" on={state.showHidden} onToggle={setFlag('showHidden')} />
+          <Toggle
+            label="显示系统/隐藏文件"
+            on={state.showHidden}
+            onToggle={setFlag('showHidden')}
+            pending
+          />
         </section>
 
         <section className="set-group">
           <h2 className="set-group-title">匹配</h2>
-          <Toggle label="模糊匹配" on={state.fuzzy} onToggle={setFlag('fuzzy')} />
-          <Toggle label="拼音匹配" on={state.pinyin} onToggle={setFlag('pinyin')} />
+          <Toggle label="模糊匹配" on={state.fuzzy} onToggle={setFlag('fuzzy')} pending />
+          <Toggle label="拼音匹配" on={state.pinyin} onToggle={setFlag('pinyin')} pending />
           <fieldset className="set-fieldset">
             <legend className="set-block-label">双拼方案</legend>
             {SHUANGPIN.map((s) => (

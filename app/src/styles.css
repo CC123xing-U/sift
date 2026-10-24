@@ -576,6 +576,21 @@ body {
 .set-row.disabled {
   opacity: 0.5;
 }
+/* 未接线项标注（UI_SPEC §4.8）：**可见文字**，不靠 title。
+   三个开关（模糊/拼音/显示系统-隐藏文件）在原型里只改界面不产生行为，
+   不在界面上说清楚，界面本身就在撒谎。
+   字号 12px 而非 11px —— §2.3.2 明定最小 12px，本标注不得成为首个 11px 文字。
+   颜色用 text-secondary，其对比度已在 §2.2 实测（浅 4.98:1 / 深 8.74:1）。 */
+.pending-tag {
+  margin-left: 8px;
+  padding: 0 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
 /* 可变高度的设置块（卷/排除路径/语言等成组控件） */
 .set-block {
   display: flex;
