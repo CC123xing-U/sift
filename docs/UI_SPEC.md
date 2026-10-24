@@ -422,30 +422,39 @@
 
 ## 7. MockEngine 约定（规格层面）
 
-M3 起 UI 通过 `EngineClient` trait 的同形接口取数（DESIGN §2.2-1、§9），本轮接内置 **MockEngine**（前端不直接依赖真实引擎）。以下为规格约定，不含实现代码。
+UI 通过 `EngineClient` trait 的同形接口取数（DESIGN §2.2-1、§9）。**架构原则：接口同形、实现可换**——浏览器原型用 TS Mock，M3 换 Tauri invoke，M6 换 Pipe；**UI 代码不分支、不感知背后实现**。以下为规格约定，不含实现代码。
 
-### 7.1 接口映射
+### 7.1 接口映射（接口同形、实现可换）
 
-UI 只依赖四个方法（DESIGN §9 类型原样）：
+UI 代码只依赖一个与 `EngineClient` trait **同形的 TypeScript 接口**（`search` / `range` / `cancel` / `status` 四个方法，参数与返回结构照 DESIGN §9 类型原样翻译为 TS）；背后实现按阶段整体替换，UI 代码不改动、不做任何分支：
 
-| Trait 方法 | 前端入口（Tauri command，同形） | 返回 |
+| 阶段 | 底层实现 | 传输方式 |
 |---|---|---|
-| `search(SearchRequest)` | `engine_search` | `SearchSummary { id, total, elapsed_ms, parse_error }` |
-| `range(RequestId, offset, limit)` | `engine_range` | `Vec<ResultRow>` |
-| `cancel(RequestId)` | `engine_cancel` | `()` |
-| `status()` | `engine_status` | `EngineStatus`（各卷 Scanning(进度)/Ready/Error、条目数、最后保存时间） |
+| **原型阶段（本轮）** | **MockEngine = TypeScript 实现**：前端内存生成数据、前端模拟延迟与取消 | 进程内 Promise，无 IPC |
+| **M3（Tauri 外壳）** | Rust 侧 `InProcess` 实现的 `EngineClient` | 同一 TS 接口的底层切换为 `invoke` → Tauri command |
+| **M6（服务拆分）** | Rust 侧 `Pipe` 实现的 `EngineClient` | 同一 TS 接口的底层切换为命名管道客户端（DESIGN §10.1） |
 
-- 前端 TS 侧定义与 trait 同形的 `EngineClient` 接口，底层 `invoke`；M6 切换到 `Pipe` 实现时前端零改动。【DESIGN §2.2-1】
-- MockEngine 为 `EngineClient` 的第三种实现（Rust 侧，与 `InProcess` 并列，测试/演示用）。【自行决定】
+UI 依赖的四个方法（TS 同名同结构）：
+
+| 接口方法 | 返回 |
+|---|---|
+| `search(req: SearchRequest)` | `SearchSummary { id, total, elapsed_ms, parse_error }` |
+| `range(id: RequestId, offset: number, limit: number)` | `ResultRow[]` |
+| `cancel(id: RequestId)` | `void` |
+| `status()` | `EngineStatus`（各卷 Scanning(进度)/Ready/Error、条目数、最后保存时间） |
+
+- **本轮硬性要求**：原型必须能在普通浏览器里 `vite dev` 运行（方便截图对比参考图）。浏览器里没有 Tauri 的 `invoke`，因此本轮的 MockEngine **只能是 TS 实现**，应用代码只依赖上面的 TS 接口。【用户工作流硬性要求】
+- Rust 侧 MockEngine（`EngineClient` 的测试替身，与 `InProcess` 并列）**降级为可选**：仅供引擎/QA 的 Rust 单测使用，不是前端原型的依赖。【自行决定】
 
 ### 7.2 MockEngine 行为规格
 
 | 项 | 约定 |
 |---|---|
-| 数据规模 | 启动时生成 **300,000 条**合成条目（固定随机种子，可复现）：中英文混合文件名（含可被拼音首字母命中的中文名）、4 层目录树、目录:文件 ≈ 1:6、大小对数分布 0B–4GB、mtime 近 8 年。仅存内存。【自行决定：覆盖 §1.3 的 200 万目标的 1/7，足以验证虚拟滚动与交互；真实数据压力由引擎 Track 负责】 |
-| `search` 延迟 | 20–60ms（模拟 Top-K 计算）；返回 `total` 与 `elapsed_ms`；支持协作式取消（延迟循环内每 5ms 检查取消标志）。【DESIGN §2.2-6 + 自行决定】 |
-| `range` 延迟 | 5–15ms / 窗口；返回行含 `name_matches`（对查询词在名字中的实际位置做子串高亮计算）。【DESIGN §9 + 自行决定】 |
-| `cancel` | 幂等、立即生效；被取消 id 的后续 `range` 返回空数组。【DESIGN §9 + 自行决定】 |
+| 运行环境 | **纯浏览器**（`vite dev`），不依赖 Tauri；所有行为发生在前端内存中。【用户工作流硬性要求】 |
+| 数据规模 | 启动时在前端内存生成 **300,000 条**合成条目（固定随机种子、可复现）：中英文混合文件名（含可被拼音首字母命中的中文名）、4 层目录树、目录:文件 ≈ 1:6、大小对数分布 0B–4GB、mtime 近 8 年。【自行决定：覆盖 §1.3 的 200 万目标的约 1/7，足以验证虚拟滚动与交互；真实数据压力由引擎 Track 负责】 |
+| `search` 延迟 | 前端用 `setTimeout`/Promise 模拟 20–60ms（模拟 Top-K 计算）；返回 `total` 与 `elapsed_ms`；取消用**前端标志位模拟协作式取消**——延迟等待中检查标志，置位即放弃该次回包。【DESIGN §2.2-6 + 自行决定】 |
+| `range` 延迟 | 前端 `setTimeout` 模拟 5–15ms / 窗口；返回行含 `name_matches`（对查询词在名字中的实际位置做子串高亮计算）。【DESIGN §9 + 自行决定】 |
+| `cancel` | 幂等、立即生效（清除标志位）；被取消 id 的后续 `range` 回包由 UI 按 id 丢弃。【DESIGN §9 + 自行决定】 |
 | `status` | 初始模拟一次 3 秒扫描进度（Scanning 0→100%）后转 Ready；之后每秒可轮询；Ready 态返回 `索引就绪 · 300,000 条 · 已保存 <时间>`。【自行决定：验证扫描态 UI】 |
 | 取消语义 | `search` 自动取消同一客户端上一次未完成搜索（DESIGN §9）；UI 侧只渲染最新 id。【DESIGN §11.1】 |
 
@@ -526,7 +535,7 @@ UI 只依赖四个方法（DESIGN §9 类型原样）：
 | 字体栈（Segoe UI 系 + 中文回退；Cascadia/Consolas 等宽用于数字） | 【用户偏好：系统字体、中文优先、完美搭配】 |
 | 32px 行高、12px 次要文字、列宽、大小/日期格式 | 【自行决定：紧凑密度】 |
 | 空/加载/错误状态机、骨架行、防闪烁 | 【自行决定 + §7.4】 |
-| MockEngine 数据规模/延迟/取消语义 | 【自行决定：规格层面约定】 |
+| MockEngine（TS 侧实现）数据规模/延迟/取消语义、接口同形实现可换 | 【自行决定：规格层面约定 + 用户工作流硬性要求（浏览器可跑）】 |
 
 ---
 
@@ -540,6 +549,7 @@ UI 只依赖四个方法（DESIGN §9 类型原样）：
 
 ## 11. 实现提示（非代码）
 
+- 原型阶段（本轮）：`vite dev` **纯浏览器可跑**——MockEngine 为 TS 实现（§7.1），不依赖 Tauri；M3 起才引入 Tauri 外壳，并把同一 TS 接口的底层切到 `invoke`（UI 代码不动）。
 - 虚拟滚动：`@tanstack/react-virtual`（DESIGN §2.1），行高固定 32px，`overscan` 取 1 屏；取数范围 = 可见窗口 ±1 屏（§6.5）。
 - 主题：CSS 变量承载 §2.1 全部 token（`--bg-app` 等），`prefers-color-scheme` 切换根 class；组件禁止写死色值。
 - 等宽数字：`font-variant-numeric: tabular-nums` 作为等宽字体栈的双保险。
