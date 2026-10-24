@@ -180,6 +180,7 @@ impl InProcessEngine {
 
         // 在所有 Ready 卷上求并集命中，记录 (卷, 条目id)
         let mut hits: Vec<(VolumeId, EntryId)> = Vec::new();
+        let hide_system = req.opts.hide_system;
         {
             let vols = self.volumes.read().unwrap();
             for (vid, vd) in vols.iter() {
@@ -187,6 +188,11 @@ impl InProcessEngine {
                     continue;
                 }
                 for eid in vd.index.search(&query, &token) {
+                    // DESIGN §5.2：系统文件"默认可在设置中隐藏"——`hide_system` 在此生效
+                    // （此前该选项未被读取，是死字段）。
+                    if hide_system && vd.index.flags[eid as usize] & flags::SYSTEM != 0 {
+                        continue;
+                    }
                     hits.push((vid.clone(), eid));
                 }
             }
@@ -621,6 +627,50 @@ mod tests {
         // mtime: 文档.txt=300 > readme.txt=200
         assert_eq!(rows[0].name, "文档.txt");
         assert_eq!(rows[1].name, "readme.txt");
+    }
+
+    #[test]
+    fn hide_system_filters_system_entries() {
+        // DESIGN §5.2：「默认可在设置中隐藏」——`SearchOptions::hide_system` 此前是死字段，
+        // 现在在 search 的命中汇总里生效。
+        let mut b = IndexBuilder::new(VolumeInfo {
+            drive: Some('C'),
+            ..Default::default()
+        });
+        b.push(dir(5, 0, ".", 0, 1));
+        b.push(file(101, 5, "readme.txt", 1024, 200));
+        b.push(EntryInput {
+            frn: 102,
+            parent_frn: 5,
+            name: "pagefile.sys".to_string(),
+            is_dir: false,
+            attrs: attrs::FILE_ATTRIBUTE_SYSTEM,
+            size: 4096,
+            mtime: 300,
+            ctime: 300,
+            atime: 300,
+        });
+        let e = InProcessEngine::empty();
+        e.add_volume(
+            VolumeId {
+                serial: 1,
+                drive: Some('C'),
+            },
+            b.finish(),
+        );
+
+        // 默认 hide_system = true（SearchOptions::default）：系统文件被过滤
+        let mut hide = req("e"); // "e" 同时命中 readme.txt 与 pagefile.sys
+        hide.opts.hide_system = true;
+        let sum = e.search(hide).unwrap();
+        assert_eq!(sum.total, 1);
+        assert_eq!(e.range(sum.id, 0, 10).unwrap()[0].name, "readme.txt");
+
+        // 关掉 → 两条都出现
+        let mut show = req("e");
+        show.opts.hide_system = false;
+        let sum = e.search(show).unwrap();
+        assert_eq!(sum.total, 2);
     }
 
     #[test]

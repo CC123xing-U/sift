@@ -24,6 +24,7 @@ use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::System::IO::DeviceIoControl;
 
+use crate::usn::{classify_read_outcome, ReadOutcome};
 use crate::ScanError;
 
 /// 打开卷设备路径用的共享模式：读/写共享，避免与其他进程冲突。
@@ -79,12 +80,25 @@ fn from_wide(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..end])
 }
 
-/// 把 `windows` crate 的错误转成 [`ScanError`]，保留**原始错误码**与系统消息。
+/// 从 `windows` crate 的错误里取出**原始 Win32 错误码**。
 ///
-/// `windows_core::Error` 的 HRESULT 对 Win32 失败是 `HRESULT_FROM_WIN32(code)`
-/// （facility 7），低 16 位即 Win32 错误码；据此取 `io::Error` 的本地化消息。
+/// `windows_core::Error` 对 Win32 失败包的是 `HRESULT_FROM_WIN32(code)`：
+/// `windows-result` 的 `HRESULT::from_win32` 定义为
+/// `(error & 0xFFFF) | (7 << 16) | 0x8000_0000`，即低 16 位就是原始 Win32 码。
+/// 这里取低 16 位后**再用 `from_win32` 反验一次**，确认取法正确（不是靠掩码猜）。
+fn win32_code(e: &windows::core::Error) -> u32 {
+    let code = (e.code().0 as u32) & 0xFFFF;
+    debug_assert_eq!(
+        e.code(),
+        windows::core::HRESULT::from_win32(code),
+        "HRESULT 不是 HRESULT_FROM_WIN32 形态，Win32 码提取有误"
+    );
+    code
+}
+
+/// 把 `windows` crate 的错误转成 [`ScanError`]，保留**原始错误码**与系统消息。
 fn win32_error(context: &str, e: windows::core::Error) -> ScanError {
-    let win32 = (e.code().0 as u32) & 0xFFFF;
+    let win32 = win32_code(&e);
     let os_message = std::io::Error::from_raw_os_error(win32 as i32);
     let message = format!("{context}: {os_message}（原始 Win32 错误码 {win32}）");
     // ERROR_ACCESS_DENIED = 5
@@ -254,25 +268,28 @@ pub fn query_usn_journal(device_path: &str) -> Result<UsnJournalInfo, ScanError>
 /// 待读 USN（续读位置），其后是紧挨排列的 `USN_RECORD_V2/V3`（V3 由 `usn` 跳过）。
 ///
 /// - `journal_id` 须与 `query_usn_journal` 一致；若日志被重建（id 变化），内核返回
-///   `ERROR_JOURNAL_ENTRY_DELETED`，由调用方据此重新基准；
+///   `ERROR_JOURNAL_ENTRY_DELETED`，本函数转成 `ScanError::JournalUnavailable`，由调用方
+///   按 DESIGN §5.3 重建条件重新基准（全量重建）；
 /// - 记录多于输出缓冲时内核返回 `ERROR_MORE_DATA`：本函数自动按缓冲头部给出的
-///   下一条 USN 续读、累积记录字节、翻倍缓冲，直到干净读完；日志异常庞大时设上限防死循环。
+///   下一条 USN 续读、累积记录字节、翻倍缓冲，直到干净读完；日志异常庞大时设上限防死循环；
+/// - 读到日志末尾时内核返回 `ERROR_HANDLE_EOF`：按 DESIGN §5.3 视为**正常结束**，
+///   返回已累积的记录（可能为空）与最后已知的续读位置，不报错。这是增量轮询最常态的路径
+///   （无新记录）。错误码分派见 [`usn::classify_read_outcome`]。
 pub fn read_usn_journal(
     device_path: &str,
     from_usn: i64,
     journal_id: u64,
 ) -> Result<Vec<u8>, ScanError> {
     let handle = open_volume(device_path)?;
-    // ERROR_MORE_DATA = 234：记录超出当前输出缓冲，需续读。
-    const ERROR_MORE_DATA: u32 = 234;
     // 单段缓冲上限：64 MiB。绝大多数增量批次远小于此；超限靠分块推进。
     const MAX_OUT: usize = 64 * 1024 * 1024;
 
     let mut start_usn = from_usn;
     // 仅累积记录字节（不含每段前缀的 8 字节 next USN）。
     let mut records_bytes: Vec<u8> = Vec::new();
-    // 最终续读位置（下一条待读 USN）。仅在一次干净读完（Ok 分支）时赋值，之后被读取。
-    let mut final_next_usn: i64;
+    // 已确认的续读位置（下一条待读 USN）。初值取请求起点：若一段都没读到
+    // （例如首段即 ERROR_HANDLE_EOF），就回退为该起点，语义是"没有新东西可读"。
+    let mut next_usn = from_usn;
 
     // 初始缓冲 256 KiB，遇分块翻倍，封顶 MAX_OUT。
     let mut out = vec![0u8; 256 * 1024];
@@ -315,38 +332,54 @@ pub fn read_usn_journal(
                         "FSCTL_READ_USN_JOURNAL 输出不足 8 字节（无 next USN）".to_string(),
                     ));
                 }
-                final_next_usn = i64::from_le_bytes(out[..8].try_into().unwrap());
+                next_usn = i64::from_le_bytes(out[..8].try_into().unwrap());
                 records_bytes.extend_from_slice(&out[8..]);
                 break;
             }
-            Err(e) => {
-                let code = (e.code().0 as u32) & 0xFFFF;
-                if code != ERROR_MORE_DATA {
+            Err(e) => match classify_read_outcome(win32_code(&e)) {
+                ReadOutcome::MoreData => {
+                    // 缓冲不够：本段 [8-byte next_usn][records] 已有效，累积记录并续读。
+                    out.truncate(returned as usize);
+                    if returned < 8 {
+                        return Err(ScanError::Other(
+                            "FSCTL_READ_USN_JOURNAL 分块输出不足 8 字节（无 next USN）".to_string(),
+                        ));
+                    }
+                    next_usn = i64::from_le_bytes(out[..8].try_into().unwrap());
+                    records_bytes.extend_from_slice(&out[8..]);
+                    start_usn = next_usn;
+                    let new_len = (out.len() * 2).min(MAX_OUT);
+                    out = vec![0u8; new_len];
+                }
+                ReadOutcome::EndOfJournal => {
+                    // DESIGN §5.3：读到日志末尾 = **正常结束**。此时 out/returned 无意义，
+                    // 只读已累积的记录字节与最后已知的续读位置。
+                    return Ok(assemble_read_result(next_usn, &records_bytes));
+                }
+                ReadOutcome::JournalEntryDeleted => {
+                    return Err(ScanError::JournalUnavailable(format!(
+                        "USN 日志记录已被删除或重建（{device_path}），需重新基准（全量重建）"
+                    )));
+                }
+                // Success 不应出现在 Err 分支；其余错误码走原错误路径（保留原始码）。
+                ReadOutcome::Success | ReadOutcome::Failed(_) => {
                     return Err(win32_error(
                         &format!("FSCTL_READ_USN_JOURNAL({device_path})"),
                         e,
                     ));
                 }
-                // 缓冲不够：本段 [8-byte next_usn][records] 已有效，累积记录并续读。
-                out.truncate(returned as usize);
-                if returned < 8 {
-                    return Err(ScanError::Other(
-                        "FSCTL_READ_USN_JOURNAL 分块输出不足 8 字节（无 next USN）".to_string(),
-                    ));
-                }
-                final_next_usn = i64::from_le_bytes(out[..8].try_into().unwrap());
-                records_bytes.extend_from_slice(&out[8..]);
-                start_usn = final_next_usn;
-                let new_len = (out.len() * 2).min(MAX_OUT);
-                out = vec![0u8; new_len];
-            }
+            },
         }
     }
 
-    // 拼成 parse_usn_journal_buffer 可直接解析的格式：[final_next_usn][records...]。
-    let mut result = final_next_usn.to_le_bytes().to_vec();
-    result.extend_from_slice(&records_bytes);
-    Ok(result)
+    Ok(assemble_read_result(next_usn, &records_bytes))
+}
+
+/// 拼成 `usn::parse_usn_journal_buffer` 可直接解析的格式：`[next_usn][records...]`。
+fn assemble_read_result(next_usn: i64, records_bytes: &[u8]) -> Vec<u8> {
+    let mut result = next_usn.to_le_bytes().to_vec();
+    result.extend_from_slice(records_bytes);
+    result
 }
 
 /// `FSCTL_CREATE_USN_JOURNAL`：日志不存在/被禁用时按 DESIGN §5.3 尝试创建。

@@ -52,7 +52,8 @@ pub struct RawEntry {
     pub atime: i64,
 }
 
-/// USN 增量变更（DESIGN §5.1，契约冻结）。`read_changes` 属 M2，本轮返回 `Unsupported`。
+/// USN 增量变更（DESIGN §5.1，契约冻结）。`read_changes` 已按 §5.3 真实实现
+/// （`NtfsVolumeScanner`）；内存假实现可用 `ScanError::Unsupported` 占位。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// 新建、重命名、移动、属性变化（同 frn 覆盖）。
@@ -87,7 +88,7 @@ pub enum ScanError {
     /// 权限不足（需要管理员 / SeManageVolumePrivilege）。
     AccessDenied(String),
     JournalUnavailable(String),
-    /// 暂不支持（如 M2 之前的 `read_changes`、USN V3 记录）。
+    /// 暂不支持（如内存假实现未提供的 `read_changes`、USN V3 记录）。
     Unsupported(String),
     Other(String),
 }
@@ -135,9 +136,12 @@ pub trait VolumeScanner {
     /// 续读补齐（M2）。
     fn full_scan(&self, vol: &VolumeId, sink: &mut dyn FnMut(RawEntry)) -> Result<ScanMeta>;
 
-    /// USN 增量读取（DESIGN §5.3，M2 实现）。
+    /// USN 增量读取（DESIGN §5.3，M2 已实现）。
     ///
-    /// 本轮允许且应当返回 `Err(ScanError::Unsupported(..))`，不得留空实现。
+    /// 真实实现（Windows）：从 `from_usn` 续读原始记录流，按 reason 合并为 [`Change`]；
+    /// 日志已被重建 / 记录被回收时返回 [`ScanError::JournalUnavailable`]，由调用方按
+    /// §5.3 重建条件全量重建。内存假实现（测试用）仍可返回
+    /// `Err(ScanError::Unsupported(..))`，但不得留空实现。
     fn read_changes(
         &self,
         vol: &VolumeId,
@@ -155,7 +159,7 @@ pub trait VolumeScanner {
 /// M2 构建块，本轮按任务要求提前交付并覆盖单元测试；不依赖 Windows。
 pub mod usn;
 
-/// `NtfsVolumeScanner`：`VolumeScanner` 的 NTFS 实现（M0：`full_scan`）。
+/// `NtfsVolumeScanner`：`VolumeScanner` 的 NTFS 实现（`full_scan` + `read_changes`）。
 #[cfg(windows)]
 pub mod scanner;
 
