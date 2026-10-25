@@ -325,7 +325,7 @@ impl EngineInner {
             let entries = vd.index.entry_count() as u64;
             total_entries += entries;
             volumes.push(VolumeStatus {
-                volume: vid.clone(),
+                volume: vid.to_string(),
                 state: vd.state,
                 entries,
                 progress: None,

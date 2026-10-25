@@ -1,0 +1,30 @@
+[package]
+name = "sift-app"
+version = "0.1.0"
+description = "Sift 桌面应用（Tauri v2 外壳，承载 InProcess 引擎）"
+edition = "2021"
+default-run = "sift-app"
+
+# 本 crate 是独立的 Tauri 应用，不并入根 Rust workspace（根 `members` 未列它，
+# 且需要自己的 Cargo.lock 与构建上下文）。空 `[workspace]` 表使其成为独立工作区根，
+# 避免「位于根工作区树内却被排除」的报错。ff-* 依赖通过 path 引用，仍可正常构建。
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 引擎依赖（path；这些 crate 自身属于根 workspace，经 version.workspace 继承父清单字段）。
+ff-core = { path = "../../crates/ff-core" }
+ff-match = { path = "../../crates/ff-match" }
+ff-ntfs = { path = "../../crates/ff-ntfs" }
+ff-engine = { path = "../../crates/ff-engine" }
+
+[features]
+# 默认不启用自定义特性；Tauri 默认特性已含 wry / common-controls-v6。
+default = []

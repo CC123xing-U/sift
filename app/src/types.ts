@@ -81,7 +81,7 @@ export interface EngineClient {
   search(req: SearchRequest): Promise<SearchSummary>;
   range(id: number, offset: number, limit: number): Promise<ResultRow[]>;
   cancel(id: number): void;
-  status(): EngineStatus;
+  status(): Promise<EngineStatus>;
   rescan(volume?: string | null): Promise<void>;
   open(id: number, index: number, action: OpenAction): Promise<void>;
 }

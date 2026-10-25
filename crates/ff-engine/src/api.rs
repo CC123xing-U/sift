@@ -9,6 +9,34 @@ pub use ff_core::ParseError;
 use std::fmt;
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
+/// `Vec<Range<u32>>` 无内置 serde 实现（Range 本身也没有）；IPC 契约要求
+/// `[[start, end], ...]` 数组形态，与 TS 侧 `MatchRange = [number, number]` 一致。
+/// 本地 wire 适配器，保持 Rust `Range<u32>` 类型与冻结契约不变。
+mod serde_ranges {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::ops::Range;
+
+    pub fn serialize<T, S>(v: &[Range<T>], s: S) -> Result<S::Ok, S::Error>
+    where
+        T: Serialize + Copy,
+        S: Serializer,
+    {
+        let wires: Vec<[T; 2]> = v.iter().map(|r| [r.start, r.end]).collect();
+        wires.serialize(s)
+    }
+
+    pub fn deserialize<'de, T, D>(d: D) -> Result<Vec<Range<T>>, D::Error>
+    where
+        T: Deserialize<'de> + Copy,
+        D: Deserializer<'de>,
+    {
+        let wires = Vec::<[T; 2]>::deserialize(d)?;
+        Ok(wires.into_iter().map(|[a, b]| a..b).collect())
+    }
+}
+
 /// 卷标识（定义在 `ff-ntfs`，此处再导出，方便 UI / 引擎侧统一引用）。
 pub use ff_ntfs::VolumeId;
 
@@ -17,7 +45,8 @@ pub use ff_ntfs::VolumeId;
 pub type RequestId = u64;
 
 /// 排序键（DESIGN §9 `SortSpec`）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SortKey {
     /// 按评分（DESIGN §8.2）；分数越高越相关。
     Score,
@@ -28,7 +57,7 @@ pub enum SortKey {
 }
 
 /// 排序方式（DESIGN §9 `SortSpec`）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SortSpec {
     pub key: SortKey,
     /// true = 降序。Score 默认降序（高分在前）；Name/Path 等可按需切换。
@@ -45,7 +74,7 @@ impl Default for SortSpec {
 }
 
 /// 搜索选项（DESIGN §9 `SearchOptions`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchOptions {
     /// 区分大小写（对应查询语法 `case:`；默认 false，见 DESIGN §7.1）。
     pub case_sensitive: bool,
@@ -83,7 +112,7 @@ impl Default for SearchOptions {
 }
 
 /// 搜索请求（DESIGN §9，契约冻结）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
     pub sort: SortSpec,
@@ -94,7 +123,7 @@ pub struct SearchRequest {
 
 /// 搜索结果摘要（DESIGN §9）。`search` 必须尽快返回；语法错误通过
 /// `parse_error` 返回而不是 `Err`。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchSummary {
     pub id: RequestId,
     pub total: usize,
@@ -103,7 +132,7 @@ pub struct SearchSummary {
 }
 
 /// 结果行（DESIGN §9）。只包含取数窗口内的行；昂贵信息（高亮等）只在 `range` 中计算。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResultRow {
     pub name: String,
     /// 完整父路径（如 `D:\Work\Reports`；根目录条目的 dir 为 `D:\`）。
@@ -115,11 +144,13 @@ pub struct ResultRow {
     pub mtime: Option<i64>,
     /// 名字内命中区间（UTF-8 字节区间，相对 `name`），供前端高亮；
     /// 仅为取数窗口内的行计算。转前端索引在 IPC 层（M6）处理。
+    #[serde(with = "serde_ranges")]
     pub name_matches: Vec<Range<u32>>,
 }
 
 /// 对结果行执行的动作（DESIGN §9 `open`）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OpenAction {
     /// 打开（由 UI 进程以当前用户身份执行，DESIGN §12）。
     Open,
@@ -157,7 +188,8 @@ impl std::error::Error for EngineError {}
 pub type Result<T> = std::result::Result<T, EngineError>;
 
 /// 卷状态（DESIGN §9 `EngineStatus`）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VolumeState {
     /// 正在扫描 / 建索引。
     Scanning,
@@ -166,9 +198,11 @@ pub enum VolumeState {
 }
 
 /// 单卷状态。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VolumeStatus {
-    pub volume: VolumeId,
+    /// 卷的显示标识（如 `C:`）；IPC 边界用字符串（TS `VolumeStatus.volume: string`），
+    /// 不暴露结构化 `VolumeId`（UI 仅用于展示，per-volume rescan 在命令层按盘符匹配）。
+    pub volume: String,
     pub state: VolumeState,
     /// 该卷已索引条目数。
     pub entries: u64,
@@ -179,7 +213,7 @@ pub struct VolumeStatus {
 }
 
 /// 引擎状态（DESIGN §9 `status`：各卷状态、条目数、最后保存时间）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EngineStatus {
     pub volumes: Vec<VolumeStatus>,
     /// 各卷条目数之和。

@@ -16,6 +16,8 @@ publish = false
 ntfs-reader = "0.6.0"
 rustc-hash = "2.1"
 time = "0.3"
+# serde（M3/M6 IPC 必需）：VolumeId 随 ff-engine::api 契约类型经 Tauri invoke 序列化。
+serde = { version = "1", features = ["derive"] }
 # tracing 0.1（DESIGN §2.1 准入）：USN 跳过的 V3/未知版本记录、解析中断要按 §5.3 记日志。
 # 库只依赖 tracing；订阅者（tracing-subscriber）归上层 app / ff-service，不在这里引入。
 tracing = "0.1"

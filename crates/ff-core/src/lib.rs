@@ -29,15 +29,53 @@ pub use query::{parse, Query, Term};
 use std::fmt;
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
+/// `std::ops::Range` 无内置 serde 实现，且 IPC 契约要求 `{start, end}` 对象形态
+/// （TS 侧 `ParseError.span` 为 `{ start, end }`）。用本地 wire 适配器序列化，
+/// 保持 Rust `Range` 类型与冻结契约不变。
+mod serde_range {
+    use super::Range;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Wire<T> {
+        start: T,
+        end: T,
+    }
+
+    pub fn serialize<T, S>(r: &Range<T>, s: S) -> Result<S::Ok, S::Error>
+    where
+        T: Serialize + Copy,
+        S: Serializer,
+    {
+        Wire {
+            start: r.start,
+            end: r.end,
+        }
+        .serialize(s)
+    }
+
+    pub fn deserialize<'de, T, D>(d: D) -> Result<Range<T>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        let w = Wire::<T>::deserialize(d)?;
+        Ok(w.start..w.end)
+    }
+}
+
 /// 查询解析错误（DESIGN §7.3：错误必须带位置信息，UI 可展示但不崩溃）。
 ///
 /// 跨 crate 契约类型（`ff-engine` 的 `SearchSummary::parse_error` 引用它），
 /// 变更只能由 Orchestrator 进行并记录到 `docs/DECISIONS.md`。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParseError {
     /// 人类可读的错误描述（中文，面向 UI 展示）。
     pub message: String,
     /// 错误在查询串中的字节区间 `[start, end)`。
+    #[serde(with = "serde_range")]
     pub span: Range<usize>,
 }
 

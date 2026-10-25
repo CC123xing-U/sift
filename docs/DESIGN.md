@@ -445,6 +445,12 @@ pub trait EngineClient: Send + Sync {
 ### M3 能用的 UI（提前，开始自用）
 - Tauri 窗口 + 全局热键 + 托盘 + 虚拟滚动列表 + 基本快捷键；`InProcess` 实现的 `EngineClient`。
 - **验收**：每次按键到首屏结果 ≤ 50ms（典型查询）；窗口隐藏 / 唤出稳定；连续快速输入没有结果错乱（请求 id 机制）。
+- **状态（2026-10-24，main，见 DECISIONS #62）**：
+  - `app/src-tauri`（Tauri v2 独立 crate）已落地：6 个引擎命令（`search`/`range`/`cancel`/`status`/`rescan`/`open`）+ 3 个窗口命令（`show_window`/`hide_window`/`toggle_window`）；`setup` 注入 `Arc<InProcessEngine>`；托盘菜单（显示/隐藏/重建索引/退出）；`Ctrl+Alt+Space` 全局快捷键 → `toggle_window`；失焦自动隐藏；`withGlobalTauri: true` 使前端零 npm 依赖直连 IPC。
+  - 前端 `TauriEngine.ts` 实现 `EngineClient`（`window.__TAURI__.core.invoke`），`App.tsx` 按 `isTauri()` 在 Tauri/Mock 间切换；`status()` 全链改 `async`（`types.ts`/`MockEngine.ts`/`App.tsx` 轮询同步改）。
+  - M3① serde 契约：`ParseError.span`（`{start,end}`）、`ResultRow.name_matches`（`[[start,end],...]`）经 wire 适配器保留 Rust `Range` 类型；枚举 `snake_case`；`VolumeStatus.volume: String`。
+  - 引擎接线：`build_engine()` 用 `NtfsVolumeScanner` 构造 `InProcessEngine`，后台线程逐卷 `rescan` 全量扫描不阻塞窗口；非 Windows 走 `empty()`。
+  - **未实现/未验证（诚实记录）**：双击 Ctrl 唤出（`WH_KEYBOARD_LL`）留待后续（M3 仅 `Ctrl+Alt+Space`）；`rescan` 粒度粗（忽略盘符参数重建全部，引擎无按盘符查卷 API）；Tauri crate 编译链已在沙箱验证（`cargo check`/`cargo build` 出 `sift-app.exe` 15.2MB、clippy/fmt 全绿），**但运行时 GUI 项未验证**：本沙箱无显示器/WebView2 运行时，无法起窗口，「按键→首屏 ≤50ms」实机计时、窗口隐藏/唤出稳定性、托盘/全局热键实际行为需在有 WebView2 的机器上 `npm run build:tauri` 或 `tauri dev` 实机复核。
 
 ### M4 查询语法与属性过滤
 - 第 7 节解析器与修饰符；按列排序；Top-K。

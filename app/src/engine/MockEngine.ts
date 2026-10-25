@@ -157,7 +157,7 @@ export class MockEngine implements EngineClient {
     // 结果与命中集合按 id 保留；UI 侧只渲染最新 id，旧 id 回包一律丢弃。
   }
 
-  status(): EngineStatus {
+  async status(): Promise<EngineStatus> {
     // 返回浅拷贝：本对象在扫描过程中被就地修改，若直接返回同一引用，
     // React 的 setState 会因 Object.is 判等而跳过重渲染，索引进度永远不更新。
     return {

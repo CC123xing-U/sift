@@ -118,3 +118,36 @@
 - 被索引卷 create/rename/move/delete 后 ≤ 1s 搜索结果正确：单测覆盖逻辑，真实 journal 端到端需管理员实机。
 - 保存中强制结束进程仍能载入：self-CRC32 损坏检测 + 降级重建设计已落地，CI 有容错 `load` 路径（损坏→`None`），实机 kill 演练待补。
 - 合并期间持续搜索 p99 延迟：merger 在阈值触发、同步但边界有限，p99 待实机测。
+
+---
+
+## M3 · 可用 UI（Tauri 外壳 + InProcess 引擎，2026-10-24）
+
+### 编译链验证（沙箱内实测，exit code 0）
+
+| 门禁 | 范围 | 结果 |
+|---|---|---|
+| `cargo fmt --all -- --check` | 根 workspace + `app/src-tauri` | 绿 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 根 workspace | 绿 |
+| `cargo clippy --all-targets -- -D warnings` | `app/src-tauri`（独立 workspace） | 绿 |
+| `cargo test --workspace` | 根 workspace（ff-engine 19 单测） | 绿 |
+| `cargo check` | `app/src-tauri`（tauri v2.12.5 全依赖树） | 绿 |
+| `cargo build` | `app/src-tauri` → `target/debug/sift-app.exe` 15.2 MB（debug，完整链接） | 绿 |
+| `npm run build` | `app/`（tsc -b + vite build，50 modules） | 绿 |
+
+### IPC 契约形态（前端 TS ↔ Rust，冻结契约保持 Rust 类型不变）
+
+| 契约字段 | Rust 类型 | 线上形态 | TS 类型 |
+|---|---|---|---|
+| `ParseError.span` | `Range<usize>` | `{start, end}` | `{start:number; end:number}` |
+| `ResultRow.name_matches` | `Vec<Range<u32>>` | `[[start,end],...]` | `[number, number][]` |
+| 枚举（`SortKey`/`OpenAction`/`VolumeState`） | Rust enum | snake_case 字符串 | 字面量联合 |
+| `VolumeStatus.volume` | `String`（IPC 边界由 `VolumeId` 降维） | string | `string` |
+
+### 待实机复核（不在 CI，需 WebView2 运行时 + 显示器）
+
+- 按键 → 首屏结果 ≤ 50ms（典型查询）：引擎 M1 基准（子串 ≤100ms @2M 条目，见 M1 节）可作参照；GUI 端计时需 `tauri dev` 实机。
+- 窗口隐藏 / 唤出稳定性（失焦自动隐藏 + 全局热键唤出）：代码路径已落地，行为验证待实机。
+- 托盘菜单（显示/隐藏/重建索引/退出）实际交互：待实机。
+- `Ctrl+Alt+Space` 全局快捷键注册与 `toggle_window`：待实机。
+- 双击 Ctrl 唤出（`WH_KEYBOARD_LL`）：**未实现**，留待后续（设置项可关）。

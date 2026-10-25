@@ -110,3 +110,22 @@
     - M2-④ 落盘接线：`save_volume`/`save_all` 写 `<serial>.ffix`，`load_all` 启动时读回；`set_save_dir` 由 `ff-cli`/上层设置。
 60. **`empty()` 不 spawn 后台线程 + `FakeScanner` 确定性驱动，规避后台线程竞争**：`InProcessEngine::empty()`（测试构造器）**不启动** `background_loop`，改暴露 `set_scanner(Box<dyn VolumeScanner>)` + `poll_once(vid)`，使单测能向 `FakeScanner`（持有 `changes/next_usn/full/unavailable` 字段）注入合成变更并**确定性**触发 `apply`/`rebuild`，无后台线程与时间竞争。`FakeScanner::read_changes` 在 `unavailable=true` 时返回 `JournalUnavailable`。4 个新增单测：`overlay_upsert_reflected_in_search`、`overlay_remove_excluded_from_search`、`journal_unavailable_triggers_rescan`、`engine_persistence_roundtrip`。
 61. **门禁全绿（提交前）**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0（修掉 persist.rs 8 处 `redundant_closure` + `manual_is_multiple_of`、entry.rs `too_many_arguments`）；`cargo test --workspace` 退出 0（ff-engine 19 个单测全过，含 4 个新增）。**M2 端到端实机项（真实 journal 增量延迟 ≤1s、重启载入 ≤0.5s、强制 kill 后仍能载入）需管理员 + 真实 NTFS 卷，不进 CI（沿用决策 26），留待 M2 收尾实机复核。**
+
+## 第五轮 · M3 可用 UI（Tauri 外壳 + InProcess 引擎，2026-10-24）
+
+> 来源：M3 落地——`app/src-tauri`（Tauri v2 独立 crate）+ 前端 `TauriEngine`（替换 MockEngine 原型）+ 引擎契约 serde 化（M3①）。DESIGN §13-M3 要求「Tauri 窗口 + 全局热键 + 托盘 + 虚拟滚动 + 基本快捷键；InProcess 实现的 EngineClient」。
+
+62. **Tauri v2 外壳整体落地（文件级清单）**：
+    - `app/src-tauri/Cargo.toml`：独立 `[workspace]`（不并入根 Rust workspace，避免成员列表排除报错），path 依赖 `ff-core/ff-match/ff-ntfs/ff-engine` + `tauri`/`tauri-plugin-global-shortcut` v2 + `serde`/`serde_json`。
+    - `app/src-tauri/tauri.conf.json`：`withGlobalTauri: true`（前端零 `@tauri-apps/api` 依赖）、窗口 `760×480`、无边框、alwaysOnTop、`theme: Auto`、`frontendDist: ../dist`、`devUrl: http://localhost:5173`、托盘图标 `icons/icon.png`。
+    - `app/src-tauri/src/main.rs`：定义 9 个命令（`search`/`range`/`cancel`/`status`/`rescan`/`open` + `show_window`/`hide_window`/`toggle_window`），`setup` 注入 `Arc<InProcessEngine>`，托盘菜单（显示/隐藏/重建索引/退出），`on_window_event` 失焦自动隐藏，`generate_handler!` 注册全部命令。
+    - 引擎接线（Windows）：`build_engine()` 用 `NtfsVolumeScanner` 构造 `InProcessEngine`，后台线程 `enumerate_volumes()` 逐卷 `rescan(Some(vid))` 触发全量扫描（不阻塞窗口）；非 Windows 走 `InProcessEngine::empty()` 仅保证可编译。
+    - 前端：`app/src/engine/TauriEngine.ts` 用 `window.__TAURI__.core.invoke` 实现 `EngineClient`，`App.tsx` 按 `isTauri()` 在 `TauriEngine` 与 `MockEngine` 间切换；`status()` 改为 `async`（Tauri/IPC 异步一致性，同步改了 `types.ts`/`MockEngine.ts`/`App.tsx` 的轮询 `useEffect`）。
+    **M3① serde 契约**：`ff-core::ParseError.span: Range<usize>`、`ff-engine::ResultRow.name_matches: Vec<Range<u32>>` 经本地 wire 适配器（`serde_range`/`serde_ranges`）保留 Rust `Range` 类型且 IPC 形态为 `{start,end}` / `[[start,end],...]`；枚举 `snake_case` 重命名（`Name`→`name` 等）；`VolumeStatus.volume` 由 `VolumeId` 改为 `String`（IPC 边界只展示）。`cargo test -p ff-engine` 19 单测全过。
+    **验证**：前端 `npm run build`（tsc -b + vite build）绿；`cargo test -p ff-engine` 19 单测绿。
+
+    **已知限制（诚实记录，非「已达成」）**：
+    - **`rescan(volume)` 忽略盘符参数、统一重建全部**：引擎公开 API 仅支持「按 `VolumeId` 全量重建」或「全部重建」，无「按盘符查卷」查询；真实 UI rescan 按钮不带参数（重建全部），故行为正确但粒度粗。单卷重建需引擎暴露卷列表查询，留待后续。
+    - **双击 Ctrl（`WH_KEYBOARD_LL`，DESIGN §11.2）未实现**：M3 仅做 `Ctrl+Alt+Space` 全局快捷键（`tauri-plugin-global-shortcut` → `toggle_window`）+ `Esc` 隐藏真实窗口；双击 Ctrl 是 Windows 低级键盘钩子，复杂且易引入不稳定，留待后续（设置项可关）。
+    - **Tauri crate 沙箱内已验证**：`cargo check` + 完整 `cargo build` 均绿——`target/debug/sift-app.exe`（15.2 MB，debug）真实链接产出（rustc 自带 MSVC 链接器可用，PATH 上无 `cl.exe` 不构成阻碍）；`cargo clippy --all-targets -- -D warnings` + `cargo fmt --all --check` 均绿。修复记录：补 `icons/icon.ico`（32×32 32bpp BMP-in-ICO，tauri-build 生成 Windows 资源必需）、开 `tauri` 的 `tray-icon` feature、main.rs 导入 `EngineClient` trait（方法在 trait 上）、`PredefinedMenuItem::separator(app)?` 与 `with_shortcuts(...).expect(...)` 两处 v2 `Result` 链修正。
+    - **「按键→首屏 ≤50ms」是运行时指标**：引擎 M1 基准（substring ≤100ms @2M 条目，`BENCH.md` M1 节）可作参照，但真实 GUI 计时需跑 `tauri dev` 实机测，沙箱无法跑 GUI，留待 M3 收尾实机复核。

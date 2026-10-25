@@ -11,8 +11,10 @@ use std::fmt;
 use std::io;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 /// 卷标识：以**卷序列号**为稳定键（DESIGN §5.3 重建条件：卷序列号变化 → 全量重建）。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VolumeId {
     /// 卷序列号（`GetVolumeInformationW`）。
     pub serial: u32,

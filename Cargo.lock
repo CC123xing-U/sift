@@ -212,6 +212,7 @@ dependencies = [
  "ff-match",
  "rayon",
  "rustc-hash",
+ "serde",
 ]
 
 [[package]]
@@ -222,6 +223,7 @@ dependencies = [
  "ff-match",
  "ff-ntfs",
  "rustc-hash",
+ "serde",
 ]
 
 [[package]]
@@ -238,6 +240,7 @@ version = "0.1.0"
 dependencies = [
  "ntfs-reader",
  "rustc-hash",
+ "serde",
  "time",
  "tracing",
  "windows",

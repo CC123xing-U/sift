@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { MockEngine } from './engine/MockEngine';
+import { TauriEngine, isTauri } from './engine/TauriEngine';
 import {
   DEFAULT_OPTS,
   EngineClient,
@@ -16,14 +17,22 @@ import Settings, { DEFAULT_SETTINGS, SettingsState } from './components/Settings
 import { applyChip, deriveChip } from './queryUtils';
 
 export default function App() {
-  const engineRef = useRef<EngineClient>(new MockEngine());
+  // 环境自适应：Tauri 外壳内用真实引擎（invoke → InProcessEngine），
+  // 纯浏览器（vite dev / 静态预览）回退到 MockEngine 原型，UI 代码不变。
+  const engineRef = useRef<EngineClient>(isTauri() ? new TauriEngine() : new MockEngine());
   const resultRef = useRef<ResultAreaHandle>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const [input, setInput] = useState('');
   const [sort, setSort] = useState<SortSpec>({ key: 'score', descending: true });
   const [view, setView] = useState<'search' | 'settings'>('search');
-  const [status, setStatus] = useState<EngineStatus>(() => engineRef.current.status());
+  // 初始状态：首次轮询会立即填充（见下方 useEffect），此处仅给一个空壳避免首帧 undefined。
+  const [status, setStatus] = useState<EngineStatus>({
+    volumes: [],
+    total_entries: 0,
+    last_saved: null,
+    searching: false,
+  });
   const [settings, setSettings] = useState<SettingsState>(DEFAULT_SETTINGS);
   const [hidden, setHidden] = useState(false);
 
@@ -39,19 +48,29 @@ export default function App() {
   const lastAcceptedIdRef = useRef(0);
   const spinnerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 状态轮询（1s，UI_SPEC §7.3）。
+  // 状态轮询（1s，UI_SPEC §7.3）。status() 现在是异步（Tauri invoke / Mock 一致），
+  // 立即拉一次首帧，之后每秒刷新；卸载时取消未完成的回包写入。
   useEffect(() => {
-    const t = setInterval(() => setStatus(engineRef.current.status()), 1000);
-    return () => clearInterval(t);
+    let cancelled = false;
+    const poll = async () => {
+      const s = await engineRef.current.status();
+      if (!cancelled) setStatus(s);
+    };
+    void poll();
+    const t = setInterval(() => void poll(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, []);
 
-  // 全局热键唤出/隐藏（UI_SPEC §5）。原型阶段直接隐藏 DOM，
-  // M3 起改为 Tauri：invoke('toggle_window')，并把快捷键改为设置项里录制的组合。
+  // 全局热键唤出/隐藏（UI_SPEC §5）。原型阶段直接隐藏 DOM；
+  // Tauri 下由 Rust 全局快捷键（Ctrl+Alt+Space → toggle_window）管理真实窗口，这里不重复处理。
   useEffect(() => {
     const onDocKey = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && e.code === 'Space') {
         e.preventDefault();
-        setHidden((h) => !h);
+        if (!isTauri()) setHidden((h) => !h);
       }
     };
     document.addEventListener('keydown', onDocKey);
@@ -126,9 +145,13 @@ export default function App() {
         setInput('');
         return;
       }
-      // UI_SPEC §5：输入已为空 → 隐藏窗口。
-      // TODO(M3)：改为 Tauri invoke('hide')，此处仅原型阶段隐藏 DOM。
-      setHidden(true);
+      // UI_SPEC §5 + M3：输入已为空 → 隐藏窗口。
+      // Tauri 下调用真实窗口命令；原型下隐藏 DOM。
+      if (isTauri()) {
+        void window.__TAURI__?.core.invoke('hide');
+      } else {
+        setHidden(true);
+      }
       return;
     }
     // 按钮自身的 Enter/Space 激活交还给浏览器：否则列头排序、chips、⚙ 都按不了。

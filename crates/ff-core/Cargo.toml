@@ -13,3 +13,6 @@ publish = false
 ff-match = { path = "../ff-match" }
 rayon = "1.12"
 rustc-hash = "2.1"
+# serde（M3/M6 IPC 必需）：Tauri invoke 经 JSON 序列化 ff-engine::api 契约类型。
+# 纯 Rust、无 unsafe，与 #![forbid(unsafe_code)] 一致；已在 docs/DEPENDENCIES.md 登记。
+serde = { version = "1", features = ["derive"] }

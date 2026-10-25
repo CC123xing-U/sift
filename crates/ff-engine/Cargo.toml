@@ -10,3 +10,5 @@ ff-core = { path = "../ff-core" }
 ff-match = { path = "../ff-match" }
 ff-ntfs = { path = "../ff-ntfs" }
 rustc-hash = "2.1"
+# serde（M3/M6 IPC 必需）：EngineClient 契约类型经 Tauri invoke 序列化给 UI。
+serde = { version = "1", features = ["derive"] }
