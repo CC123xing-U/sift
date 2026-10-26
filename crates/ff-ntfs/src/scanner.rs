@@ -202,6 +202,10 @@ impl VolumeScanner for NtfsVolumeScanner {
 
 /// 卷标识 → 设备路径：有盘符用 `\\.\X:`；装载点卷枚举 GUID 路径按序列号匹配。
 ///
+/// 返回的 GUID 路径**不含**尾随反斜杠（`CreateFileW` 开原始卷的要求）；
+/// 需要根路径形态（`GetVolumeInformationW`）的调用方直接交给
+/// [`win32::query_volume_by_root`] 即可——它内部会补回尾随反斜杠。
+///
 /// 公开：CLI / 引擎展示 USN Journal 状态等场景需要同一路径（保证与 `full_scan` 内部一致）。
 pub fn device_path_for(vol: &VolumeId) -> Result<String> {
     if let Some(drive) = vol.drive {

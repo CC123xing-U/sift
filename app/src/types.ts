@@ -77,6 +77,30 @@ export interface EngineStatus {
   searching: boolean;
 }
 
+/**
+ * 全局索引进度（0..1），**按卷的条目数加权**：非扫描中的卷计 1，扫描中的卷取其自身进度。
+ *
+ * 两处演进（都是实机观感问题）：
+ * 1. 旧实现 `Math.max(...progress)`：结束卷 progress 为 null→0，进度条只反映"当前卷"，
+ *    每扫完一卷就视觉归零重爬。改为求均值后仍会回跳 —— 因为卷是**逐个顺序扫描**的，
+ *    未轮到的卷虽是 `Ready`（索引自磁盘载入）却被算作已完成，于是每开扫一个新卷该卷
+ *    归 0、全局进度被拽回低位（"70 多 → 90 多 → 退回 70 多"）。真正的修法在调用侧：
+ *    启动前用 `mark_pending` 把本轮要扫的卷**全部**置为待扫，本函数才单调上升。
+ * 2. 加权：权重取该卷条目数（未知时退化为 1），使 90 万条目的 C: 与 0 条目的空卷
+ *    不再等权影响观感，进度与实际工作量成正比。
+ */
+export function overallScanProgress(volumes: VolumeStatus[]): number {
+  if (volumes.length === 0) return 0;
+  let done = 0;
+  let weight = 0;
+  for (const v of volumes) {
+    const w = Math.max(1, v.entries);
+    weight += w;
+    done += w * (v.state === 'scanning' ? Math.min(1, Math.max(0, v.progress ?? 0)) : 1);
+  }
+  return weight === 0 ? 0 : done / weight;
+}
+
 export interface EngineClient {
   search(req: SearchRequest): Promise<SearchSummary>;
   range(id: number, offset: number, limit: number): Promise<ResultRow[]>;

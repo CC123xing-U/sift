@@ -15,6 +15,7 @@ import {
   ResultRow,
   SortKey,
   SortSpec,
+  overallScanProgress,
 } from '../types';
 import { I18N } from '../i18n';
 import { EmptyIcon, FileIcon, FolderIcon, RetryIcon, WarnIcon } from '../icons';
@@ -177,7 +178,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   const scanning = status.volumes.some((v) => v.state === 'scanning');
   const errored = status.volumes.some((v) => v.state === 'error');
   const emptyQuery = query.trim() === '';
-  const scanProgress = Math.max(0, ...status.volumes.map((v) => v.progress ?? 0));
+  const scanProgress = overallScanProgress(status.volumes);
 
   let panel: Panel = 'list';
   if (errored && !scanning) panel = 'error';

@@ -16,6 +16,9 @@ import StatusBar from './components/StatusBar';
 import Settings, { DEFAULT_SETTINGS, SettingsState } from './components/Settings';
 import { applyChip, deriveChip } from './queryUtils';
 
+// 输入防抖窗口：停止输入这么久后才真正发起检索（详见下方 useEffect 注释）。
+const SEARCH_DEBOUNCE_MS = 120;
+
 export default function App() {
   // 环境自适应：Tauri 外壳内用真实引擎（invoke → InProcessEngine），
   // 纯浏览器（vite dev / 静态预览）回退到 MockEngine 原型，UI 代码不变。
@@ -101,7 +104,11 @@ export default function App() {
       engineRef.current
         .search({ query: q, sort, opts: DEFAULT_OPTS })
         .then((s) => {
-          if (s.id <= lastAcceptedIdRef.current) return; // 旧请求的回包一律丢弃
+          if (s.id <= lastAcceptedIdRef.current) {
+            // 旧请求的回包一律丢弃；顺手让引擎释放该结果集（否则要等 60s 回收）。
+            engineRef.current.cancel(s.id);
+            return;
+          }
           lastAcceptedIdRef.current = s.id;
           if (spinnerTimer.current) clearTimeout(spinnerTimer.current);
           setShowSpinner(false);
@@ -115,9 +122,32 @@ export default function App() {
     [sort],
   );
 
-  // 输入 / chip / 排序变化即触发搜索（不防抖，UI_SPEC §3.3）。
+  // 输入 / chip / 排序变化触发搜索（UI_SPEC §3.3）。
+  //
+  // 原实现「每次变化即搜」：每敲一个字都要对全卷（实测约 180 万条目）做一次完整检索，
+  // 外加 IPC 往返与虚拟列表重建，连续输入时明显卡顿，停手才恢复（用户实机反馈）。
+  // 改为 SEARCH_DEBOUNCE_MS 防抖：输入本身仍是受控 state、立即回显，
+  // 只在停止输入后才真正发检索；清空输入立即执行（不必等防抖，避免结果残留）。
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    runSearch(input);
+    if (searchTimer.current) {
+      clearTimeout(searchTimer.current);
+      searchTimer.current = null;
+    }
+    if (input.trim() === '') {
+      runSearch(input);
+      return;
+    }
+    searchTimer.current = setTimeout(() => {
+      searchTimer.current = null;
+      runSearch(input);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      if (searchTimer.current) {
+        clearTimeout(searchTimer.current);
+        searchTimer.current = null;
+      }
+    };
   }, [input, runSearch]);
 
   const onChip = (chip: string) => setInput((prev) => applyChip(prev, chip));

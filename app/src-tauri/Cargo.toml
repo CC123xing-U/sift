@@ -28,3 +28,9 @@ ff-engine = { path = "../../crates/ff-engine" }
 [features]
 # 默认不启用自定义特性；Tauri 默认特性已含 wry / common-controls-v6。
 default = []
+# 生产构建必须：让 tauri 走 frontendDist 内嵌资源（tauri://localhost custom protocol）。
+# 否则 tauri build.rs 里 `dev = !custom_protocol` 为真 → cfg(dev) → 永远请求 devUrl
+# （2026-10-25 实测：手动 cargo build --release 没开此 feature，release exe 也白屏
+# 「localhost 拒绝连接」）。`npm run build:tauri`（tauri CLI）会自动带上它；
+# 手动 cargo build --release 时必须显式 `--features custom-protocol`。
+custom-protocol = ["tauri/custom-protocol"]

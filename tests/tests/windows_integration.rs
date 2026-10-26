@@ -129,3 +129,46 @@ fn volume_enumeration_smoke() {
         "VolumeId Display 应含序列号: {text}"
     );
 }
+
+/// 回归：GUID 根路径缺尾随反斜杠时 `GetVolumeInformationW` 曾返回 ERROR_INVALID_NAME(123)，
+/// 使所有无盘符卷（恢复分区 / 装载点卷）在 verify 阶段必败（2026-10-25 实机复现，
+/// 症状：GUI「索引出错：IO 错误: GetVolumeInformationW(\\?\Volume{…}): 文件名、目录名或卷标语法不正确」）。
+/// `query_volume_by_root` 现在内部规范化尾随反斜杠，两种形态必须等价成功。
+#[cfg(windows)]
+#[test]
+#[ignore = "需要管理员权限与真实 NTFS 卷（DESIGN §14）"]
+fn guid_root_trailing_backslash_regression() {
+    let volumes = ff_ntfs::enumerate_volumes().expect("枚举卷失败");
+    let c = volumes
+        .iter()
+        .find(|v| v.drive == Some('C'))
+        .expect("应枚举到 C:");
+    let trimmed = c.guid_path.trim_end_matches('\\').to_string();
+    let with_bs = ff_ntfs::query_volume_by_root(&c.guid_path).expect("带尾随反斜杠应成功");
+    let without_bs =
+        ff_ntfs::query_volume_by_root(&trimmed).expect("缺尾随反斜杠也应成功（内部规范化）");
+    assert_eq!(with_bs, without_bs, "两种根路径形态结果应一致");
+}
+
+/// 回归：无装载点的卷（恢复分区 / EFI / 瞬态虚拟卷）不再进入枚举结果——它们没有可解析
+/// 路径，索引无意义，且其出现/消失会让索引集合反复抖动（2026-10-25 实机复现）。
+#[cfg(windows)]
+#[test]
+#[ignore = "需要管理员权限与真实 NTFS 卷（DESIGN §14）"]
+fn letterless_volumes_are_mount_point_backed() {
+    let volumes = ff_ntfs::enumerate_volumes().expect("枚举卷失败");
+    assert!(!volumes.is_empty(), "至少应枚举到 C:");
+    for v in &volumes {
+        if v.drive.is_none() {
+            assert!(
+                ff_ntfs::has_mount_points(&v.guid_path),
+                "无盘符卷必须有装载点才会被枚举: {:?}",
+                v.guid_path
+            );
+        }
+        // 枚举结果里的每个卷，trimmed GUID 形态都应能查询成功（与 device_path_for 的产物一致）。
+        let trimmed = v.guid_path.trim_end_matches('\\').to_string();
+        ff_ntfs::query_volume_by_root(&trimmed)
+            .unwrap_or_else(|e| panic!("trimmed GUID 查询失败 {:?}: {e}", v.guid_path));
+    }
+}

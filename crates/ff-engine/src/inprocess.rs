@@ -43,12 +43,17 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// 结果集无访问释放时限（DESIGN §9：60 秒）。
 const RESULT_TTL: Duration = Duration::from_secs(60);
 
-/// 单卷运行时数据（M2：新增 `overlay` 增量层）。
+/// 单卷运行时数据（M2：新增 `overlay` 增量层；P1：新增 `message` / `scan_progress`）。
 struct VolumeData {
     info: VolumeInfo,
     index: VolumeIndex,
     overlay: Overlay,
     state: VolumeState,
+    /// Error 时的说明（P1-3：打通错误信息链路，status_impl 不再硬编码 None）。
+    message: Option<String>,
+    /// 扫描进度（千分比 0–1000；`u64::MAX` = 非扫描态/不确定）。
+    /// 用 Arc<AtomicU64> 使 sink 闭包（无 volumes 锁）能原子更新，status_impl 无锁读取。
+    scan_progress: Arc<AtomicU64>,
 }
 
 /// 一次搜索的持久结果：命中列表（全局有序，每条带所属卷 + 命中来源）+ 原查询（供高亮）。
@@ -120,18 +125,27 @@ impl EngineInner {
                 index,
                 overlay: Overlay::default(),
                 state: VolumeState::Ready,
+                message: None,
+                scan_progress: Arc::new(AtomicU64::new(u64::MAX)),
             },
         );
     }
 
     /// 经扫描器全量重建单卷索引（见 trait `rescan`，M2-③ 重建也走这里）。
+    ///
+    /// P1 修复：① 错误信息写入 `vd.message`（status_impl 不再硬编码 None）；
+    /// ② 扫描进度经 `scan_progress` 原子量节流上报（100ms 级，不每文件推送）。
     fn load_volume_with(&self, scanner: &dyn VolumeScanner, vol: &VolumeId) -> Result<()> {
-        // 先标记 Scanning
-        {
+        // 先标记 Scanning，取出 progress atomic 和上一轮条目数作为进度分母。
+        let (progress_arc, total_estimate) = {
             let mut vols = self.volumes.write().unwrap();
             let vd = vols.entry(vol.clone()).or_insert_with(|| blank_volume(vol));
             vd.state = VolumeState::Scanning;
-        }
+            vd.message = None;
+            vd.scan_progress.store(0, Ordering::Relaxed);
+            let total = vd.index.entry_count() as u64;
+            (vd.scan_progress.clone(), total)
+        };
 
         let info = VolumeInfo {
             serial: vol.serial,
@@ -139,7 +153,10 @@ impl EngineInner {
             ..Default::default()
         };
         let mut builder = IndexBuilder::new(info.clone());
-        // 流式喂入 RawEntry → EntryInput（字段一一对应，可直接映射）
+        let mut count: u64 = 0;
+        let mut last_report = Instant::now();
+
+        // 流式喂入 RawEntry → EntryInput；节流更新进度原子量。
         let res = scanner.full_scan(vol, &mut |e: RawEntry| {
             builder.push(EntryInput {
                 frn: e.frn,
@@ -152,25 +169,53 @@ impl EngineInner {
                 ctime: e.ctime,
                 atime: e.atime,
             });
+            count += 1;
+            // 节流：每 100ms 更新一次（IPC 轮询 1s 一次，100ms 粒度足够平滑）。
+            if total_estimate > 0 && last_report.elapsed() >= Duration::from_millis(100) {
+                last_report = Instant::now();
+                let permille = (count * 1000 / total_estimate).min(999);
+                progress_arc.store(permille, Ordering::Relaxed);
+            }
         });
 
         match res {
-            Ok(_meta) => {
+            Ok(meta) => {
+                progress_arc.store(u64::MAX, Ordering::Relaxed);
                 let index = builder.finish();
                 let mut vols = self.volumes.write().unwrap();
                 let vd = vols
                     .get_mut(vol)
                     .expect("load_volume_with: 卷在 Scanning 阶段已插入");
-                vd.info = info;
+                // Bug #6 修复：必须接住 `full_scan` 返回的 `ScanMeta`。
+                // 旧代码丢弃 meta 只写 `info`（journal_id=0 / next_usn=0），于是下一轮
+                // `poll_volume` 以 `from_usn = 0` 调 `read_changes`；真实卷 `first_usn > 0`，
+                // `scanner.rs` 判定「记录已回收」恒返回 `JournalUnavailable` → `rebuild_volume`
+                // → 再全量扫描 → 无限循环重建（M2 的 USN 增量在真实运行中从未生效）。
+                //
+                // DESIGN §5.2：full_scan 在扫 MFT **之前**记录的 next_usn 即续读起点，
+                // 扫描期间发生的变化由后续从该 USN 续读补齐，故这里直接采用 meta 值。
+                // `guid_path` 不在 `VolumeId` 里，从旧 info 继承（否则无盘符卷的路径前缀会丢）。
+                let guid_path = std::mem::take(&mut vd.info.guid_path);
+                vd.info = VolumeInfo {
+                    serial: vol.serial,
+                    drive: vol.drive,
+                    guid_path,
+                    journal_id: meta.journal_id,
+                    next_usn: meta.next_usn,
+                };
                 vd.index = index;
                 vd.overlay = Overlay::default();
                 vd.state = VolumeState::Ready;
+                vd.message = None;
                 Ok(())
             }
             Err(e) => {
+                progress_arc.store(u64::MAX, Ordering::Relaxed);
+                let msg = e.to_string();
                 let mut vols = self.volumes.write().unwrap();
                 if let Some(vd) = vols.get_mut(vol) {
                     vd.state = VolumeState::Error;
+                    vd.message = Some(msg);
                 }
                 Err(map_scan_err(e))
             }
@@ -324,12 +369,23 @@ impl EngineInner {
         for (vid, vd) in vols.iter() {
             let entries = vd.index.entry_count() as u64;
             total_entries += entries;
+            // P1-4：Scanning 时读原子进度；其他状态为 None。
+            let progress = if vd.state == VolumeState::Scanning {
+                let p = vd.scan_progress.load(Ordering::Relaxed);
+                if p == u64::MAX {
+                    None
+                } else {
+                    Some(p as f32 / 1000.0)
+                }
+            } else {
+                None
+            };
             volumes.push(VolumeStatus {
                 volume: vid.to_string(),
                 state: vd.state,
                 entries,
-                progress: None,
-                message: None,
+                progress,
+                message: vd.message.clone(), // P1-3：不再硬编码 None
             });
         }
         EngineStatus {
@@ -397,8 +453,16 @@ impl EngineInner {
     }
 
     /// 单卷增量轮询：读 `read_changes` → 应用 Overlay；`JournalUnavailable` 触发重建（③）。
+    ///
+    /// **锁序修复（P0 死锁根因）**：旧代码在持 `volumes.read()` 的同时抢 `scanner` 锁，
+    /// 而 `rescan_impl` 持 `scanner` 锁又要 `volumes.write()` → AB-BA 死锁。
+    /// 修复：三阶段分离，任何时刻至多持一把锁：
+    ///   1. `volumes.read()` 快照 → 释放
+    ///   2. `scanner` 锁 → `read_changes` → 释放
+    ///   3. `volumes.write()` 应用结果
     fn poll_volume(&self, vid: &VolumeId) {
-        let res = {
+        // Phase 1: 快照轮询参数，释放 volumes 读锁。
+        let (from_usn, journal_id) = {
             let vols = self.volumes.read().unwrap();
             let vd = match vols.get(vid) {
                 Some(v) => v,
@@ -407,14 +471,19 @@ impl EngineInner {
             if vd.state != VolumeState::Ready {
                 return;
             }
-            let from_usn = vd.info.next_usn;
-            let journal_id = vd.info.journal_id;
+            (vd.info.next_usn, vd.info.journal_id)
+        }; // volumes.read() 已释放
+
+        // Phase 2: 取 scanner 锁执行 IO，释放 scanner。
+        let res = {
             let guard = self.scanner.lock().unwrap();
             match guard.as_ref() {
                 Some(sc) => sc.read_changes(vid, from_usn, journal_id),
                 None => return,
             }
-        };
+        }; // scanner 已释放
+
+        // Phase 3: 应用结果。
         match res {
             Ok((changes, new_usn)) => {
                 let mut vols = self.volumes.write().unwrap();
@@ -494,6 +563,11 @@ impl EngineInner {
             Some(v) => v,
             None => return Ok(()),
         };
+        // Bug #7 修复：只落盘 `Ready` 卷。Scanning / Error 态的索引是空壳（120 B），
+        // 若让它覆盖磁盘上的好索引，进程在重扫完成前死亡就会永久丢失索引。
+        if vd.state != VolumeState::Ready {
+            return Ok(());
+        }
         let path = dir.join(format!("{}.ffix", vd.info.serial));
         vd.index.save(&path)?;
         *self.last_saved.lock().unwrap() = Some(now_filetime());
@@ -511,6 +585,17 @@ impl EngineInner {
             self.save_volume(&id, &dir)?;
         }
         Ok(())
+    }
+
+    /// 把一批卷置为「待扫描」（见 [`InProcessEngine::mark_pending`]）。
+    fn mark_pending(&self, vols: &[VolumeId]) {
+        let mut map = self.volumes.write().unwrap();
+        for vol in vols {
+            let vd = map.entry(vol.clone()).or_insert_with(|| blank_volume(vol));
+            vd.state = VolumeState::Scanning;
+            vd.message = None;
+            vd.scan_progress.store(0, Ordering::Relaxed);
+        }
     }
 
     fn load_all(&self, dir: &Path) -> io::Result<()> {
@@ -533,6 +618,8 @@ impl EngineInner {
                         index,
                         overlay: Overlay::default(),
                         state: VolumeState::Ready,
+                        message: None,
+                        scan_progress: Arc::new(AtomicU64::new(u64::MAX)),
                     },
                 );
             }
@@ -584,6 +671,20 @@ impl InProcessEngine {
     /// 手动触发一次全卷增量轮询（测试用；真实场景由后台线程自动调用）。
     pub fn poll_once(&self) {
         self.inner.poll_all();
+    }
+
+    /// 把一批卷标记为「待扫描」（`Scanning` + progress 0），不实际启动扫描。
+    ///
+    /// 用途：启动时先把本轮要扫的**全部**卷置为待扫，再逐个 `rescan`。
+    /// 不这样做的话，还没轮到的卷仍是 `Ready`（索引是从磁盘载入的），前端
+    /// `overallScanProgress` 会把它们计入「已完成」，于是每开扫一个新卷该卷
+    /// 进度归 0、全局进度被拽回低位 —— 实机表现为「70 多 → 90 多 → 退回 70 多」
+    /// 反复回跳。先全部置为待扫后，全局进度在本轮内单调上升到 100%。
+    ///
+    /// 注意：调用方只应传入**确实会去 rescan** 的卷；否则该卷会停在
+    /// `Scanning` 态不恢复。
+    pub fn mark_pending(&self, vols: &[VolumeId]) {
+        self.inner.mark_pending(vols);
     }
 
     /// 直接注入一个已建好的索引（测试与合成数据用；标记为 `Ready`）。
@@ -664,6 +765,8 @@ fn blank_volume(vol: &VolumeId) -> VolumeData {
         index: IndexBuilder::new(info).finish(),
         overlay: Overlay::default(),
         state: VolumeState::Scanning,
+        message: None,
+        scan_progress: Arc::new(AtomicU64::new(0)),
     }
 }
 
@@ -1541,6 +1644,212 @@ mod tests {
         // 旧的 readme.txt 已被重建覆盖
         let old = e.search(req("readme")).unwrap();
         assert_eq!(old.total, 0);
+    }
+
+    /// 回归测试：Bug #6 —— 索引完成后无限循环重建。
+    ///
+    /// 真实 Win32 语义（`scanner.rs::read_changes`）：`from_usn` 落后于日志首条
+    /// `first_usn` 时返回 `JournalUnavailable`（记录已被回收）。
+    /// 旧代码 `load_volume_with` 丢弃 `full_scan` 的 `ScanMeta`，把 `next_usn` 写成 0，
+    /// 于是每轮轮询都以 `from_usn = 0` 续读 → 恒不可用 → `rebuild_volume` → 再全量
+    /// 扫描 —— 每卷「扫描耗时 + 1s」无限重建，M2 的 USN 增量在真实运行中从未生效。
+    ///
+    /// 断言：`rescan` 后连续三轮 `poll_once`，`full_scan` 只被调用 **1** 次。
+    #[test]
+    fn scan_meta_is_kept_so_poll_does_not_rebuild_forever() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        const FIRST_USN: i64 = 500; // 日志首条；from_usn < 此值即判定"已回收"
+        const SCANNED_USN: i64 = 1000; // full_scan 在扫 MFT 前记录的续读起点
+
+        /// 模拟真实 USN 语义，并统计 `full_scan` 调用次数。
+        struct UsnScanner {
+            full_scans: std::sync::Arc<AtomicUsize>,
+        }
+        impl VolumeScanner for UsnScanner {
+            fn full_scan(
+                &self,
+                _vol: &VolumeId,
+                sink: &mut dyn FnMut(RawEntry),
+            ) -> ff_ntfs::Result<ScanMeta> {
+                self.full_scans.fetch_add(1, AtomicOrdering::SeqCst);
+                sink(RawEntry {
+                    frn: 5,
+                    parent_frn: 0,
+                    name: ".".to_string(),
+                    is_dir: true,
+                    attrs: attrs::FILE_ATTRIBUTE_DIRECTORY,
+                    size: 0,
+                    mtime: 1,
+                    ctime: 1,
+                    atime: 1,
+                });
+                Ok(ScanMeta {
+                    journal_id: 1,
+                    next_usn: SCANNED_USN,
+                    entries: 1,
+                    elapsed: Duration::ZERO,
+                    warnings: 0,
+                })
+            }
+            fn read_changes(
+                &self,
+                _vol: &VolumeId,
+                from: i64,
+                _jid: u64,
+            ) -> ff_ntfs::Result<(Vec<Change>, i64)> {
+                // 与真实实现同构：落后于日志首条即不可用（否则返回空增量，起点不变）。
+                if from < FIRST_USN {
+                    return Err(ScanError::JournalUnavailable(format!(
+                        "from_usn {from} 早于日志首条 {FIRST_USN}，记录已回收"
+                    )));
+                }
+                Ok((vec![], from))
+            }
+        }
+
+        let e = engine();
+        let scans = std::sync::Arc::new(AtomicUsize::new(0));
+        e.set_scanner(Box::new(UsnScanner {
+            full_scans: scans.clone(),
+        }));
+        let vid = VolumeId {
+            serial: 1,
+            drive: Some('C'),
+        };
+
+        e.rescan(Some(vid)).unwrap();
+        assert_eq!(
+            scans.load(AtomicOrdering::SeqCst),
+            1,
+            "rescan 应恰好做一次全量扫描"
+        );
+
+        // 修复前：next_usn 为 0 → 每轮轮询都触发一次重建（此处会断言失败）。
+        for round in 1..=3 {
+            e.poll_once();
+            assert_eq!(
+                scans.load(AtomicOrdering::SeqCst),
+                1,
+                "第 {round} 轮轮询不应触发重建：\
+                 续读起点应取自 ScanMeta（{SCANNED_USN}）而非 0"
+            );
+        }
+        assert_eq!(e.status().volumes[0].state, VolumeState::Ready);
+    }
+
+    /// 回归测试：复现 AB-BA 死锁（scanner Mutex vs volumes RwLock）。
+    ///
+    /// 旧代码路径：
+    /// - 扫描线程：`rescan_impl` 持 scanner 锁 → `load_volume_with` → full_scan 完成后要 volumes.write()
+    /// - 后台线程：`poll_volume` 持 volumes.read() → 要 scanner 锁
+    ///
+    /// 当卷 A 已 Ready、卷 B 正在扫描时，后台轮询 A 持 read 等 scanner，扫描线程持 scanner 等 write → 死锁。
+    ///
+    /// 修复后：poll_volume 先释放 volumes.read() 再取 scanner 锁，打破环路。
+    #[test]
+    fn background_poll_does_not_deadlock_with_rescan() {
+        use std::time::{Duration, Instant};
+
+        struct SlowScanner;
+        impl VolumeScanner for SlowScanner {
+            fn full_scan(
+                &self,
+                vol: &VolumeId,
+                sink: &mut dyn FnMut(RawEntry),
+            ) -> ff_ntfs::Result<ScanMeta> {
+                // 卷 B 扫描耗时 2.5s（> 后台 1s 轮询周期），确保后台在扫描期间轮询已 Ready 的卷 A。
+                if vol.drive == Some('B') {
+                    std::thread::sleep(Duration::from_millis(2500));
+                }
+                sink(RawEntry {
+                    frn: 5,
+                    parent_frn: 0,
+                    name: ".".to_string(),
+                    is_dir: true,
+                    attrs: ff_core::attrs::FILE_ATTRIBUTE_DIRECTORY,
+                    size: 0,
+                    mtime: 0,
+                    ctime: 0,
+                    atime: 0,
+                });
+                Ok(ScanMeta {
+                    journal_id: 1,
+                    next_usn: 0,
+                    entries: 1,
+                    elapsed: Duration::ZERO,
+                    warnings: 0,
+                })
+            }
+            fn read_changes(
+                &self,
+                _v: &VolumeId,
+                _from: i64,
+                _jid: u64,
+            ) -> ff_ntfs::Result<(Vec<Change>, i64)> {
+                Ok((vec![], 0))
+            }
+        }
+
+        // 用 new() 构造（启动 background_loop），预置卷 A 为 Ready。
+        let e = Arc::new(InProcessEngine::new(Box::new(SlowScanner)));
+        let info_a = VolumeInfo {
+            drive: Some('A'),
+            serial: 1,
+            ..Default::default()
+        };
+        let mut b = IndexBuilder::new(info_a);
+        b.push(EntryInput {
+            frn: 5,
+            parent_frn: 0,
+            name: ".".to_string(),
+            is_dir: true,
+            attrs: ff_core::attrs::FILE_ATTRIBUTE_DIRECTORY,
+            size: 0,
+            mtime: 0,
+            ctime: 0,
+            atime: 0,
+        });
+        e.add_volume(
+            VolumeId {
+                serial: 1,
+                drive: Some('A'),
+            },
+            b.finish(),
+        );
+
+        // 等后台线程进入轮询节奏（100ms × 10 = 1s 周期）。
+        std::thread::sleep(Duration::from_millis(300));
+
+        // 在另一线程 rescan 卷 B（SlowScanner 会 sleep 2.5s 模拟慢扫描）。
+        let e2 = e.clone();
+        let h = std::thread::spawn(move || {
+            let _ = e2.rescan(Some(VolumeId {
+                serial: 2,
+                drive: Some('B'),
+            }));
+        });
+
+        // 8s 内必须完成；否则判定死锁。
+        let start = Instant::now();
+        while !h.is_finished() {
+            if start.elapsed() > Duration::from_secs(8) {
+                panic!(
+                    "死锁：rescan(B) 在 8s 内未完成 — scanner Mutex 与 volumes RwLock 的 AB-BA 死锁"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.join().unwrap();
+
+        // 验证卷 B 确实完成了扫描（state = Ready）。
+        let st = e.status();
+        let b_vol = st.volumes.iter().find(|v| v.volume.contains("B:"));
+        assert!(
+            b_vol.is_some_and(|v| v.state == VolumeState::Ready),
+            "卷 B 应为 Ready，实际: {:?}",
+            b_vol
+        );
     }
 
     #[test]

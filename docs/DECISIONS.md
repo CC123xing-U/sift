@@ -129,3 +129,34 @@
     - **双击 Ctrl（`WH_KEYBOARD_LL`，DESIGN §11.2）未实现**：M3 仅做 `Ctrl+Alt+Space` 全局快捷键（`tauri-plugin-global-shortcut` → `toggle_window`）+ `Esc` 隐藏真实窗口；双击 Ctrl 是 Windows 低级键盘钩子，复杂且易引入不稳定，留待后续（设置项可关）。
     - **Tauri crate 沙箱内已验证**：`cargo check` + 完整 `cargo build` 均绿——`target/debug/sift-app.exe`（15.2 MB，debug）真实链接产出（rustc 自带 MSVC 链接器可用，PATH 上无 `cl.exe` 不构成阻碍）；`cargo clippy --all-targets -- -D warnings` + `cargo fmt --all --check` 均绿。修复记录：补 `icons/icon.ico`（32×32 32bpp BMP-in-ICO，tauri-build 生成 Windows 资源必需）、开 `tauri` 的 `tray-icon` feature、main.rs 导入 `EngineClient` trait（方法在 trait 上）、`PredefinedMenuItem::separator(app)?` 与 `with_shortcuts(...).expect(...)` 两处 v2 `Result` 链修正。
     - **「按键→首屏 ≤50ms」是运行时指标**：引擎 M1 基准（substring ≤100ms @2M 条目，`BENCH.md` M1 节）可作参照，但真实 GUI 计时需跑 `tauri dev` 实机测，沙箱无法跑 GUI，留待 M3 收尾实机复核。
+
+63. **debug exe 走 devUrl + 控制台窗口（用户实跑 M3 debug 产物发现，2026-10-25）**：
+    - **现象**：用户直接运行 `target/debug/sift-app.exe` → ① 弹出控制台窗口；② GUI 窗口显示「localhost 连不上」。
+    - **根因**（tauri v2.12.5 源码 `manager/mod.rs:345` 实证）：`#[cfg(dev)]` 时加载 `build.devUrl`，`#[cfg(not(dev))]` 才加载 `build.frontendDist`；`dev` cfg 由 tauri-build 在 **debug profile** 时发出（build script 输出可见 `cargo:rustc-cfg=dev`）。故 debug exe 必然请求 `http://localhost:5173`——不跑 `npm run dev` 就必然白屏。控制台同理：`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` 在 debug 下保留控制台子系统。
+    - **修复**：`main.rs` 改无条件 `#![windows_subsystem = "windows"]`（GUI 应用不需要控制台；调试日志日后用 dbgview）；测试/分发用 **release** 构建（`cargo build --release` 或 `npm run build:tauri`），release 下 `cfg!(dev)` 为假 → 加载 `frontendDist: ../dist`（即 `app/dist`，由 `beforeBuildCommand` 生成）。
+    - **结论固化**：**debug exe 不可直接分发给用户运行**；README/文档需明示「运行 release 产物或 `npm run build:tauri`」。
+    - **更正（2026-10-25 后续实证）**：上条「release 下 `cfg!(dev)` 为假」的表述**不准确**。`dev` cfg 并非按 profile 判定，而是由 tauri 2.12.5 的 build.rs 依 **`tauri` 依赖是否启用 `custom-protocol` feature** 决定（`build.rs` 中 `dev = !custom_protocol`）。故手动 `cargo build --release` **仍会走 devUrl**；必须 `cargo build --release --features custom-protocol`（或经 `tauri build` CLI，它会自动开该 feature）才会加载 `frontendDist: ../dist`。已在 `app/src-tauri/Cargo.toml` 声明 `custom-protocol` feature 并转交 `tauri`。
+
+64. **Bug #6：索引完成后无限循环重建（2026-10-26 修复 + 回归测试 + 实机验证）**：
+    - **现象**：3 个卷全部 `rescan done` 后，UI 仍反复进入「正在建立索引」，CPU/磁盘持续被周期性全量重扫占用。
+    - **根因**（代码级，确定）：`inprocess.rs::load_volume_with` 的成功分支写作 `Ok(_meta)`，**丢弃**了 `full_scan` 返回的 `ScanMeta`（含 `journal_id` / `next_usn`），随后 `vd.info = info` 写入的 `info` 只有 `serial`/`drive`（`journal_id=0`、`next_usn=0`）。后台 `poll_volume` 于是以 `from_usn=0` 调 `read_changes`，而 `scanner.rs` 判定 `from_usn < info.first_usn`（真实卷 `first_usn>0`）恒为真 → 恒返回 `JournalUnavailable` → `rebuild_volume` → 全量重扫 → 回到起点。**M2 的 USN 增量在真实运行中因此从未生效**，每卷每隔「扫描耗时 + 1s」重建一次。
+    - **修复**：成功分支接住 `ScanMeta`，写入 `journal_id` / `next_usn`；`guid_path` 不在 `VolumeId` 中，从旧 `vd.info` 继承（否则无盘符卷的路径前缀会丢）。语义与 DESIGN §5.2 一致——`full_scan` 在扫 MFT **之前**记录的 `next_usn` 即续读起点，扫描期间的变化由续读补齐。
+    - **回归测试**：`inprocess::tests::scan_meta_is_kept_so_poll_does_not_rebuild_forever`。新增 `UsnScanner` 复刻真实 Win32 语义（`from_usn < FIRST_USN` → `JournalUnavailable`）并统计 `full_scan` 次数，断言 `rescan` 后连续三轮 `poll_once` 只触发 **1** 次全量扫描。**负向对照已做**：把 `next_usn` 退回 `0` 后该测试在第 1 轮即失败（`left=2, right=1`），证明测试真正覆盖此 bug 而非空跑。
+    - **实机验证**（release + `custom-protocol`，PID 10984）：3 卷各 `rescan done` 一次、日志无重复重建；扫描结束后 30 秒墙钟内仅耗 **2.03 秒 CPU（6.8%）**，进程稳定存活（修复前 C: 卷 90 万条目每 ~6s 全扫一次，必然 80%+ 持续占用）。
+    - **同批修复 Bug #7**：`save_volume` 增加 `state != Ready` 短路，避免 `Scanning`/`Error` 态的空壳索引（120 B）覆盖磁盘上的好索引（取证：10-25 14:10 的 `2661335377.ffix` 曾为 120 B）。
+
+65. **仍待处理（承接 `AUDIT_M3_FINAL.md`，未实施）**：
+    - **Bug #8（P2）`load_all` 复活幽灵卷**：无条件载入目录下所有 `.ffix`，不与 `enumerate_volumes()` 对齐 → 已卸载/被过滤的卷以 `Ready`+0 条目驻留 UI 并被反复落盘（取证：`2281921499.ffix` / `816230857.ffix` 各 120 B 被周期重写）。修法：`build_engine` 中 `load_all` 后按当次枚举的 serial 集合 prune。
+    - **Bug #9（P2）落盘目录在 C: 盘**：C: 仅 430 MB 可用时，90 MB 级索引落盘会吃掉最后空间，其后 save 静默失败（`save_volume` 错误被 `let _ =` 吞掉，仅留 0 B `.tmp` 残留），且 WebView2 缓存同受牵连。属 DESIGN §6 变更，需你确认（改目录 / 允许配置 / 至少把失败写进 `VolumeData.message`）。
+    - **新观察（非阻塞）**：`SAVE_INTERVAL = 10s` 且无脏标记，稳态下每 10 秒重写全部索引（本次实测 3 卷共 ~177 MB/次）。功能正确但 I/O 浪费，建议后续加 dirty 标记或拉长间隔。
+
+66. **全局索引进度回跳 + 输入逐字检索卡顿（用户实机反馈，2026-10-26 修复）**：
+    - **症状 A**：进度条「70 多 → 90 多 → 退回 70 多」反复回跳（用户原话："一直在那儿进去又退、退回又进"）；到 100% 后不再重扫（Bug #6 已修好的部分）。
+      - **根因**：`overallScanProgress` 对多卷取**均值**，非扫描中的卷计 1；而卷是**逐个顺序扫描**的（`main.rs` 单线程 for 循环）。未轮到的卷索引已从磁盘载入、状态仍是 `Ready`，被算作"已完成"，于是每开扫一个新卷该卷进度归 0、全局被拽回低位。
+      - **修复（两侧）**：① 引擎新增 `InProcessEngine::mark_pending(&[VolumeId])`（inherent 方法，不动冻结的 `EngineClient` trait），`main.rs` 在扫描前先把本轮要扫的卷**全部**置为 `Scanning`+progress 0；② 前端 `overallScanProgress` 改为**按条目数加权**（`w = max(1, entries)`），使 90 万条目的 C: 与 0 条目空卷不再等权。
+      - **验证**：按实机卷规模（C 90 万 / D 25 万 / F 62 万 + 2 个 0 条目幽灵卷）复算曲线 —— 修复前 `49→100→85.9→100→65→100`（**2 次回跳**，与用户观感的 70~100 区间吻合）；修复后 `0→100` 单调、**0 次回跳**。实机 release 运行 3 卷各一次 `rescan done`，进程存活。
+      - **约束**：`mark_pending` 只能传入确实会去 `rescan` 的卷，否则该卷会停在 `Scanning` 不恢复。
+    - **症状 B**：连续输入时明显卡顿，停手才恢复。
+      - **根因**：UI_SPEC §3.3 原为「每次输入变化即触发搜索」，每敲一个字都对全卷（实测约 180 万条目）做一次完整检索 + IPC 往返 + 虚拟列表重建。
+      - **修复**：`App.tsx` 加 `SEARCH_DEBOUNCE_MS = 120` 防抖 —— 输入本身仍是受控 state、立即回显，只在停止输入后真正发检索；**清空输入立即执行**（不等防抖，避免结果残留）。另：被覆盖的旧结果集在回包时主动 `cancel(id)` 释放（原本要等 60s 回收）。
+      - **取舍**：DESIGN §13-M3 的「按键→首屏 ≤50ms」指**引擎检索延迟**，防抖是叠加其上的 120ms 输入停顿窗口；这是与 Everything 一致的取舍，不是对该指标的破坏。

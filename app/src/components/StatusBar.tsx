@@ -1,5 +1,5 @@
 import React from 'react';
-import { EngineStatus, SearchSummary } from '../types';
+import { EngineStatus, SearchSummary, overallScanProgress } from '../types';
 import { I18N } from '../i18n';
 import { formatHHMM } from '../format';
 
@@ -26,7 +26,7 @@ export default function StatusBar({ summary, requested, query, status }: Props) 
     const m = status.volumes.find((v) => v.state === 'error');
     right = I18N.indexError(m?.message ?? '未知');
   } else if (scanning) {
-    const maxP = Math.max(...status.volumes.map((v) => v.progress ?? 0));
+    const maxP = overallScanProgress(status.volumes);
     right = I18N.scanning(maxP);
   } else if (ready) {
     right = I18N.indexReady(status.total_entries, formatHHMM(status.last_saved));

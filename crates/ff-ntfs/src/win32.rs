@@ -13,8 +13,8 @@ use std::mem::size_of;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetDriveTypeW,
-    GetLogicalDrives, GetVolumeInformationW, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_GENERIC_READ, FILE_SHARE_MODE,
+    GetLogicalDrives, GetVolumeInformationW, GetVolumePathNamesForVolumeNameW,
+    FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_SHARE_MODE,
 };
 use windows::Win32::System::Ioctl::{
     CREATE_USN_JOURNAL_DATA, FSCTL_CREATE_USN_JOURNAL, FSCTL_QUERY_USN_JOURNAL,
@@ -168,16 +168,21 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, ScanError> {
         });
     }
 
-    // 补上没有盘符的 GUID 卷（装载点）。
+    // 补上没有盘符的 GUID 卷（装载点）。无装载点的卷（恢复分区 / EFI / 瞬态虚拟卷）
+    // 没有可解析路径，索引无意义且其出现/消失会让索引集合抖动，直接排除。
     for (serial, fs_name, guid) in by_serial {
-        if !volumes.iter().any(|v| v.serial == serial) {
-            volumes.push(VolumeInfo {
-                serial,
-                fs_name,
-                guid_path: guid,
-                drive: None,
-            });
+        if volumes.iter().any(|v| v.serial == serial) {
+            continue;
         }
+        if !has_mount_points(&guid) {
+            continue;
+        }
+        volumes.push(VolumeInfo {
+            serial,
+            fs_name,
+            guid_path: guid,
+            drive: None,
+        });
     }
 
     volumes.sort_by_key(|v| v.drive);
@@ -196,9 +201,29 @@ impl Drop for FindGuard {
     }
 }
 
-/// `GetVolumeInformationW` 取（序列号, 文件系统名）。根路径需带尾随反斜杠。
+/// 根路径规范化：`GetVolumeInformationW` 要求根路径带尾随反斜杠。
+///
+/// GUID 路径（`\\?\Volume{...}`）缺尾随反斜杠时 API 直接返回 ERROR_INVALID_NAME(123)
+/// （实测：带 → 成功；不带 → 123）。`device_path_for` 为了给 `CreateFileW` 开原始卷会
+/// trim 掉尾随反斜杠，因此这里统一补回，调用方可安全传入两种形态（NOTES.md 尾随反斜杠规则）。
+fn normalize_root(root_path: &str) -> String {
+    let trimmed = root_path.trim_end_matches('\\');
+    let is_guid = trimmed
+        .get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\Volume{"));
+    let bytes = trimmed.as_bytes();
+    let is_bare_drive = bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if is_guid || is_bare_drive {
+        format!("{trimmed}\\")
+    } else {
+        root_path.to_string()
+    }
+}
+
+/// `GetVolumeInformationW` 取（序列号, 文件系统名）。根路径需带尾随反斜杠（内部已规范化）。
 pub fn query_volume_by_root(root_path: &str) -> Result<(u32, String), ScanError> {
-    let root = wide(root_path);
+    let normalized = normalize_root(root_path);
+    let root = wide(&normalized);
     let mut serial: u32 = 0;
     let mut fs_buf = [0u16; 32];
     // SAFETY: root 是 NUL 结尾宽串；输出缓冲均为本函数栈上可变数组。
@@ -212,8 +237,37 @@ pub fn query_volume_by_root(root_path: &str) -> Result<(u32, String), ScanError>
             Some(&mut fs_buf),
         )
     }
-    .map_err(|e| win32_error(&format!("GetVolumeInformationW({root_path})"), e))?;
+    .map_err(|e| win32_error(&format!("GetVolumeInformationW({normalized})"), e))?;
     Ok((serial, from_wide(&fs_buf)))
+}
+
+/// 卷是否至少有一个装载点（盘符或目录挂载）。
+///
+/// 无装载点的卷（恢复分区 / EFI / 瞬态虚拟卷）没有可解析路径：索引它们无意义，
+/// 且这类卷出现/消失不稳定，会让索引集合反复抖动。调用失败时 fail-open（视为有），
+/// 避免因一次 API 抖动静默丢掉可索引的卷。
+pub fn has_mount_points(guid_path: &str) -> bool {
+    let wide_guid = wide(guid_path);
+    let mut buf = [0u16; 512];
+    let mut returned: u32 = 0;
+    // SAFETY: wide_guid 是 NUL 结尾宽串；buf 为栈上可变缓冲（长度经 slice 传入）；
+    // returned 为栈上可变 u32，接收实际写出的字符数。
+    let res = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            windows::core::PCWSTR(wide_guid.as_ptr()),
+            Some(&mut buf),
+            &mut returned,
+        )
+    };
+    match res {
+        // 成功：装载点列表为双 NUL 结尾串列，空列表即首字符为 NUL。
+        Ok(()) => {
+            debug_assert!(returned as usize <= buf.len());
+            buf[0] != 0
+        }
+        // ERROR_MORE_DATA（列表超长）或其他失败：保守视为有装载点，不排除（fail-open）。
+        Err(_) => true,
+    }
 }
 
 /// 打开卷设备路径（`\\.\C:` 或 `\\?\Volume{...}\`）为可读句柄。

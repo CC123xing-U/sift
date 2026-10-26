@@ -174,6 +174,6 @@ pub mod win32;
 pub use scanner::{device_path_for, NtfsVolumeScanner};
 #[cfg(windows)]
 pub use win32::{
-    enumerate_volumes, peak_working_set_bytes, query_usn_journal, query_volume_by_root,
-    working_set_bytes, UsnJournalInfo, VolumeInfo,
+    enumerate_volumes, has_mount_points, peak_working_set_bytes, query_usn_journal,
+    query_volume_by_root, working_set_bytes, UsnJournalInfo, VolumeInfo,
 };
