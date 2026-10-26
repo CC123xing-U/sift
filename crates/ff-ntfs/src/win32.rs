@@ -494,6 +494,33 @@ pub fn working_set_bytes() -> Option<usize> {
         .map(|()| counters.WorkingSetSize)
 }
 
+/// 本地时区相对 UTC 的偏移（分钟；东八区 = 480，西五区 = -300）。
+///
+/// `ff-core` 是零平台依赖的纯逻辑 crate，标准库拿不到本地时区；这里用 Win32
+/// 取到真实偏移后由 `ff-engine` 注入 [`ff_core::Query`] 的求值上下文，
+/// 使 `dm:today` 等相对日期按**本地日历日**解释（DESIGN §7.2）。
+///
+/// `TIME_ZONE_INFORMATION.Bias` 的定义是「UTC = 本地时间 + Bias」，
+/// 因此本地相对 UTC 的偏移 = `-Bias`。夏令时启用时再叠加 `-DaylightBias`
+/// （返回值 `TIME_ZONE_ID_DAYLIGHT = 2`）。
+pub fn local_utc_offset_minutes() -> i32 {
+    use windows::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+
+    // 不变量：`tzi` 是栈上的输出参数，`GetTimeZoneInformation` 只写它，
+    // 返回值为时区 ID 或 `TIME_ZONE_ID_INVALID`（失败时返回 0xFFFFFFFF）。
+    let mut tzi = TIME_ZONE_INFORMATION::default();
+    let ret = unsafe { GetTimeZoneInformation(&mut tzi) };
+    if ret == 0xFFFF_FFFFu32 {
+        return 0; // 取不到就用 UTC，不把查询变成错误
+    }
+    let mut offset = -tzi.Bias;
+    if ret == 2 {
+        // TIME_ZONE_ID_DAYLIGHT
+        offset -= tzi.DaylightBias;
+    }
+    offset
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

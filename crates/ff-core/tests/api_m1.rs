@@ -122,7 +122,13 @@ fn search_surface() {
 
 #[test]
 fn parse_errors_surface() {
-    for bad in ["a|b", "!x", "(x)", "*.txt", "size:>1mb", "a\\b", "a/b"] {
+    // M1 里这些是「尚未支持」的错误；M4 实现 §7.1/§7.2 后成为合法语法。
+    // 契约测试的这一条随里程碑演进（见 DECISIONS）。
+    for ok in ["a|b", "!x", "(x)", "*.txt", "size:>1mb", "a\\b", "a/b"] {
+        assert!(parse(ok).is_ok(), "{ok} 在 M4 应合法");
+    }
+    // 真正非法的输入仍然报错，并带位置（UI 用它显示「语法错误」）。
+    for bad in ["size:abc", "regex:(", "dm:notadate", "attrib:Z"] {
         let e = parse(bad).unwrap_err();
         assert!(!e.message.is_empty());
         assert!(e.span.start < e.span.end);

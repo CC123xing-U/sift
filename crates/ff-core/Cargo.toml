@@ -16,3 +16,6 @@ rustc-hash = "2.1"
 # serde（M3/M6 IPC 必需）：Tauri invoke 经 JSON 序列化 ff-engine::api 契约类型。
 # 纯 Rust、无 unsafe，与 #![forbid(unsafe_code)] 一致；已在 docs/DEPENDENCIES.md 登记。
 serde = { version = "1", features = ["derive"] }
+# regex 1.x（MIT OR Apache-2.0）：DESIGN §7.2 的 regex: 修饰符（明确允许，
+# "先用 regex 默认，不引入 fancy-regex"）。无 unsafe，与 forbid(unsafe_code) 一致。
+regex = "1"

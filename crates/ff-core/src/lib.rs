@@ -15,6 +15,7 @@
 pub mod cancel;
 pub mod case;
 pub mod entry;
+pub mod eval;
 pub mod highlight;
 pub mod path;
 pub mod persist;

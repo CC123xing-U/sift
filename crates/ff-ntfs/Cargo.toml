@@ -31,4 +31,5 @@ features = [
     "Win32_System_Ioctl",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    "Win32_System_Time",
 ]

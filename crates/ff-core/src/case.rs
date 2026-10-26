@@ -8,17 +8,31 @@
 ///
 /// 非 UTF-8 输入原样返回（防御路径；索引输入均来自 `String`，恒为合法 UTF-8）。
 pub fn simple_lowercase(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    simple_lowercase_into(bytes, &mut out);
+    out
+}
+
+/// 同 [`simple_lowercase`]，但写入调用方提供的缓冲。
+///
+/// M4 的全表扫描类查询（通配符 / 正则 / `ext:` / 属性）会对每条名字做一次
+/// 大小写折叠；每次都新建 `Vec` 时实测 `ext:pdf` 在 88 万条卷上要 77 ms，
+/// 复用缓冲后可去掉这部分分配（`search.rs` 用 thread-local 复用同一个缓冲）。
+pub fn simple_lowercase_into(bytes: &[u8], out: &mut Vec<u8>) {
+    out.clear();
     let s = match std::str::from_utf8(bytes) {
         Ok(s) => s,
-        Err(_) => return bytes.to_vec(),
+        Err(_) => {
+            out.extend_from_slice(bytes);
+            return;
+        }
     };
-    let mut out = Vec::with_capacity(bytes.len());
+    out.reserve(bytes.len());
     let mut buf = [0u8; 4];
     for c in s.chars() {
         let ch = lower_char(c).unwrap_or(c);
         out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
     }
-    out
 }
 
 /// 单字符简单小写；多字符展开或字节数变化时返回 `None`（调用方保留原字符）。

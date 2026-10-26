@@ -151,3 +151,36 @@
 - 托盘菜单（显示/隐藏/重建索引/退出）实际交互：待实机。
 - `Ctrl+Alt+Space` 全局快捷键注册与 `toggle_window`：待实机。
 - 双击 Ctrl 唤出（`WH_KEYBOARD_LL`）：**未实现**，留待后续（设置项可关）。
+
+---
+
+## M4 · 查询语法与属性过滤（2026-10-26）
+
+### 真实卷实测（C: 卷，880,465 条，release + 管理员，单次）
+
+复现命令：`cargo build --release -p ff-cli && ./target/release/ff-cli.exe search C: "<查询>" --max 3`
+（同一台基准机器；`ff-cli` 每次先全量建索引约 3.8–4.3 s，下表为**搜索耗时**）。
+
+| 查询 | 走的路径 | 搜索耗时 |
+|---|---|---:|
+| `folder:Windows` | 子串 + 属性过滤（memmem 驱动） | **3 ms** |
+| `ext:pdf` | 字面探针剪枝后验证 | **2 ms**（剪枝前 67 ms） |
+| `*.log` | 通配符，字面探针剪枝 | **5 ms**（剪枝前 67 ms） |
+| `ext:doc;docx;pdf;md;txt;rtf;xls;xlsx;csv;ppt;pptx`（UI「文档」chip） | 11 个探针并集 | **33 ms**（剪枝前 76 ms） |
+| `ext:jpg;jpeg;png;gif;bmp;webp;svg;ico;tif;tiff`（UI「图片」chip） | 10 个探针并集 | **46 ms** |
+| `size:>500mb` | SoA 列全表扫描 | **6 ms** |
+| `regex:^\w+\.log$` | 正则，无探针可剪枝 → 全表 | **69 ms** |
+
+**结论**：`ext:` / 通配符经「字面探针剪枝」后从 67 ms 降到 2–5 ms；多扩展名（UI chips）降到 33–46 ms；
+正则与路径类仍走全表（69 ms）。全部落在 DESIGN §1.3 的「子串搜索 ≤ 100 ms」目标区间内。
+
+### 语法测试集
+
+`crates/ff-core/tests/m4_syntax.rs`：**106 条**表驱动用例（验收要求 ≥ 80），
+覆盖合法语法、错误输入、半成品输入、每个修饰符的边界、NOT / OR 优先级，
+并额外断言「结果恒升序去重」与「取消不返回半成品」。
+
+### 门禁
+
+`cargo fmt` / `cargo clippy --workspace --all-targets -D warnings`（双 workspace 含 `app/src-tauri`）/
+`cargo test --workspace`（**179 passed**）/ `npm run build` 全绿。

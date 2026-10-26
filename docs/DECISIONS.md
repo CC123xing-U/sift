@@ -160,3 +160,36 @@
       - **根因**：UI_SPEC §3.3 原为「每次输入变化即触发搜索」，每敲一个字都对全卷（实测约 180 万条目）做一次完整检索 + IPC 往返 + 虚拟列表重建。
       - **修复**：`App.tsx` 加 `SEARCH_DEBOUNCE_MS = 120` 防抖 —— 输入本身仍是受控 state、立即回显，只在停止输入后真正发检索；**清空输入立即执行**（不等防抖，避免结果残留）。另：被覆盖的旧结果集在回包时主动 `cancel(id)` 释放（原本要等 60s 回收）。
       - **取舍**：DESIGN §13-M3 的「按键→首屏 ≤50ms」指**引擎检索延迟**，防抖是叠加其上的 120ms 输入停顿窗口；这是与 Everything 一致的取舍，不是对该指标的破坏。
+
+67. **M4 查询语法与属性过滤（2026-10-26 实现）**：
+    - **AST 化**：`ff-core/src/query.rs` 由「扁平 AND terms」改为表达式树
+      `Expr::{Empty, And, Or, Not, Name, Pred}`；手写递归下降，优先级 NOT > AND > OR。
+      求值在 `search.rs`（索引路径）与新增 `eval.rs`（单条目路径，供 M2 Overlay 用）
+      两处共用同一棵树——Overlay 条目此前只按 `terms` 做 AND，M4 的 OR / NOT / 修饰符
+      会在增量条目上漏匹配，这是必须修的语义缺陷。
+    - **契约测试随里程碑演进**：`api_m1.rs::parse_errors_surface` 原本断言
+      `a|b` `!x` `(x)` `*.txt` `size:>1mb` `a\b` 为错误；M4 实现后它们全部合法，
+      该测试改为「合法 + 另用真正非法输入（`size:abc` / `regex:(` / `dm:notadate` / `attrib:Z`）验证错误」。
+      `ff-engine` 的 `parse_error_written_not_err` 同理改用 `size:abc`。
+    - **容错优先于报错**（DESIGN §7.3）：未闭合 `(` `<`、单独的 `!`、空修饰符值
+      （`size:` `dm:` `ext:` …）一律降级为字面子串或「无贡献」，只有**明确非法的值**才报错。
+    - **扫描范围放宽**：`>` `<` 既是分组语法字符又是 `size:` 比较符，`|` 既是 OR 又是正则的或——
+      故 `size:` `depth:`（在 `>` `<` 处不截断、在 `|` 处截断）与 `regex:`（两者都不截断）
+      三个修饰符单独走放宽的值扫描。
+    - **`case:` / `nocase:` 带值时**，冒号后的内容按**独立子串 term** 处理（`case:READ` =
+      开区分大小写 + 搜 `READ`），否则用户写的搜索词会被当成开关参数丢掉（与 `file:notes` 一致）。
+    - **日期时区**：DESIGN §7.2 要求按本地时区解释，但 `ff-core` 是零平台依赖的纯逻辑 crate，
+      标准库拿不到时区偏移。方案：`Query::context.utc_offset_minutes` 由调用方注入，
+      Windows 侧 `ff-engine` 用 `ff_ntfs::win32::local_utc_offset_minutes()`
+      （`GetTimeZoneInformation`，`偏移 = -Bias`，夏令时再叠加 `-DaylightBias`）填真实值；
+      未注入时按 UTC 日界（偏差最多 ±14 小时）。日历日换算用 Howard Hinnant 移位算法，无新依赖。
+    - **`attrib:` 的能力边界**：索引的 `flags` 只保存 R / H / S / D 四个派生位，
+      索引路径只能判定这四个字母；`A`（存档）`C`（压缩）`E`（加密）等其余位在索引路径判不了
+      （映射后掩码为 0 即不命中）。Overlay 路径持有原始 `attrs`，可判定全部字母。
+      补齐需 §4.3 增加 attrs 列，留待后续。
+    - **高亮边界**：`Query.terms` 只收集子串 / 短语 term（不含通配符、正则、NOT 子树内的 term），
+      因此 `*.txt` / `regex:` 在 M4 不高亮——不显示错误的高亮比显示错的更安全。
+    - **性能**：全表扫描类查询原本每条名字都新建小写 `Vec`（`ext:pdf` 实测 67 ms）。
+      两处优化：① `case::simple_lowercase_into` + thread-local 复用缓冲；
+      ② **字面探针剪枝**——`ext:` 用 `.ext`、`*.log` 用最长字面段先走 `memmem` 出候选再验证
+      （多扩展名取并集）。结果：单扩展名 67→2 ms，通配符 67→5 ms，UI chips 76→33~46 ms。

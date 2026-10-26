@@ -455,6 +455,19 @@ pub trait EngineClient: Send + Sync {
 ### M4 查询语法与属性过滤
 - 第 7 节解析器与修饰符；按列排序；Top-K。
 - **验收**：语法测试集 ≥ 80 条（含错误输入与半成品输入）；`size:` `dm:` `ext:` `path:` `regex:` 的边界用例；NOT / OR 优先级用例。
+- **状态（2026-10-26，main，见 DECISIONS #67 / BENCH M4 节）**：
+  - 解析器 AST 化（`Expr::{Empty, And, Or, Not, Name, Pred}`，手写递归下降，NOT > AND > OR）；
+    §7.2 的 M4 必做修饰符**全部落地**：`case:` `nocase:` `file:` `folder:` `ext:` `path:` `regex:`
+    `ww:`/`wholeword:` `startwith:` `endwith:` `size:` `dm:` `dc:` `da:` `parent:` `infolder:` `depth:` `attrib:`。
+  - 语法测试集 `crates/ff-core/tests/m4_syntax.rs` **106 条**（≥80 达标），含错误输入、
+    半成品输入容错、各修饰符边界、NOT / OR 优先级，并断言结果恒升序去重、取消无半成品。
+  - 按列排序（§7.2）与 Top-K 均已接线（`sort_hits` + `req.max_hits` 截断，M3 已有）。
+  - **实测**（C: 880,465 条，release）：`folder:Windows` 3 ms、`ext:pdf` 2 ms、`*.log` 5 ms、
+    UI chips 多扩展名 33–46 ms、`size:>500mb` 6 ms、`regex:` 69 ms——均在 §1.3 的 ≤100 ms 内。
+  - **已知边界（诚实记录）**：`attrib:` 在索引路径只能判定 R/H/S/D 四个派生位
+    （详见 DECISIONS #67）；通配符 / 正则在 M4 不做命中高亮；`dm:today` 等相对日期
+    依赖注入的时区偏移，未注入时按 UTC 日界（Windows 侧已注入真实值）。
+  - 副作用：本次一并修掉 UI 筛选 chips 全部报解析错误的 P0（`ext:` / `folder:` 现在引擎侧支持）。
 
 ### M5 模糊 + 拼音 + 评分
 - 第 8 节全部；设置页的规则；高亮范围。

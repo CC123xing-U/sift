@@ -24,8 +24,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ff_core::{
-    attrs, flags, parse, simple_lowercase, CancelToken, EntryId, EntryInput, IndexBuilder, Query,
-    VolumeIndex, VolumeInfo, NONE,
+    attrs, eval::EntryFacts, flags, parse, simple_lowercase, CancelToken, EntryId, EntryInput,
+    IndexBuilder, Query, VolumeIndex, VolumeInfo, NONE,
 };
 use ff_match::{Matcher, SubstringMatcher};
 use ff_ntfs::{RawEntry, ScanError, VolumeId, VolumeScanner};
@@ -251,6 +251,12 @@ impl EngineInner {
         };
         let mut query = parsed;
         query.case_sensitive = req.opts.case_sensitive;
+        // 日期按**本地时区**解释（DESIGN §7.2）：`ff-core` 拿不到时区偏移，
+        // 这里把 Win32 取到的真实值注入求值上下文（非 Windows 保持 0 = UTC）。
+        #[cfg(windows)]
+        {
+            query.context.utc_offset_minutes = ff_ntfs::win32::local_utc_offset_minutes();
+        }
 
         // 在所有 Ready 卷上求并集命中：Base + Overlay 合并
         let hide_system = req.opts.hide_system;
@@ -293,7 +299,20 @@ impl EngineInner {
                     if hide_hidden && f & flags::HIDDEN != 0 {
                         continue;
                     }
-                    if !overlay_matches(&query, &oe.name) {
+                    let (parent_name, path, depth) = overlay_context(&vd.index, oe);
+                    let facts = EntryFacts {
+                        name: &oe.name,
+                        is_dir: oe.is_dir,
+                        attrs: oe.attrs,
+                        size: oe.size,
+                        mtime: oe.mtime,
+                        ctime: oe.ctime,
+                        atime: oe.atime,
+                        parent_name: parent_name.as_deref(),
+                        path: path.as_deref(),
+                        depth,
+                    };
+                    if !overlay_matches(&query, &facts) {
                         continue;
                     }
                     hits.push((vid.clone(), Hit::Overlay(*frn)));
@@ -1041,26 +1060,35 @@ fn drive_prefix(index: &VolumeIndex) -> String {
 }
 
 /// Overlay 名字是否命中查询（与 Base 一致的子串 AND + 大小写策略）。
-fn overlay_matches(query: &Query, name: &str) -> bool {
-    if query.terms.is_empty() {
-        return false; // 空查询 → 空结果（与 Base 一致）
-    }
-    let hay: Vec<u8> = if query.case_sensitive {
-        name.as_bytes().to_vec()
-    } else {
-        simple_lowercase(name.as_bytes())
-    };
-    for t in &query.terms {
-        let needle: Vec<u8> = if query.case_sensitive {
-            t.text.clone().into_bytes()
-        } else {
-            simple_lowercase(t.text.as_bytes())
-        };
-        if !SubstringMatcher::new(&needle).matches(&hay) {
-            return false;
+/// Overlay 条目不在索引里，父名 / 完整路径 / 深度只能借 Base 索引推导。
+///
+/// Overlay 存的是「新增或改名的条目」，其父目录通常在索引中，因此
+/// `parent:` / `infolder:` / `path:` / `depth:` 仍可判定；父不在索引时
+/// 相应条件判定为 false（记录在 DECISIONS）。
+fn overlay_context(
+    index: &VolumeIndex,
+    oe: &OverlayEntry,
+) -> (Option<String>, Option<String>, u32) {
+    match index.frn_to_id(oe.parent_frn) {
+        Some(pid) => {
+            let parent_name = index.name_str(pid).map(str::to_string);
+            let path = index.path_string(pid).map(|mut p| {
+                if !p.ends_with('\\') {
+                    p.push('\\');
+                }
+                p.push_str(&oe.name);
+                p
+            });
+            (parent_name, path, index.depth_of(pid) + 1)
         }
+        None => (None, None, 0),
     }
-    true
+}
+
+/// Overlay 条目是否命中：走与 Base 相同的 AST（M4 的 OR / NOT / 修饰符
+/// 在增量条目上才不会漏匹配——旧实现只按 `terms` 做 AND）。
+fn overlay_matches(query: &Query, f: &EntryFacts<'_>) -> bool {
+    query.matches_facts(f)
 }
 
 /// Overlay 名字内的命中区间（供高亮；与 Base `highlight_ranges` 语义一致）。
@@ -1454,7 +1482,9 @@ mod tests {
     #[test]
     fn parse_error_written_not_err() {
         let e = engine();
-        let sum = e.search(req("a|b")).unwrap();
+        // `a|b` 在 M1 是「OR 未支持」的错误，M4 起合法；改用一个真正非法的
+        // 修饰符值来验证「语法错误写进 summary 而不是返回 Err」这一契约。
+        let sum = e.search(req("size:abc")).unwrap();
         assert!(sum.parse_error.is_some());
         assert_eq!(sum.total, 0);
     }
