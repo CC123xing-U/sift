@@ -17,6 +17,12 @@
 > 设置页 `模糊匹配` / `拼音匹配` / `显示系统/隐藏文件` 三个开关已真正驱动引擎，
 > 按 UI_SPEC §4.8.1 摘除「未接线」标注。§1.2、§1.4、§3.2、§3.6、§7 已按 M5 后状态更新；
 > **§5 的 P0-2 复制路径、P0-3 右键菜单、P1-1 窗口拖动、P1-7 设置页其余项仍然有效**。
+>
+> **状态更新（2026-11-15，M5 后的缺陷收尾轮）**：**P0-2 复制路径、P0-3 右键菜单、
+> P1-1 窗口拖动已修复**。引擎侧用 Win32 FFI 真实写系统剪贴板（含新增 `CopyName`），
+> 结果行新增四项右键菜单与快捷键提示，`.topbar` 加 `data-tauri-drag-region="deep"`
+> 让无边框窗口可拖动。§3.4 / §3.5 / §3.6 / §5 / §8 已按修复后状态更新；
+> 决策与验证边界见 `docs/DECISIONS.md` #74–#77。**P1-7 设置页其余项仍然有效**。
 > 当前工作树基线以 `git log` 为准，本文仍以「M3 原型期」视角写就的段落请按上述更新理解。
 
 ---
@@ -79,7 +85,7 @@
 | M4 | 查询语法与属性过滤（`size:` `dm:` `ext:` `path:` `regex:`、OR/NOT/通配符） | ✅ 完成（106 条语法用例，C: 卷实测 2–69 ms） |
 | M5 | 模糊 + 拼音 + 评分排序 | ✅ 完成（2026-11-15；T1/T2/T3 分层 + 评分排序，200 万条实测达标；规则编辑器 / 双拼 / 多音字未做） |
 | M6 | 服务拆分（普通权限 UI + 提权服务）、命名管道、HTTP API | ❌ 未开始 |
-| M7 | 对话框集成、内容搜索、硬链接、filelist 导入、右键菜单 | ❌ 未开始 |
+| M7 | 对话框集成、内容搜索、硬链接、filelist 导入（**右键菜单已提前到 M5 收尾轮完成**） | ❌ 未开始 |
 
 ### 1.5 硬约束（评判时请考虑）
 
@@ -202,10 +208,11 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 |---|---|---|---|
 | 打开文件 | ✅ | `inprocess.rs::open_impl` → `shell_open(full, false)` | 用系统 Shell 关联程序打开完整路径 |
 | 打开所在文件夹 | ✅ | 同上 → `shell_open(full, true)` | `explorer /select,"<full path>"`（在资源管理器中选中该文件） |
-| 复制路径 | 🔌 | `inprocess.rs::open_impl` | **`OpenAction::CopyPath => Ok(())`——什么都没做**。注释写着「由 UI 层处理」，但 `TauriEngine.open` 只是 `invoke('open')`，前端也没有剪贴板回退。**`Ctrl+C` 当前无任何实际效果** |
+| 复制路径 | ✅ | `inprocess.rs::open_impl` → `clipboard_set_text(full)` | **2026-11-15 修复**：Win32 FFI 写 `CF_UNICODETEXT`（零新增依赖），失败返回 `Err` 并在状态栏提示；`Ctrl+C` 与右键菜单共用 `runAction`，成功后 toast「已复制完整路径」。真实剪贴板往返单测见 DECISIONS #74 |
+| 复制文件名 | ✅ | 同上 → `clipboard_set_text(file_name_from_full(&full))` | 新增 `OpenAction::CopyName`，`types.ts` / `MockEngine.ts` 同步契约 |
 | 双击行打开 | ✅ | `ResultArea` 行 `onDoubleClick` | |
-| **右键菜单** | ❌ | — | **完全没有实现**。没有 `onContextMenu`，没有菜单组件。这是用户明确反馈的缺口 |
-| 行内快捷按钮 | ❌ | — | 没有 hover 出现的「打开文件夹」小图标等 |
+| **右键菜单** | ✅ | `ResultArea.tsx` `.list::onContextMenu` + `.ctxmenu` | **2026-11-15 修复**：四项（打开 / 打开所在文件夹 / 复制完整路径 / 复制文件名），右侧显示快捷键；`role=menu` + ↑↓/Home/End/Enter/Esc 键盘可达；外部点击 / 滚动 / resize / 换结果集关闭；Esc 用 document capture 抢在全局 Esc 之前，不会顺带隐藏窗口 |
+| 行内快捷按钮 | ❌ | — | 仍无 hover 出现的「打开文件夹」小图标；属 P2，本轮按 UI_SPEC §4.2 的四列 grid 结构不加 |
 
 ### 3.5 窗口与系统集成
 
@@ -218,7 +225,7 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 | 失焦自动隐藏 | ⚠️ | `main.rs::on_window_event` | 两道守卫：① 窗口「曾获得过焦点」后才允许隐藏（修了启动即隐藏的 bug）；② 前台窗口属于**本进程**时不隐藏（WebView2 子窗口/输入法抢焦点会让父窗口收到 `WA_INACTIVE`，那不是用户切走）。**仍偏激进**，见 §5 P1-6 |
 | Esc 隐藏 | ✅ | `App.tsx` | Esc 优先清空输入，输入已空 → `invoke('hide')`（Tauri）或隐藏 DOM（浏览器原型） |
 | 窗口命令 | ✅ | `main.rs` | `show_window` / `hide_window` / `toggle_window` 三个 IPC 命令 |
-| **窗口拖动/关闭按钮** | ❌ | — | `decorations: false` 且代码里**没有 `data-tauri-drag-region`**，也没有自绘的标题栏/关闭按钮。**窗口不能拖动，只能靠 Esc 隐藏或托盘退出** |
+| **窗口拖动** | ✅ | `TopBar.tsx` → `.topbar[data-tauri-drag-region="deep"]` | **2026-11-15 修复**：Tauri v2 `drag.js` 对 deep 沿 composedPath 上溯，遇到 `INPUT`/`BUTTON` 会自动阻止拖动，因此输入框选字、chips、✕/⚙ 仍可用，图标与空白区可拖。按 UI_SPEC §3.1 不加自绘关闭按钮（关闭语义由 Esc / 失焦 / 托盘承担） |
 
 ### 3.6 设置页（`app/src/components/Settings.tsx`）
 
@@ -324,7 +331,7 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 | `Home` / `End` | 跳到首行 / 末行 |
 | `Enter` | 打开选中项 |
 | `Ctrl+Enter` | 打开所在文件夹（`explorer /select,`） |
-| `Ctrl+C` | **复制路径（当前无效，见 §3.4）**；输入框内有选区时走浏览器原生复制 |
+| `Ctrl+C` | **复制完整路径（2026-11-15 已修复，见 §3.4）**，成功后状态栏 toast；输入框内有选区时走浏览器原生复制 |
 | `Ctrl+F` | 聚焦并全选输入框 |
 | `Esc` | 清空输入 → 再按隐藏窗口；设置页内则返回搜索视图 |
 | 直接打字 | 焦点自动转入输入框（保留已输入内容） |
@@ -346,19 +353,21 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 ### P0
 
 > **2026-11-15 更新**：P0-1 已由 M4 修复（`ext:` / `folder:` 引擎侧已支持，7 个 chips 全部可用）；
-> 下表保留评审原文以便追溯。**P0-2 复制路径、P0-3 右键菜单仍然有效**。
+> **P0-2 复制路径、P0-3 右键菜单、P1-1 窗口拖动已由 M5 收尾轮修复**
+> （Win32 剪贴板 FFI + 四项右键菜单 + `data-tauri-drag-region`，见 DECISIONS #74–#76）。
+> 下表保留评审原文以便追溯，问题描述为**修复前**状态，勿按现状理解。
 
 | # | 问题 | 位置 | 具体后果 | 建议方向 |
 |---|---|---|---|---|
 | **P0-1** | **筛选 chips 全部触发解析错误** | `queryUtils.ts::applyChip` 生成 `ext:...` / `folder:` → `query.rs::validate_term` 遇 `:` 报错 | 点「文档/图片/视频/音频/压缩包/文件夹」任一 chip → 输入框填入含 `:` 的修饰符 → 引擎返回 `ParseError("修饰符语法（如 size:）尚未支持（计划 M4）")` → 顶部红条报错 + 结果区显示「没有找到…」。**7 个 chip 里 6 个不可用**（只有「全部」可用，它做的是清除修饰符） | 二选一：① M4 实现 `ext:`/`folder:` 修饰符（正解，chip 逻辑已就绪）；② 在 M4 前把 chips 隐藏或禁用并标注「M4 提供」 |
-| **P0-2** | **Ctrl+C 复制路径无效果** | `inprocess.rs::open_impl` → `OpenAction::CopyPath => Ok(())` | 按 `Ctrl+C` 什么都不会发生，剪贴板无变化 | 引擎侧用 `OpenAction::CopyPath` 写剪贴板（Windows `SetClipboardData`），或改由前端 `navigator.clipboard.writeText`（前端拿不到完整路径，需要 `range` 行数据拼 `dir + name`） |
-| **P0-3** | **没有右键菜单** | `ResultArea.tsx` 无 `onContextMenu` | 「打开文件夹」「复制路径」只有键盘能触发，界面无任何提示，用户完全发现不了 | 加右键菜单（打开 / 打开所在文件夹 / 复制完整路径 / 复制文件名）+ hover 行内按钮 + 状态栏或输入框下方一行快捷键提示 |
+| **P0-2** ✅ 已修复 | **Ctrl+C 复制路径无效果** | `inprocess.rs::open_impl` → `OpenAction::CopyPath => Ok(())` | 按 `Ctrl+C` 什么都不会发生，剪贴板无变化 | 引擎侧用 `OpenAction::CopyPath` 写剪贴板（Windows `SetClipboardData`），或改由前端 `navigator.clipboard.writeText`（前端拿不到完整路径，需要 `range` 行数据拼 `dir + name`）。**采用左栏第一案**：Win32 FFI 零新增依赖，另补 `CopyName` 与成功 toast |
+| **P0-3** ✅ 已修复 | **没有右键菜单** | `ResultArea.tsx` 无 `onContextMenu` | 「打开文件夹」「复制路径」只有键盘能触发，界面无任何提示，用户完全发现不了 | 加右键菜单（打开 / 打开所在文件夹 / 复制完整路径 / 复制文件名）+ hover 行内按钮 + 状态栏或输入框下方一行快捷键提示。**已实现菜单四项 + 菜单内快捷键 + 状态栏提示；hover 行内按钮属 P2，按 UI_SPEC §4.2 四列 grid 未加** |
 
 ### P1
 
 | # | 问题 | 位置 | 说明 |
 |---|---|---|---|
-| P1-1 | **窗口无边框且不能拖动** | `tauri.conf.json` `decorations: false`，无 `data-tauri-drag-region` | 窗口无法移动，也没有关闭/最小化按钮。用户只能用 Esc 隐藏或托盘退出。需在 TopBar 加拖拽区 + 自绘关闭按钮，或改回有边框 |
+| P1-1 ✅ 已修复 | **窗口无边框且不能拖动** | `tauri.conf.json` `decorations: false`，原无 `data-tauri-drag-region` | 窗口无法移动，也没有关闭/最小化按钮。用户只能用 Esc 隐藏或托盘退出。需在 TopBar 加拖拽区 + 自绘关闭按钮，或改回有边框。**已采用拖拽区方案**：`.topbar` 标 `data-tauri-drag-region="deep"`；按 UI_SPEC §3.1 不加快关闭按钮，其余标题栏按钮保持 ✕/⚙ |
 | P1-2 | 索引未完成时搜索，UI 不标注「部分结果」 | `StatusBar` / `ResultArea` | 扫描中就能搜，但结果不完整且 UI 不说明，用户会误以为搜全了（正确性 + 体验双重问题） |
 | P1-3 | 卷状态错误时只显示「索引出错：未知」 | `inprocess.rs::status_impl` 硬编码 `message: None` | `load_volume_with` 出错只设 `state = Error`，不存 message。需要把错误串透传到 `VolumeStatus.message` |
 | P1-4 | 首轮扫描（无历史索引）进度分母为 0 | `overallScanProgress` 用 `entries` 加权 | 条目数未知时 `w = max(1, entries) = 1`，进度会长期停在 0% 再跳 100%。需要粗粒度估算（如按已扫卷数 / 总卷数，或按已处理 MFT 字节数） |
@@ -416,8 +425,8 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 ## 8. 请重点回答这些问题
 
 1. **P0-1（chips 全废）的最佳处置**：在 M4 之前，是隐藏 chips、禁用 chips，还是保留并标注「M4 提供」？哪种对用户伤害最小？
-2. **P0-3（右键菜单）**：菜单项应该有哪些？是否需要在 M4 语法就绪前就加上？
-3. **P1-1（无边框窗口不能拖动/无关闭按钮）**：是加自绘标题栏（拖拽区 + 关闭按钮），还是改回系统边框？考虑到这是一个「唤出即用、用完即走」的搜索窗口。
+2. **P0-3（右键菜单）** —— **已定（2026-11-15）**：菜单项 = 打开 / 打开所在文件夹 / 复制完整路径 / 复制文件名，右侧显示快捷键；提前到 M5 收尾轮实现，不待 M7。理由与实现见 DECISIONS #75。
+3. **P1-1（无边框窗口不能拖动/无关闭按钮）** —— **已定（2026-11-15）**：保留无边框，用 `.topbar` 拖拽区解决移动；不加快自绘标题栏与关闭按钮（UI_SPEC §3.1 明确「无最小化/最大化/关闭」），关闭语义仍由 Esc / 失焦 / 托盘承担。理由见 DECISIONS #76。
 4. **交互心智**：当前「设置页替换整个窗口」的做法是否合理？还是应该用浮层/抽屉？
 5. **状态反馈**：扫描中的「部分结果」应该怎么呈现才不误导用户？StatusBar 的信息密度合适吗？
 6. **信息架构**：四列（名称/路径/大小/修改时间）在 760px 宽度下的分配是否合理？是否该加「类型」列或详情面板（`UI_SPEC.md` §3.5 提过右侧详情面板，当前未实现）？

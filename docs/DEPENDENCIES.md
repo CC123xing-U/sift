@@ -25,3 +25,10 @@
 > `ib-pinyin` / `nucleo-matcher` 是生产库替换选项，引入前须按 §2.1 核对版本
 > 与接口、核对许可证（§15 特别提醒 nucleo 系列条款）、在本表登记，并回归
 > 金标准用例与 BENCH 实测。理由与触发条件见 `docs/DECISIONS.md` #70。
+>
+> **M5 收尾轮（2026-11-15）：同样零新增依赖。** P0-2 复制路径用
+> `ff-engine/src/inprocess.rs` 内 `#[cfg(windows)]` 的 `user32` / `kernel32` FFI
+> 直接写 `CF_UNICODETEXT`（与既有 `shell_open` 的 `shell32` FFI 同风格），
+> 未引入 `arboard` 或 Tauri clipboard 插件；P0-3 右键菜单与 P1-1 拖拽区
+> 均为纯 React / CSS / Tauri 内建 `data-tauri-drag-region`，无新包。
+> 详见 `docs/DECISIONS.md` #74–#76。

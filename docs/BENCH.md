@@ -247,3 +247,19 @@ GUI 端到端「按键→首屏 ≤50 ms」仍待实机；Top-K 部分选择未�
 `cargo fmt --all -- --check`（双 workspace）/ `cargo clippy --workspace --all-targets -D warnings` /
 `cargo clippy --all-targets -D warnings`（`app/src-tauri`）/ `cargo check`（`app/src-tauri`）/
 `cargo test --workspace` **208 passed** / `npm run build`（50 modules）/ release `m5probe` —— 全绿。
+（此为 M5 提交当时的快照；同日收尾轮新增 3 个单测后为 **211 passed**，见下节。）
+
+### M5 收尾轮：P0-2 / P0-3 / P1-1 验证（2026-11-15）
+
+| 项 | 验证方式 | 真实结果 |
+|---|---|---|
+| P0-2 剪贴板 | `cargo test -p ff-engine --lib clipboard_roundtrip -- --nocapture`（Windows 真写 + 回读 + 恢复原内容） | `clipboard roundtrip OK: 写入并回读 53 字节`；测试含中文、emoji、反斜杠，1 passed |
+| P0-2 失败透传 | 代码审阅 `clipboard_set_text`：`OpenClipboard` 5×10 ms 重试后仍失败 → `Err` → `onOpenError` | 非 Windows 分支返回 `Err("当前平台不支持系统剪贴板")`，不再静默 `Ok(())` |
+| P0-3 菜单 / P1-1 拖拽 | `npm run build` 后 grep `app/dist/assets/*.js` | 命中 `data-tauri-drag-region`、`ctxmenu`、`copy_name`、`复制文件名`、`右键查看更多操作`；50 modules 构建绿 |
+| 门禁 | fmt / clippy `-D warnings`（双 workspace）/ `cargo test --workspace` / `npm run build` | 全绿，`cargo test --workspace` **211 passed**（+3 个新单测） |
+
+**未自动化验证（如实记录）**：Tauri 真机窗口拖动、右键菜单鼠标交互、GUI 内粘贴回读。
+浏览器原型验证时内置浏览器截图通道持续超过 10 MiB 限制、DOM 快照只回传结果行节点，
+未取得菜单渲染后的可判定回显；因此**不宣称 GUI 端到端已实测**。
+手工复现步骤见 `UI_SPEC.md` §4.2.1，决策与边界见 `DECISIONS.md` #77。
+GUI 端到端「按键→首屏 ≤50 ms」仍待实机，与本节互不影响。

@@ -495,8 +495,14 @@ pub trait EngineClient: Send + Sync {
   - **真实卷实机复核**（release `ff-cli`、C: 卷 817,903 条）：`wendang` 7 ms
     命中「文档模板.md / 新建文本文档.txt」（T2），同批结果含 T3 模糊命中的长
     中文书名；`wd` / `文档` / `report --sort score` 均 2–4 ms。详见 BENCH M5 节。
+  - **M5 后的缺陷收尾轮（同日，DECISIONS #74–#77）**：P0-2 复制路径改为
+    Win32 剪贴板 FFI 真实写入（新增 `OpenAction::CopyName`、失败透传、成功 toast）、
+    P0-3 结果行四项右键菜单（键盘可达 + 状态栏可发现提示）、P1-1
+    `.topbar` 拖拽区解决无边框窗口不能移动。三项均为 M5 完成后的缺陷收尾，
+    **不新开里程碑**；`UI_SPEC` §4.2 原标右键菜单 P2/M7 的归属已同步改掉。
   - **门禁**：fmt / clippy `-D warnings` 双 workspace 绿、`cargo test --workspace`
-    **208 passed**、`npm run build`（50 modules）绿；`app/src-tauri` check 绿。
+    **211 passed**（收尾轮 +3：宽串编码 / 路径末段 / 真实剪贴板往返）、
+    `npm run build`（50 modules）绿；`app/src-tauri` check 绿。
   - **未实现 / 已知边界（诚实记录）**：
     - §8.3 的用户规则（FolderPriority / FileNamePriority / …）、PriorFolders
       与设置页评分规则编辑器**未实现**，界面仍禁用并标注「M5 预留，未实现」；
@@ -506,13 +512,17 @@ pub trait EngineClient: Send + Sync {
     - §8.2 的 Top-K 部分选择（`select_nth_unstable_by`）未做，当前对全部命中
       评分后全量排序；78,607 命中实测 110.3 ms，尚未成为瓶颈；
     - M4 的边界仍在：`attrib:` 索引路径只判 R/H/S/D，通配符 / 正则不高亮。
+    - 收尾轮三项的 **Tauri 真机 GUI 交互**（窗口拖动、右键菜单鼠标链路、
+      GUI 内剪贴板粘贴）未做自动化验证，浏览器原型验证受工具限制未取得
+      可判定回显；已由真实 Win32 剪贴板往返单测、构建产物与代码审阅覆盖，
+      手工复现步骤见 `UI_SPEC.md` §4.2.1，边界见 DECISIONS #77。
 
 ### M6 服务与开放接口
 - 第 10、12 节：服务拆分、命名管道、HTTP API（含全部安全要求）。
 - **验收**：UI 以普通权限运行即可搜索；HTTP 用错误 token / 错误 Host 头请求会被拒绝（写测试）；服务崩溃后 UI 能提示并重连。
 
 ### M7 进阶（逐项单独立项）
-对话框集成（`SetWinEventHook` + UI Automation，先在记事本"打开"对话框验证）· 内容搜索 · 硬链接多路径 · filelist 导入 · 非 NTFS 回退遍历 · 属性窗口 / 右键菜单。
+对话框集成（`SetWinEventHook` + UI Automation，先在记事本"打开"对话框验证）· 内容搜索 · 硬链接多路径 · filelist 导入 · 非 NTFS 回退遍历 · 属性窗口。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2，不再列在 M7。）
 
 ---
 

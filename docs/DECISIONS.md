@@ -275,3 +275,75 @@
     - 终态门禁：根 workspace fmt/clippy/`cargo test --workspace`
       **208 passed**；`app/src-tauri` fmt/clippy/check 绿；
       `npm run build` 50 modules 绿；release 实测脚本 `m5probe` 绿。
+
+74. **P0-2 复制路径真实落地（2026-11-15，M5 收尾轮）**：
+    - 旧实现 `open_impl` 里 `OpenAction::CopyPath => Ok(())` 是**静默假成功**，
+      注释说「由 UI 层处理」但 `TauriEngine.open` 只是 `invoke('open')`，
+      前端也没有剪贴板回退 → `Ctrl+C` 完全无效果。
+    - 改为引擎侧 Win32 FFI 真正写剪贴板：`user32` 的
+      `OpenClipboard` / `EmptyClipboard` / `SetClipboardData(CF_UNICODETEXT)` /
+      `CloseClipboard` + `kernel32` 的 `GlobalAlloc`/`GlobalLock`/`GlobalUnlock`。
+      与既有 `shell_open` 同风格（`#[cfg(windows)]` 隔离），**零新增 crate 依赖**
+      （DESIGN §2.1 准入，不擅引 `arboard` / Tauri clipboard 插件）。
+    - 三个易错点：① `SetClipboardData` 成功后内存所有权移交系统，**不能再
+      `GlobalFree`**，只有失败路径释放；② `OpenClipboard` 可能被别的进程短暂
+      占用，有限重试 5×10 ms，不长期阻塞 UI；③ 失败返回 `Err` 而不是 `Ok(())`，
+      经 `TauriEngine.open` → `onOpenError` 在状态栏如实提示（P1-9 通道）。
+    - 新增 `OpenAction::CopyName`（复制文件名），供右键菜单第 4 项使用；
+      `file_name_from_full` 自己切 `\` / `/`，不用 `Path::file_name`，
+      避免非 Windows 构建把反斜杠当普通字符。`types.ts` / `MockEngine.ts`
+      同步契约。
+    - 验证：`clipboard_roundtrip_writes_unicode_and_restores_previous` 单测在
+      Windows 上**真实写入并回读**含中文 / emoji / 反斜杠的宽文本，结束后恢复
+      原剪贴板（原内容非纯文本或剪贴板被占用时跳过，不破坏用户数据）；
+      `--nocapture` 实跑回显 `clipboard roundtrip OK: 写入并回读 53 字节`。
+      纯函数 `wide_with_nul` / `file_name_from_full` 另有跨平台单测。
+    - 复制成功也走 `onActionDone` → 状态栏 toast「已复制完整路径 / 已复制文件名」，
+      让 `Ctrl+C` 有可见反馈，而不是「好像没反应」。
+
+75. **P0-3 右键菜单提前到 M5 收尾轮（2026-11-15）**：
+    - 口径冲突：`UI_SPEC.md` §4.2 原写「右键菜单 **P2**（M7）」，
+      `REVIEW_BRIEF.md` §5 却列为 **P0-3**（用户明确反馈的缺口、界面完全发现不了
+      「打开文件夹 / 复制路径」）。按「用户反馈 > 排期」提前实现，同时把两份文档的
+      归属同步改掉，不留下「文档说 M7、代码已做」的反向谎言。
+    - 菜单四项：打开（`Enter`）/ 打开所在文件夹（`Ctrl+Enter`）/
+      复制完整路径（`Ctrl+C`）/ 复制文件名，右侧直接显示快捷键，兼作
+      REVIEW_BRIEF 建议的「快捷键可发现性」；状态栏在有结果时补一行
+      「右键查看更多操作」小字。
+    - 实现：`ResultArea.tsx` 在 `.list` 上统一 `onContextMenu`（`closest('.row')`
+      取行号），菜单 `role="menu"` + `menuitem`，↑↓/Home/End/Enter/Esc 键盘可达；
+      `position:absolute` 相对 `.resultarea` 并 clamp 到窗口内（浏览器原型与
+      Tauri 真机坐标都对）；外部点击 / 滚动 / resize / 换结果集自动关闭；
+      Esc 用 **document capture + `stopImmediatePropagation`** 抢在 App 全局 Esc
+      （清空输入 → 隐藏窗口）之前，避免「关菜单顺带把窗口藏了」。
+    - 抽出 `runAction` 统一键盘与菜单的动作入口，成功 / 失败都有 toast。
+      **不加 hover 行内按钮**：`UI_SPEC` §4.2 的行结构是四列 grid，加按钮会改
+      布局且属 P2，本轮只补 P0 的「可发现性」。
+    - 里程碑归属：这轮是「M5 完成后的缺陷收尾」，不是新开 M6/M7；
+      DESIGN §0「一次只做一个里程碑」仍成立。
+
+76. **P1-1 无边框窗口拖动（2026-11-15）**：
+    - `tauri.conf.json` 是 `decorations: false`，此前全仓无
+      `data-tauri-drag-region`，窗口**完全不能移动**。
+    - `TopBar.tsx` 给 `.topbar` 加 `data-tauri-drag-region="deep"`。
+      依据本机 `tauri-2.12.5/src/window/scripts/drag.js`：deep 沿 composedPath
+      上溯，遇到 `INPUT` / `BUTTON` 等可交互元素且自身未带该属性时**阻止拖动**，
+      因此输入框选字、chips、✕ / ⚙ 按钮仍完全可用，只有图标与空白区触发
+      `start_dragging`。UI_SPEC §3.1「输入行空白区为拖动区」由此落地。
+    - **不加自绘标题栏 / 关闭按钮**（REVIEW_BRIEF P1-1 的建议方向之一）：
+      `UI_SPEC` §3.1 已明确「无最小化/最大化/关闭；输入行右侧仅 ✕（清空查询）
+      与 ⚙（设置）」，关闭语义由 Esc / 失焦隐藏 / 托盘退出承担，保留 Alt+F4。
+      文档优先级 DESIGN > UI_SPEC > REVIEW_BRIEF，按 UI_SPEC 从简。
+
+77. **收尾轮门禁与未覆盖边界（2026-11-15）**：
+    - 根 workspace fmt / clippy `-D warnings` 绿，`cargo test --workspace`
+      **211 passed**（较 M5 的 208 多 3 个：宽串编码、路径末段、剪贴板往返）；
+      `app/src-tauri` fmt/clippy/check 绿；`npm run build` 50 modules 绿。
+    - 构建产物自证：`app/dist/assets/*.js` 含 `data-tauri-drag-region`、
+      `ctxmenu`、`copy_name`、`复制文件名`、`右键查看更多操作`。
+    - **未自动化验证（如实记录）**：Tauri 真机窗口拖动、右键菜单的鼠标交互与
+      剪贴板端到端 GUI 链路。浏览器原型验证时内置浏览器的截图通道持续超过
+      10 MiB 限制、DOM 快照只回传结果行节点，未拿到菜单渲染后的可判定回显；
+      已改由「真实 Win32 剪贴板往返单测 + 构建产物 + 代码审阅」覆盖，
+      手工复现步骤见 `docs/UI_SPEC.md` §4.2 与 `docs/BENCH.md`。
+      GUI 端到端「按键→首屏 ≤50 ms」仍待实机，不因本轮改动宣称完成。
