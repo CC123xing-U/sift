@@ -32,3 +32,10 @@
 > 未引入 `arboard` 或 Tauri clipboard 插件；P0-3 右键菜单与 P1-1 拖拽区
 > 均为纯 React / CSS / Tauri 内建 `data-tauri-drag-region`，无新包。
 > 详见 `docs/DECISIONS.md` #74–#76。
+>
+> **P1-8 收尾轮（2026-11-15）：同样零新增依赖。** FILETIME → JS epoch 毫秒
+> 转换是 `app/src-tauri/src/timeconv.rs` 内的纯 `i128` 算术，无新 crate；
+> 前端回归断言 `app/scripts/check-format.mjs` 复用已有 devDependency
+> `typescript`（`transpileModule` + `data:` URL 动态导入），未引入
+> vitest / jest，也未直接依赖 vite 的传递依赖 esbuild。目录大小与时间无效值
+> 兜底均为既有 React / CSS / TS 逻辑。详见 `docs/DECISIONS.md` #81。

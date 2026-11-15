@@ -458,6 +458,15 @@ pub trait EngineClient: Send + Sync {
     （防抖后段 ~26 ms 达标）。该验收项与 `UI_SPEC` §7.4 的 120 ms 防抖
     字面互斥，需按 DECISIONS #80 二选一裁定口径，本轮不改代码。
     托盘 / 全局热键 / 失焦隐藏稳定性仍待实机。
+  - **2026-11-15 P1-8 收尾（DECISIONS #81）**：真机暴露的时间列 `NaN` 与
+    目录大小 `0 B` 已修。`app/src-tauri/src/timeconv.rs` 在 `range` / `status`
+    序列化前把引擎的 FILETIME 转成 JS epoch 毫秒（必须在 Rust 侧：FILETIME
+    ≈1.34e17 > 2^53，进 JS 就已丢精度）；引擎契约、`dm:` 求值、
+    `Modified` 排序、`.ffix` 落盘、`ff-cli` 均不变。`format.ts` 增加无效值兜底，
+    `ResultArea` 按 `is_dir` 让目录大小列留白（UI_SPEC §4.2）。真机复验
+    `last_saved` 13 位有效、时间列正常、状态栏「已保存 17:00」、`anyNaN=false`，
+    首屏无回归。**M6 服务化须复用同一转换**（新 HTTP 通道不转就会重现该 bug）。
+    证据与门禁见 `BENCH.md`「P1-8 修复后真机复验」节。
 
 ### M4 查询语法与属性过滤
 - 第 7 节解析器与修饰符；按列排序；Top-K。
@@ -510,6 +519,8 @@ pub trait EngineClient: Send + Sync {
   - **门禁**：fmt / clippy `-D warnings` 双 workspace 绿、`cargo test --workspace`
     **211 passed**（收尾轮 +3：宽串编码 / 路径末段 / 真实剪贴板往返）、
     `npm run build`（50 modules）绿；`app/src-tauri` check 绿。
+    P1-8 收尾轮追加：`app/src-tauri` **`cargo test` 7 passed**（`timeconv` 边界）
+    与 `npm run test:format` **29 assertions**（前端格式化兜底），均零新增依赖。
   - **未实现 / 已知边界（诚实记录）**：
     - §8.3 的用户规则（FolderPriority / FileNamePriority / …）、PriorFolders
       与设置页评分规则编辑器**未实现**，界面仍禁用并标注「M5 预留，未实现」；

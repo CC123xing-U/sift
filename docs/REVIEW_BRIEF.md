@@ -31,8 +31,16 @@
 > Tauri ACL 报 `start_dragging not allowed by ACL`，补
 > `app/src-tauri/capabilities/default.json` 的
 > `core:window:allow-start-dragging` 后才真正生效（DECISIONS #79）。
-> 真机另发现两项未修缺陷（FILETIME 未转导致时间列 `NaN`、目录大小显示 `0 B`）
-> 与首屏 146 ms 的规范口径冲突，已记入 §5 P1-8 / DECISIONS #80。
+> 真机另发现的「时间列 `NaN` / 目录大小 `0 B`」两项缺陷**已于同日修复**
+> （P1-8，DECISIONS #81）；首屏 146 ms 的规范口径冲突仍开放，见 §5 P1-9 / #80。
+>
+> **状态更新（2026-11-15，P1-8 收尾轮）**：`app/src-tauri/src/timeconv.rs`
+> 在 `range` / `status` 两个 IPC 命令序列化前把 FILETIME 转成 JS epoch 毫秒
+> （引擎契约、排序、持久化、CLI 全部不动）；`format.ts` 对无效时间统一降级为空白，
+> `ResultArea` 按 `is_dir` 让目录大小列留白。新增 7 个 Rust 单测 + 29 条前端断言，
+> 真机 CDP 复验 `status.last_saved=1794733215003`、时间列正常、状态栏「已保存 17:00」、
+> 目录大小空白且文件行大小正常、`anyNaN=false`。证据图
+> `docs/evidence/gui-time-fixed.png`。§5 的 P1-8 已按修复后状态更新。
 > 当前工作树基线以 `git log` 为准，本文仍以「M3 原型期」视角写就的段落请按上述更新理解。
 
 ---
@@ -384,7 +392,7 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 | P1-5 | 落盘无脏标记 | `maybe_save`，`SAVE_INTERVAL = 10s` | 稳态下每 10s 重写一次索引（实机约 177MB/卷），白白吃 IO。加 dirty 标记即可 |
 | P1-6 | 失焦隐藏仍偏激进 | `main.rs::on_window_event` | 已有两道守卫，但用户实测启动后几秒就被别的窗口「抢焦点」而隐藏。建议加「点击外部不隐藏」开关，或延长宽限期 |
 | P1-7 | 设置页选项全部不生效、不落盘 | `Settings.tsx` + `main.rs` | 见 §3.6。用户点了开关，界面有反馈但行为不变 |
-| **P1-8（真机新发现，未修）** | 时间列 / 状态栏出现 `NaN-NaN-NaN NaN:NaN`、「已保存 NaN:NaN」；目录行大小显示 `0 B` | `inprocess.rs:950` 把 Windows FILETIME 原样送 IPC；`types.ts::ResultRow.mtime` 注释要求转 JS epoch 毫秒却没转；`ResultArea.tsx::RowContent` 未判 `is_dir` | CDP 实测 `status.last_saved = 134392046912540464`（18 位，1601 纪元 100 ns），`new Date()` → Invalid Date。证据图 `docs/evidence/gui-time-format-bug.png`，根因与修复方向见 DECISIONS #80。目录 `0 B` 违反 UI_SPEC §4.2「目录显示空白」 |
+| **P1-8 ✅ 已修复（DECISIONS #81）** | 时间列 / 状态栏原出现 `NaN-NaN-NaN NaN:NaN`、「已保存 NaN:NaN」；目录行大小显示 `0 B` | 原：`inprocess.rs` 把 Windows FILETIME 原样送 IPC；`types.ts::ResultRow.mtime` 注释要求 JS epoch 毫秒却没转；`ResultArea.tsx::RowContent` 未判 `is_dir`。**现**：`app/src-tauri/src/timeconv.rs` 在 `range`/`status` 序列化前转换（引擎契约不动），`format.ts` 对无效值兜底，`RowContent` 按 `is_dir` 传 null | CDP 原值 `status.last_saved = 134392046912540464`（18 位 → Invalid Date）；修复后 `1794733215003`（13 位，有效 Date），DOM 时间列 `10-12 18:46` 等、状态栏「已保存 17:00」、目录大小空白而文件行正常显示 KB、`anyNaN=false`。修复前 `docs/evidence/gui-time-format-bug.png` / 修复后 `gui-time-fixed.png`。**M6 服务化须复用同一转换**，见 #81 自我评估 |
 
 ### P2
 

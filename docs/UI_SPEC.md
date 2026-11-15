@@ -352,6 +352,9 @@
 - 图标位：16px 固定占位，图标异步加载（`SHGetFileInfo`，DESIGN §11.1），加载完成前显示中性占位（`icon-default` 的文件轮廓 SVG），**不得引起行高变化**。【DESIGN §11.1 + 自行决定：占位策略】
 - 路径列：只显示父目录完整路径，左对齐，过长省略号 + tooltip 全路径。【自行决定】
 - 大小列：目录显示空白（不显示"—"，减少噪音）；`STALE_META` 未补齐时显示空白。【DESIGN §4.3 + 自行决定】
+  `RowContent` 按 `row.is_dir` 传 `null` 给 `formatSize`（2026-11-15 P1-8）——引擎对目录给 `Some(0)`，直接渲染会变成误导性的 `0 B`；`formatSize` 另对 `NaN` / `Infinity` / 负数兜底。
+- 修改时间列：前端契约是 **JS epoch 毫秒**（`types.ts`），引擎 `ff-engine::api::ResultRow.mtime` / `EngineStatus.last_saved` 是 Windows **FILETIME**（100 ns、1601 纪元）。转换由 Tauri IPC 层的 `app/src-tauri/src/timeconv.rs` 在 `range` / `status` 序列化前完成，**不得在 TS 侧补算**：FILETIME ≈1.34e17 超过 2^53，JSON 反序列化时精度已丢（DECISIONS #81）。
+  `stale_meta` 的 `null`、时间未设置（FILETIME ≤ 0）、换算后落在 1900 年前 / 9999 年后的值一律显示空白（状态栏 `—`），`formatTime` / `formatTimeFull` / `formatHHMM` 对 `Invalid Date` 也必须降级，界面不得出现 `NaN-NaN-NaN`。
 - 交互：单击选中；双击 / `Enter` 打开；`Ctrl+Enter` 打开所在文件夹并选中；`Ctrl+C` 复制完整路径；**右键菜单已于 2026-11-15 提前实现**（原标 P2/M7，因用户明确反馈提为 P0，见 DECISIONS #75）。【DESIGN §11.1】
 - **右键菜单（2026-11-15 补）**：在结果行上右键 → 弹出四项菜单，顺序为「打开（`Enter`）/ 打开所在文件夹（`Ctrl+Enter`）/ 复制完整路径（`Ctrl+C`）/ 复制文件名」，右侧显示对应快捷键（可发现性），第 2、3 项之间加分隔线。
   - 定位：`position:absolute` 相对 `.resultarea`，坐标由鼠标位置换算并 clamp 到窗口内；浏览器原型（居中模拟窗口）与 Tauri 真机都不会溢出。

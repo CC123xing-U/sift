@@ -292,15 +292,43 @@ Win32 `SendInput` 真实鼠标键盘 + CDP `Runtime.evaluate` / `Page.captureScr
 - `docs/evidence/gui-context-menu.png` — 四项右键菜单、快捷键、高亮与分隔线。
 - `docs/evidence/gui-time-format-bug.png` — 真机发现的时间格式缺陷（见下）。
 
-**真机新发现（未修，DECISIONS #80）**：
-1. `status.last_saved = 134392046912540464`（FILETIME，1601 纪元 100 ns），
-   前端按 JS epoch 毫秒用 → `Invalid Date` → 修改时间列
+**真机新发现（DECISIONS #80；第 1、2 项已于同日修复，见下一节）**：
+1. **（已修，#81）** `status.last_saved = 134392046912540464`（FILETIME，
+   1601 纪元 100 ns），前端按 JS epoch 毫秒用 → `Invalid Date` → 修改时间列
    `NaN-NaN-NaN NaN:NaN`、状态栏「已保存 NaN:NaN」。
    `ResultRow.mtime` 注释要求 IPC 边界转换，实际未转。
-2. 目录行大小显示 `0 B`（UI_SPEC §4.2 要求空白）。
+2. **（已修，#81）** 目录行大小显示 `0 B`（UI_SPEC §4.2 要求空白）。
 3. DESIGN §13-M3「≤50 ms」与 `SEARCH_DEBOUNCE_MS = 120` 字面冲突，
    端到端实测 146 ms；防抖后段约 26 ms 达标，口径待裁定。
 4. 仍未实机覆盖：托盘菜单、全局热键物理触发、失焦隐藏稳定性、
    hide/show 循环、中文 IME 组词。
 
 验证结束已恢复剪贴板原内容并关闭应用进程。
+
+### P1-8 修复后真机复验（2026-11-15，DECISIONS #81）
+
+同环境重建 release（新前端 `dist` + `app/src-tauri/src/timeconv.rs`），
+真机卷 **2,182,600 条**；Win32 真实键盘 + CDP 直调 IPC / DOM 断言双通道。
+
+| 项 | 验证方式 | 真实回显 |
+|---|---|---|
+| `status.last_saved` | CDP 直调 `invoke('status')` | `1794733215003`（13 位 epoch ms）→ `2026-11-15T09:00:15.003Z`（本地 17:00）；原 18 位 FILETIME 不复现 |
+| `range` 时间字段 | 直调 `search`+`range`，`report` / `ext:txt` 各 20–30 行 | `invalidDates=0`、`nullMtime=0`；目录样例 `1792820494533` → `2026-10-24T05:41:34.533Z`；文件行同为 13 位 |
+| 修改时间列 | 真实键入 `report` 后读 DOM | `10-12 18:46` / `2024-11-7 15:32` / `11-15 14:28`…，全文 `anyNaN=false` |
+| 状态栏 | DOM `.status-right` | `索引就绪 · 2,182,600 条 · 已保存 17:00` |
+| 目录大小 | `folder:report`（23 行全目录）与 `report` 混合结果 | 目录行 `.c-size` 全空；同屏文件行 `70 KB` / `11 KB` / `406 KB` / `10 KB`（未误清文件） |
+| 首屏回归 | 三轮「清空 → 真实键入 → 首屏行」 | **149.6 / 144.9 / 143.2 ms**，与修复前 145.6 / 146.2 / 146.8 ms 同量级；每窗口 ≤30 次 i64 除法无可测开销 |
+
+**本轮门禁**：根 workspace `cargo fmt --all -- --check` / `clippy --workspace
+--all-targets -D warnings` / `cargo test --workspace` **211 passed**；
+`app/src-tauri` fmt / clippy / **`cargo test` 7 passed**（`timeconv` 新增）；
+`npm run test:format` **29 assertions**、`npm run build` 50 modules；
+`cargo build --release --features custom-protocol` 成功出 11 MB `sift-app.exe`。
+
+证据图：`docs/evidence/gui-time-fixed.png`（修复后，与 `gui-time-format-bug.png`
+同为 `report` 场景）。**注意**：复验时交互桌面有外部输入/剪贴板串扰，
+一次 `ctrl+a`+`type` 复合脚本把外部文本拼进了输入框；改为分步键入后
+输入稳定为 `report`，并用 CDP 直调 IPC 独立复核，结论不受该噪声影响。
+
+**仍开放**（不因本轮宣称完成）：#80 的首屏 50 ms 口径冲突、托盘菜单、
+全局热键物理触发、失焦隐藏稳定性、hide/show 循环、中文 IME 组词。

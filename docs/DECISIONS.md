@@ -429,3 +429,54 @@
     - **仍未覆盖**：托盘菜单点击、全局热键 `Ctrl+Alt+Space` 物理触发、
       失焦自动隐藏稳定性、窗口 hide/show 循环、中文 IME 组词。
       这些不是本轮三项，保持 #77/#80 的边界声明。
+    - **2026-11-15 当天后续**：上面 P1-8 与目录 `0 B` 两项已由下一轮修复，
+      见 **#81**；本条的 P1-9 首屏口径冲突与「仍未覆盖」项保持开放。
+      本段保留为发现时的原始记录，便于追溯。
+
+81. **P1-8：FILETIME → JS epoch 毫秒在 Rust IPC 边界转换（2026-11-15 修复）**：
+    - **裁定「必须在 Rust 侧转」**：#80 留了「IPC 边界转 epoch 毫秒（或前端换算）」
+      两个选项。本轮取前者，理由是定量的：典型 FILETIME ≈ 1.34e17，
+      超过 IEEE-754 的 2^53 ≈ 9.01e15；JSON 反序列化到 JS 时精度已经丢失，
+      `new Date(1.34e17)` 更是 `Invalid Date`，前端补算无解。反向换算出的
+      epoch 毫秒最大约 9.22e14（`i64::MAX` ticks / 1e4），始终 < 2^53，
+      JSON number 可无损表示。
+    - **不动引擎契约**：`ff-engine::ResultRow.mtime` / `EngineStatus.last_saved`
+      保持 FILETIME，`dm:` 求值、`SortKey::Modified` 排序、`.ffix` 持久化与
+      `ff-cli` 全部不受影响。只新增 `app/src-tauri/src/timeconv.rs`，
+      在 `range` / `status` 两个 Tauri 命令**序列化前就地转换**（字段名与类型
+      不变，serde wire 契约冻结）。`api.rs` / `types.ts` 注释同步澄清两侧单位，
+      并顺手修正 `name_matches` 注释里「UTF-8 字节区间、M6 再转」的过时口径
+      （实际 `resolve_row` 已用 `to_utf16_ranges` 转成 UTF-16 码元）。
+    - **边界规则**（`filetime_to_epoch_ms`，`app/src-tauri` 新增 7 个单测）：
+      `ft <= 0`（NTFS「时间未设置」/数据损坏）→ `None`；换算后早于 1900-01-01
+      或晚于 9999-12-31 → `None`（避免显示 `1601-1-1` 或公元 31000 年）；
+      1900–1970 的真实老文件仍正常显示；亚毫秒按整除丢弃（UI 最细到秒）；
+      `None` 语义不变——`stale_meta` 的 `None` 不得被写成 0。
+      用 `i128` 做中间运算，将来入参改为 `u64` 也不会溢出。
+    - **前端防御**：`format.ts` 新增 `toDate()`，对 `null` / `NaN` /
+      `Infinity` / 越界值统一降级为空白（时间列）或 `—`（状态栏），杜绝再次把
+      `NaN-NaN-NaN` 渲染到界面；`formatSize` 补有限性与负数检查；
+      `ResultArea.tsx` 按 `is_dir` 传 `null`，目录大小列按 UI_SPEC §4.2 留白。
+      `app/scripts/check-format.mjs` 用既有 `typescript` 转译单文件后跑
+      **29 条断言**（`npm run test:format`），零新增依赖、无前端测试框架负担。
+    - **验证**：`cargo test`（`app/src-tauri`）**7 passed** / 根 workspace
+      **211 passed** / `npm run test:format` 29 assertions / `npm run build`
+      50 modules / 双 workspace fmt + clippy `-D warnings` 全绿；
+      Tauri release 真机 CDP 回显 `status.last_saved = 1794733215003`
+      （13 位、有效 Date）、`range` 抽样 `invalidDates=0`、DOM 时间列
+      `10-12 18:46` 等、状态栏「已保存 17:00」、目录大小空白而同屏文件行
+      正常显示 KB、`anyNaN=false`；首屏 149.6 / 144.9 / 143.2 ms 与修复前
+      145.6 / 146.2 / 146.8 ms 同量级（无性能回归）。
+      证据图 `docs/evidence/gui-time-fixed.png`（与 `gui-time-format-bug.png`
+      同为 `report` 场景，可直接对照）。
+    - **自我评估 / 后续隐患**：
+      ① `timeconv` 当前只在 Tauri 外壳。**M6 服务化把 `EngineClient` 暴露成
+      HTTP 时必须复用同一转换**（可上移到 `ff-engine` 公共模块），否则新通道
+      会重现同一个 bug；
+      ② 1900 年前的**真实**文件会显示空白——按「时间未设置远多于百年老文件」
+      取舍，如需放宽只改 `MIN_VALID_EPOCH_MS` 一个常数；
+      ③ 转换精度 1 ms，未来 UI 若要显示亚秒需改契约，不能只改前端；
+      ④ 真机交互桌面存在外部输入/剪贴板串扰（一次 `ctrl+a` + `type` 连续
+      发送时把外部文本拼进了输入框），已改为分步键入 + CDP 直调 IPC 复核，
+      结论不受影响；这类噪声下不要再依赖单次复合键盘脚本的回显；
+      ⑤ #80 的首屏 50 ms 口径冲突、托盘 / 热键 / IME 未覆盖项仍开放，本轮不碰。
