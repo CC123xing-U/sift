@@ -146,7 +146,7 @@
 
 ### 待实机复核（不在 CI，需 WebView2 运行时 + 显示器）
 
-- 按键 → 首屏结果 ≤ 50ms（典型查询）：引擎 M1 基准（子串 ≤100ms @2M 条目，见 M1 节）可作参照；GUI 端计时需 `tauri dev` 实机。
+- 按键 → 首屏结果 ≤ 50ms（典型查询）：**2026-11-15 真机实测 145.6 / 146.2 / 146.8 ms，端到端口径不达标**；防抖后段（搜索→渲染）约 26 ms 达标。引擎 6–7 ms。详见「GUI 真机验证」节与 DECISIONS #78/#80。
 - 窗口隐藏 / 唤出稳定性（失焦自动隐藏 + 全局热键唤出）：代码路径已落地，行为验证待实机。
 - 托盘菜单（显示/隐藏/重建索引/退出）实际交互：待实机。
 - `Ctrl+Alt+Space` 全局快捷键注册与 `toggle_window`：待实机。
@@ -240,7 +240,9 @@ cargo bench -p sift-bench --bench search_bench -- m5
 `zgr` 无拼音命中说明精简字典覆盖有限（真实卷缺合适样本），不等于 T2 失效。
 
 **未实测 / 边界**：多音字、双拼（精简字典未覆盖）、生产拼音库替换后的召回率；
-GUI 端到端「按键→首屏 ≤50 ms」仍待实机；Top-K 部分选择未做（见 DECISIONS #71）。
+GUI 端到端「按键→首屏 ≤50 ms」已于 2026-11-15 真机实测为 **145.6 / 146.2 / 146.8 ms**，
+按端到端口径不达标（120 ms 防抖主导，引擎 6–7 ms），详见下方「GUI 真机验证」节与 DECISIONS #78/#80；
+Top-K 部分选择未做（见 DECISIONS #71）。
 
 ### M5 门禁（2026-11-15）
 
@@ -258,8 +260,47 @@ GUI 端到端「按键→首屏 ≤50 ms」仍待实机；Top-K 部分选择未�
 | P0-3 菜单 / P1-1 拖拽 | `npm run build` 后 grep `app/dist/assets/*.js` | 命中 `data-tauri-drag-region`、`ctxmenu`、`copy_name`、`复制文件名`、`右键查看更多操作`；50 modules 构建绿 |
 | 门禁 | fmt / clippy `-D warnings`（双 workspace）/ `cargo test --workspace` / `npm run build` | 全绿，`cargo test --workspace` **211 passed**（+3 个新单测） |
 
-**未自动化验证（如实记录）**：Tauri 真机窗口拖动、右键菜单鼠标交互、GUI 内粘贴回读。
-浏览器原型验证时内置浏览器截图通道持续超过 10 MiB 限制、DOM 快照只回传结果行节点，
-未取得菜单渲染后的可判定回显；因此**不宣称 GUI 端到端已实测**。
-手工复现步骤见 `UI_SPEC.md` §4.2.1，决策与边界见 `DECISIONS.md` #77。
-GUI 端到端「按键→首屏 ≤50 ms」仍待实机，与本节互不影响。
+**同为 2026-11-15 的历史边界记录**：写这一节时浏览器原型验证受工具限制
+（截图通道 >10 MiB、DOM 快照只回传结果行节点），因此当时未宣称 GUI 实测。
+**当日稍后已由 Tauri 真机轮补齐，见下一节**；本段保留以说明为何分两步。
+
+### GUI 真机验证（2026-11-15，DECISIONS #78–#80）
+
+环境：`cargo build --release --manifest-path app/src-tauri/Cargo.toml
+--features custom-protocol` → `sift-app.exe` 11 MB；启动带
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`；
+WinSta0 交互桌面（桌面会话探测 `READY`）；真实卷 **2,179,900 条**索引。
+Win32 `SendInput` 真实鼠标键盘 + CDP `Runtime.evaluate` / `Page.captureScreenshot`
+双通道，脚本见 `.work/gui_act.py`、`.work/cdp.py`（本地，未入库）。
+
+| 项 | 真实操作 | 判定结果 |
+|---|---|---|
+| P1-1 拖动 | 拖拽区（放大镜图标）按下并移动 (+200,+110) | 窗口 rect `[260,100,1033,587]` → `[452,206,1225,693]`（+192,+106）✅ |
+| P1-1 负向对照 | 输入框内拖动 | rect 不变，输入框仍能真实键入 `report` ✅ |
+| P1-1 ACL | 首测 `unhandledrejection` | `Command plugin:window\|start_dragging not allowed by ACL` → 补 capability 后错误数组为空 ✅ |
+| P0-2 `Ctrl+C` | 输入框无选区（`selectionStart===selectionEnd===6`）时真实按键 | 系统剪贴板读回 `D:\Sift\.worktrees\d\target\criterion\report` + toast「已复制完整路径」✅ |
+| P0-3 菜单 | 结果行真实右键 | 四项 + 快捷键，rect `[301,133,216,139]` 全在 760×480 视口内 ✅ |
+| P0-3 `Esc` | 真实 Esc | `menu=false`、`input` 仍 `report`、`IsWindowVisible=true`（未清空、未隐藏）✅ |
+| P0-3 键盘 | `End` + `Enter` | 高亮「复制文件名」→ 剪贴板 `report` + toast「已复制文件名」✅ |
+| P0-3 鼠标 | 点第三项「复制完整路径」 | 剪贴板完整路径 + toast「已复制完整路径」✅ |
+| 失败透传 | 结果集 60 s 过期后执行菜单项 | toast「请求不存在或已过期」，不是静默失败 ✅ |
+| 首屏耗时 | 三轮「清空 → 真实键入 `report` → 首屏行渲染」 | **145.6 / 146.2 / 146.8 ms**（引擎 6–7 ms，120 ms 防抖主导）⚠️ |
+| 引擎搜索 | 状态栏 `elapsed_ms` | 6–12 ms（真实卷 2,179,900 条，2,907–2,909 命中）✅ |
+
+证据图（CDP 截图，可直接打开）：
+- `docs/evidence/gui-report.png` — 搜索 `report` 首屏，含状态栏「右键查看更多操作」提示。
+- `docs/evidence/gui-context-menu.png` — 四项右键菜单、快捷键、高亮与分隔线。
+- `docs/evidence/gui-time-format-bug.png` — 真机发现的时间格式缺陷（见下）。
+
+**真机新发现（未修，DECISIONS #80）**：
+1. `status.last_saved = 134392046912540464`（FILETIME，1601 纪元 100 ns），
+   前端按 JS epoch 毫秒用 → `Invalid Date` → 修改时间列
+   `NaN-NaN-NaN NaN:NaN`、状态栏「已保存 NaN:NaN」。
+   `ResultRow.mtime` 注释要求 IPC 边界转换，实际未转。
+2. 目录行大小显示 `0 B`（UI_SPEC §4.2 要求空白）。
+3. DESIGN §13-M3「≤50 ms」与 `SEARCH_DEBOUNCE_MS = 120` 字面冲突，
+   端到端实测 146 ms；防抖后段约 26 ms 达标，口径待裁定。
+4. 仍未实机覆盖：托盘菜单、全局热键物理触发、失焦隐藏稳定性、
+   hide/show 循环、中文 IME 组词。
+
+验证结束已恢复剪贴板原内容并关闭应用进程。

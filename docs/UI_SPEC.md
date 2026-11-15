@@ -362,17 +362,38 @@
   - **未加 hover 行内按钮**：属 P2，会改动本节四列 grid 结构，本轮只补 P0 的可发现性。
 - 选中态：`bg-selected` + 左侧 3px `accent` 指示条 + 文件名 500；悬停 `bg-hover`；选中+悬停 `bg-selected-hover`。键盘焦点落在选中行上（§6.2）。【自行决定】
 
-#### 4.2.1 三项修复的手工验证（GUI 自动化未覆盖，见 DECISIONS #77）
+#### 4.2.1 三项修复的真机验证（2026-11-15 已实测，DECISIONS #78–#80）
+
+**前置条件（真机踩坑）**：`.topbar` 的 `data-tauri-drag-region="deep"` 只是必要条件；
+还必须由 `app/src-tauri/capabilities/default.json` 放行
+`core:window:allow-start-dragging`，否则 Tauri ACL 拒绝
+`plugin:window|start_dragging`，窗口纹丝不动（DECISIONS #79）。
 
 ```bash
 cd /d/Sift
-npm run build:tauri          # 或 cargo build --release --manifest-path app/src-tauri/Cargo.toml --features custom-protocol
+export TMP=/f/Temp TMPDIR=/f/Temp TEMP=/f/Temp
+cargo build --release --manifest-path app/src-tauri/Cargo.toml --features custom-protocol
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
+  ./app/src-tauri/target/release/sift-app.exe
 ```
 
-1. **P1-1 拖动**：鼠标按住输入行左侧放大镜图标或 chips 行右侧空白处拖动，窗口应跟随移动；点输入框仍能正常聚焦、拖选文字，点 ✕ / ⚙ 仍触发各自动作。
-2. **P0-2 复制路径**：搜索任意文件 → 选中行 → `Ctrl+C` → 在任意文本框 `Ctrl+V`，应得到完整路径（含盘符与中文）；状态栏出现「已复制完整路径」。
-3. **P0-3 右键菜单**：在结果行右键 → 四项菜单出现在鼠标附近且不出窗口；↑↓ + Enter 可执行；Esc 只关菜单、不清空输入也不隐藏窗口；点「复制文件名」后 toast 显示「已复制文件名」，粘贴得到不含目录的名字。
-4. **边界**：剪贴板被其他程序占用时应显示错误 toast 而不是假成功；搜索结果集过期（60s 无访问回收）后点菜单项应显示错误提示。
+真机用 Win32 `SendInput` 真实鼠标键盘 + WebView2 CDP（`:9222`）DOM 断言，
+真实卷 2,179,900 条。完整数据与证据图见 `BENCH.md`「GUI 真机验证」、
+`docs/evidence/`。
+
+| 项 | 真实操作 | 实测结果 |
+|---|---|---|
+| P1-1 | 拖拽区按下移动 (+200,+110) | 窗口 rect `[260,100,1033,587]` → `[452,206,1225,693]` ✅；输入框内拖动窗口不动（负向对照）✅ |
+| P0-2 | 无选区时 `Ctrl+C` | 剪贴板 `D:\Sift\.worktrees\d\target\criterion\report` + toast「已复制完整路径」✅ |
+| P0-3 | 结果行右键 | 四项菜单 + 快捷键，rect `[301,133,216,139]` 全在视口内 ✅ |
+| P0-3 | `Esc` / `End`+`Enter` / 鼠标点第三项 | 只关菜单不清输入不隐藏窗口 ✅；键盘复制文件名得 `report` ✅；鼠标复制完整路径 ✅ |
+| 边界 | 结果集 60 s 过期后执行菜单项 | toast「请求不存在或已过期」，不是静默失败 ✅ |
+| 首屏 | 三轮「清空 → 键入 `report` → 首屏行」 | 145.6 / 146.2 / 146.8 ms（引擎 6–7 ms，120 ms 防抖主导），见 DECISIONS #80 |
+
+手工复现（无需脚本）：① 按住输入行左侧放大镜图标拖动，窗口跟随；点输入框仍能选字。
+② 搜索后选中行按 `Ctrl+C`，到任意文本框粘贴得到完整路径，状态栏出现「已复制完整路径」。
+③ 结果行右键 → 四项菜单，↑↓/Enter 或鼠标点击执行；Esc 只关菜单。
+④ 剪贴板被占用或结果集过期时应显示错误 toast 而不是假成功。
 
 ### 4.3 列头（ColumnHeader）
 - 见 §3.6。四个按钮，`aria-sort="ascending|descending|none"`，聚焦环 2px。【自行决定】

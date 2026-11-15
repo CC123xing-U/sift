@@ -451,6 +451,13 @@ pub trait EngineClient: Send + Sync {
   - M3① serde 契约：`ParseError.span`（`{start,end}`）、`ResultRow.name_matches`（`[[start,end],...]`）经 wire 适配器保留 Rust `Range` 类型；枚举 `snake_case`；`VolumeStatus.volume: String`。
   - 引擎接线：`build_engine()` 用 `NtfsVolumeScanner` 构造 `InProcessEngine`，后台线程逐卷 `rescan` 全量扫描不阻塞窗口；非 Windows 走 `empty()`。
   - **未实现/未验证（诚实记录）**：双击 Ctrl 唤出（`WH_KEYBOARD_LL`）留待后续（M3 仅 `Ctrl+Alt+Space`）；`rescan` 粒度粗（忽略盘符参数重建全部，引擎无按盘符查卷 API）；Tauri crate 编译链已在沙箱验证（`cargo check`/`cargo build` 出 `sift-app.exe` 15.2MB、clippy/fmt 全绿），**但运行时 GUI 项未验证**：本沙箱无显示器/WebView2 运行时，无法起窗口，「按键→首屏 ≤50ms」实机计时、窗口隐藏/唤出稳定性、托盘/全局热键实际行为需在有 WebView2 的机器上 `npm run build:tauri` 或 `tauri dev` 实机复核。
+  - **2026-11-15 真机补测（DECISIONS #78）**：release `sift-app.exe` 已在
+    WinSta0 交互桌面 + WebView2 运行时实机启动（CDP 9222），窗口/输入/
+    剪贴板/菜单均真实可操作。**「按键→首屏 ≤50 ms」按端到端口径实测
+    145.6 / 146.2 / 146.8 ms，不达标**：120 ms 防抖占主导，引擎仅 6–7 ms
+    （防抖后段 ~26 ms 达标）。该验收项与 `UI_SPEC` §7.4 的 120 ms 防抖
+    字面互斥，需按 DECISIONS #80 二选一裁定口径，本轮不改代码。
+    托盘 / 全局热键 / 失焦隐藏稳定性仍待实机。
 
 ### M4 查询语法与属性过滤
 - 第 7 节解析器与修饰符；按列排序；Top-K。
@@ -512,10 +519,14 @@ pub trait EngineClient: Send + Sync {
     - §8.2 的 Top-K 部分选择（`select_nth_unstable_by`）未做，当前对全部命中
       评分后全量排序；78,607 命中实测 110.3 ms，尚未成为瓶颈；
     - M4 的边界仍在：`attrib:` 索引路径只判 R/H/S/D，通配符 / 正则不高亮。
-    - 收尾轮三项的 **Tauri 真机 GUI 交互**（窗口拖动、右键菜单鼠标链路、
-      GUI 内剪贴板粘贴）未做自动化验证，浏览器原型验证受工具限制未取得
-      可判定回显；已由真实 Win32 剪贴板往返单测、构建产物与代码审阅覆盖，
-      手工复现步骤见 `UI_SPEC.md` §4.2.1，边界见 DECISIONS #77。
+    - **收尾轮三项已于同日 Tauri 真机实测通过**（DECISIONS #78 / BENCH
+      「GUI 真机验证」节）：窗口 rect 真实位移 +192,+106；`Ctrl+C` 真实写入
+      系统剪贴板并读回完整路径；右键菜单四项 + 键盘 / 鼠标两条执行路径 +
+      Esc 语义全部有 DOM 断言与截图（`docs/evidence/`）。
+      **同时更正**：真机首测抓到 `start_dragging not allowed by ACL`，
+      补 `app/src-tauri/capabilities/default.json` 后拖动才真正生效
+      （DECISIONS #79）——仅有 `data-tauri-drag-region` 不充分。
+      仍未覆盖：托盘 / 全局热键 / 失焦隐藏稳定性 / 中文 IME 组词。
 
 ### M6 服务与开放接口
 - 第 10、12 节：服务拆分、命名管道、HTTP API（含全部安全要求）。

@@ -23,6 +23,16 @@
 > 结果行新增四项右键菜单与快捷键提示，`.topbar` 加 `data-tauri-drag-region="deep"`
 > 让无边框窗口可拖动。§3.4 / §3.5 / §3.6 / §5 / §8 已按修复后状态更新；
 > 决策与验证边界见 `docs/DECISIONS.md` #74–#77。**P1-7 设置页其余项仍然有效**。
+>
+> **状态更新（2026-11-15，GUI 真机验证轮）**：三项已在 Tauri release 真机
+> （WinSta0 交互桌面 + WebView2 CDP）用真实鼠标键盘全部实测通过，
+> 详见 `docs/BENCH.md`「GUI 真机验证」节与证据图 `docs/evidence/`。
+> **重要更正**：真机首测发现 P1-1 只加 `data-tauri-drag-region` 并不足以拖动 ——
+> Tauri ACL 报 `start_dragging not allowed by ACL`，补
+> `app/src-tauri/capabilities/default.json` 的
+> `core:window:allow-start-dragging` 后才真正生效（DECISIONS #79）。
+> 真机另发现两项未修缺陷（FILETIME 未转导致时间列 `NaN`、目录大小显示 `0 B`）
+> 与首屏 146 ms 的规范口径冲突，已记入 §5 P1-8 / DECISIONS #80。
 > 当前工作树基线以 `git log` 为准，本文仍以「M3 原型期」视角写就的段落请按上述更新理解。
 
 ---
@@ -225,7 +235,7 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 | 失焦自动隐藏 | ⚠️ | `main.rs::on_window_event` | 两道守卫：① 窗口「曾获得过焦点」后才允许隐藏（修了启动即隐藏的 bug）；② 前台窗口属于**本进程**时不隐藏（WebView2 子窗口/输入法抢焦点会让父窗口收到 `WA_INACTIVE`，那不是用户切走）。**仍偏激进**，见 §5 P1-6 |
 | Esc 隐藏 | ✅ | `App.tsx` | Esc 优先清空输入，输入已空 → `invoke('hide')`（Tauri）或隐藏 DOM（浏览器原型） |
 | 窗口命令 | ✅ | `main.rs` | `show_window` / `hide_window` / `toggle_window` 三个 IPC 命令 |
-| **窗口拖动** | ✅ | `TopBar.tsx` → `.topbar[data-tauri-drag-region="deep"]` | **2026-11-15 修复**：Tauri v2 `drag.js` 对 deep 沿 composedPath 上溯，遇到 `INPUT`/`BUTTON` 会自动阻止拖动，因此输入框选字、chips、✕/⚙ 仍可用，图标与空白区可拖。按 UI_SPEC §3.1 不加自绘关闭按钮（关闭语义由 Esc / 失焦 / 托盘承担） |
+| **窗口拖动** | ✅ 真机实测 | `TopBar.tsx` → `.topbar[data-tauri-drag-region="deep"]` **+ `app/src-tauri/capabilities/default.json` → `core:window:allow-start-dragging`** | **2026-11-15 修复（两个条件缺一不可）**：Tauri v2 `drag.js` 对 deep 沿 composedPath 上溯，遇到 `INPUT`/`BUTTON` 会自动阻止拖动，因此输入框选字、chips、✕/⚙ 仍可用，图标与空白区可拖；但仅有属性时 Tauri ACL 拒绝 `start_dragging`，补 capability 后才生效（DECISIONS #79）。真机拖拽后窗口 rect `[260,100,...]` → `[452,206,...]`，输入框内拖动为负向对照（窗口不动）。按 UI_SPEC §3.1 不加自绘关闭按钮 |
 
 ### 3.6 设置页（`app/src/components/Settings.tsx`）
 
@@ -367,13 +377,14 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 
 | # | 问题 | 位置 | 说明 |
 |---|---|---|---|
-| P1-1 ✅ 已修复 | **窗口无边框且不能拖动** | `tauri.conf.json` `decorations: false`，原无 `data-tauri-drag-region` | 窗口无法移动，也没有关闭/最小化按钮。用户只能用 Esc 隐藏或托盘退出。需在 TopBar 加拖拽区 + 自绘关闭按钮，或改回有边框。**已采用拖拽区方案**：`.topbar` 标 `data-tauri-drag-region="deep"`；按 UI_SPEC §3.1 不加快关闭按钮，其余标题栏按钮保持 ✕/⚙ |
+| P1-1 ✅ 已修复并真机实测 | **窗口无边框且不能拖动** | `tauri.conf.json` `decorations: false`，原无 `data-tauri-drag-region`、`capabilities/` 为空 | 窗口无法移动，也没有关闭/最小化按钮。用户只能用 Esc 隐藏或托盘退出。需在 TopBar 加拖拽区 + 自绘关闭按钮，或改回有边框。**已采用拖拽区方案**：`.topbar` 标 `data-tauri-drag-region="deep"`，**并补 capability 放行 `core:window:allow-start-dragging`**（真机首测的 ACL 拒绝是修复前的隐藏坑，DECISIONS #79）；按 UI_SPEC §3.1 不加快关闭按钮，其余标题栏按钮保持 ✕/⚙ |
 | P1-2 | 索引未完成时搜索，UI 不标注「部分结果」 | `StatusBar` / `ResultArea` | 扫描中就能搜，但结果不完整且 UI 不说明，用户会误以为搜全了（正确性 + 体验双重问题） |
 | P1-3 | 卷状态错误时只显示「索引出错：未知」 | `inprocess.rs::status_impl` 硬编码 `message: None` | `load_volume_with` 出错只设 `state = Error`，不存 message。需要把错误串透传到 `VolumeStatus.message` |
 | P1-4 | 首轮扫描（无历史索引）进度分母为 0 | `overallScanProgress` 用 `entries` 加权 | 条目数未知时 `w = max(1, entries) = 1`，进度会长期停在 0% 再跳 100%。需要粗粒度估算（如按已扫卷数 / 总卷数，或按已处理 MFT 字节数） |
 | P1-5 | 落盘无脏标记 | `maybe_save`，`SAVE_INTERVAL = 10s` | 稳态下每 10s 重写一次索引（实机约 177MB/卷），白白吃 IO。加 dirty 标记即可 |
 | P1-6 | 失焦隐藏仍偏激进 | `main.rs::on_window_event` | 已有两道守卫，但用户实测启动后几秒就被别的窗口「抢焦点」而隐藏。建议加「点击外部不隐藏」开关，或延长宽限期 |
 | P1-7 | 设置页选项全部不生效、不落盘 | `Settings.tsx` + `main.rs` | 见 §3.6。用户点了开关，界面有反馈但行为不变 |
+| **P1-8（真机新发现，未修）** | 时间列 / 状态栏出现 `NaN-NaN-NaN NaN:NaN`、「已保存 NaN:NaN」；目录行大小显示 `0 B` | `inprocess.rs:950` 把 Windows FILETIME 原样送 IPC；`types.ts::ResultRow.mtime` 注释要求转 JS epoch 毫秒却没转；`ResultArea.tsx::RowContent` 未判 `is_dir` | CDP 实测 `status.last_saved = 134392046912540464`（18 位，1601 纪元 100 ns），`new Date()` → Invalid Date。证据图 `docs/evidence/gui-time-format-bug.png`，根因与修复方向见 DECISIONS #80。目录 `0 B` 违反 UI_SPEC §4.2「目录显示空白」 |
 
 ### P2
 
