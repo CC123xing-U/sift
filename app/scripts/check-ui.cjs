@@ -56,6 +56,8 @@ fs.mkdirSync(output, { recursive: true });
     assert.equal(await search.inputValue(), 'report');
 
     await page.getByRole('button', { name: '设置', exact: true }).click();
+    assert.equal(await page.locator('.settings').evaluate(e => getComputedStyle(e).animationName), 'settings-in');
+    assert.ok(await page.locator('.backbtn').evaluate(e => e === document.activeElement));
     assert.equal(await page.locator('.settings-head').evaluate(e => e.getBoundingClientRect().height), 44);
     assert.ok(await page.getByRole('switch', { name: '模糊匹配', exact: true }).isEnabled());
     assert.ok(await page.getByRole('switch', { name: /开机自启/ }).isDisabled());
@@ -66,6 +68,8 @@ fs.mkdirSync(output, { recursive: true });
     await page.locator('.app-window').screenshot({ path: path.join(output, 'sift-ui-settings.png') });
     await page.keyboard.press('Escape');
     await page.locator('#sift-input').waitFor();
+    assert.equal(await search.inputValue(), 'report');
+    assert.ok(await search.evaluate(e => e === document.activeElement));
 
     await page.setViewportSize({ width: 480, height: 600 });
     await page.waitForTimeout(300);

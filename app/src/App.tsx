@@ -64,6 +64,18 @@ export default function App() {
   const [input, setInput] = useState('');
   const [sort, setSort] = useState<SortSpec>({ key: 'score', descending: true });
   const [view, setView] = useState<'search' | 'settings'>('search');
+  const [settingsClosing, setSettingsClosing] = useState(false);
+  const closeSettings = () => setSettingsClosing(true);
+  const finishSettingsClose = useCallback(() => {
+    setView('search');
+    setSettingsClosing(false);
+  }, []);
+  useEffect(() => {
+    if (!settingsClosing) return;
+    // Also finish if a hidden WebView suspends CSS animation events.
+    const timer = setTimeout(finishSettingsClose, 180);
+    return () => clearTimeout(timer);
+  }, [settingsClosing, finishSettingsClose]);
   // 初始状态：首次轮询会立即填充（见下方 useEffect），此处仅给一个空壳避免首帧 undefined。
   const [status, setStatus] = useState<EngineStatus>({
     volumes: [],
@@ -327,7 +339,7 @@ export default function App() {
     if (e.key === 'Escape') {
       e.preventDefault();
       if (view === 'settings') {
-        setView('search'); // UI_SPEC §4.8：Esc 返回搜索视图
+        closeSettings();
         return;
       }
       if (input) {
@@ -439,7 +451,9 @@ export default function App() {
         <div className="app-window" onKeyDown={onKeyDown}>
           {view === 'settings' ? (
             <Settings
-              onBack={() => setView('search')}
+              onBack={closeSettings}
+              closing={settingsClosing}
+              onExited={finishSettingsClose}
               state={settings}
               patch={(p) => setSettings((s) => ({ ...s, ...p }))}
             />

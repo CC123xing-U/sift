@@ -414,3 +414,10 @@ npm run test:ui
 脚本支持 `UI_EVIDENCE_DIR` 指定截图目录（默认 `.work/ui-evidence`）。外部工具本机版本
 Playwright `1.66.0-alpha-2026-11-09`，Chromium 缓存构建 1254；没有改应用锁文件。
 本轮待验收：真实 Tauri/WebView2 新布局、125% 系统缩放、长路径/错误卷状态，及用户视觉确认。
+
+## 设置轻转场（#85）
+
+用户认可 #84 后提交 `e536db0`；提交前根 workspace fmt/clippy/test（211 passed）、
+Tauri fmt/clippy/test（7 passed）通过。设置转场继续沿用 CSS，无新增依赖。
+前端 build（50 modules）、29 格式断言及浏览器 UI 回归通过；新增进入动画名称、
+返回按钮焦点、Esc 关闭保留查询和恢复输入焦点断言。真实 WebView2 转场未复验。

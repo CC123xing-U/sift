@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { I18N } from '../i18n';
 
 /** 设置项状态。当前仅存内存（跨视图切换保留）；匹配/隐藏三项已接引擎，落盘待 M6。 */
@@ -48,6 +48,8 @@ const SOFTWARE_LICENSE = 'MIT';
 
 interface Props {
   onBack: () => void;
+  closing: boolean;
+  onExited: () => void;
   state: SettingsState;
   patch: (p: Partial<SettingsState>) => void;
 }
@@ -219,16 +221,23 @@ function ExcludePaths({
   );
 }
 
-export default function Settings({ onBack, state, patch }: Props) {
+export default function Settings({ onBack, closing, onExited, state, patch }: Props) {
+  const backRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => backRef.current?.focus(), []);
   const setFlag =
     (key: 'autostart' | 'hideOnBlur' | 'doubleCtrl' | 'showHidden' | 'fuzzy' | 'pinyin') =>
     (next: boolean) =>
       patch({ [key]: next });
 
   return (
-    <div className="settings">
+    <div
+      className={'settings' + (closing ? ' settings-exit' : '')}
+      onAnimationEnd={(event) => {
+        if (closing && event.target === event.currentTarget) onExited();
+      }}
+    >
       <div className="settings-head">
-        <button className="backbtn" onClick={onBack}>
+        <button ref={backRef} className="backbtn" onClick={onBack}>
           {I18N.back}
         </button>
         <h1 className="settings-title">{I18N.settings}</h1>
