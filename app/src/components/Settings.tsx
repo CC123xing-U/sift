@@ -61,7 +61,7 @@ function comboFromEvent(e: React.KeyboardEvent): string | null {
   if (e.altKey) parts.push('Alt');
   if (e.shiftKey) parts.push('Shift');
   if (e.metaKey) parts.push('Win');
-  parts.push(k.length === 1 ? k.toUpperCase() : k === ' ' ? 'Space' : k);
+  parts.push(k === ' ' ? 'Space' : k.length === 1 ? k.toUpperCase() : k);
   return parts.join('+');
 }
 
@@ -97,7 +97,7 @@ function Toggle({
         // 无障碍名里也带上阶段说明：与 M5/M6 占位项（"（M5 提供）"）口径一致，
         // 且可见文字是完整无障碍名的前缀，满足 WCAG 2.5.3 Label in Name。
         aria-label={pendingNote ? `${label}，${pendingNote}` : label}
-        disabled={disabled}
+        disabled={disabled || !!pendingNote}
         className={'toggle' + (on ? ' on' : '')}
         onClick={() => onToggle(!on)}
       >
@@ -134,6 +134,7 @@ function HotkeyRow({ value, onChange }: { value: string; onChange: (v: string) =
       <button
         type="button"
         className={'hotkey hotkey-btn' + (recording ? ' recording' : '')}
+        disabled
         aria-label={`${I18N.a11y.hotkeyRecord(value)}，自定义未接线`}
         aria-pressed={recording}
         onClick={() => setRecording((r) => !r)}
@@ -169,7 +170,7 @@ function ExcludePaths({
   };
 
   return (
-    <div className="set-block">
+    <fieldset className="set-block exclude-fieldset" disabled>
       <span className="set-block-label">
         排除路径 <span className="pending-tag">未接线</span>
       </span>
@@ -214,7 +215,7 @@ function ExcludePaths({
           {I18N.add}
         </button>
       </div>
-    </div>
+    </fieldset>
   );
 }
 
@@ -259,7 +260,7 @@ export default function Settings({ onBack, state, patch }: Props) {
 
         <section className="set-group">
           <h2 className="set-group-title">索引</h2>
-          <fieldset className="set-fieldset">
+          <fieldset className="set-fieldset" disabled>
             <legend className="set-block-label">
               索引卷 <span className="pending-tag">未接线</span>
             </legend>
@@ -290,76 +291,50 @@ export default function Settings({ onBack, state, patch }: Props) {
           {/* M5 已接线：两项直通 SearchOptions.fuzzy / .pinyin，不再标「M5 生效」。 */}
           <Toggle label="模糊匹配" on={state.fuzzy} onToggle={setFlag('fuzzy')} />
           <Toggle label="拼音匹配" on={state.pinyin} onToggle={setFlag('pinyin')} />
-          <fieldset className="set-fieldset">
-            <legend className="set-block-label">
-              双拼方案 <span className="pending-tag">暂未支持</span>
-            </legend>
-            {SHUANGPIN.map((s) => (
-              <label key={s.value} className="radio-row">
-                <input
-                  type="radio"
-                  name="shuangpin"
-                  value={s.value}
-                  checked={state.shuangpin === s.value}
-                  onChange={() => patch({ shuangpin: s.value })}
-                />
-                <span>{s.label}</span>
-              </label>
-            ))}
-          </fieldset>
+          <label className="set-row">
+            <span>双拼方案 <span className="pending-tag">暂未支持</span></span>
+            <select className="setting-select" value={state.shuangpin} disabled>
+              {SHUANGPIN.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+            </select>
+          </label>
         </section>
 
-        <section className="set-group">
-          <h2 className="set-group-title">高级（本期占位）</h2>
+        <details className="set-group advanced-settings">
+          <summary className="set-group-title">高级</summary>
           <div className="set-row disabled">
             <span>
               评分规则编辑器 <span className="pending-tag">M5 预留，未实现</span>
             </span>
             <button
               type="button"
-              role="switch"
-              aria-checked={false}
               aria-label="评分规则编辑器（M5 预留，未实现）"
-              className="toggle"
+              className="setting-command"
               disabled
             >
-              <span className="knob" />
+              管理规则
             </button>
           </div>
           <div className="set-row disabled">
-            <span>HTTP API 开关与 token</span>
+            <span>HTTP API <span className="pending-tag">M6 提供</span></span>
             <button
               type="button"
-              role="switch"
-              aria-checked={false}
-              aria-label="HTTP API 开关与 token（M6 提供）"
-              className="toggle"
+              aria-label="HTTP API 配置（M6 提供）"
+              className="setting-command"
               disabled
             >
-              <span className="knob" />
+              配置
             </button>
           </div>
-        </section>
+        </details>
 
         <section className="set-group">
           <h2 className="set-group-title">语言</h2>
-          <fieldset className="set-fieldset">
-            <legend className="set-block-label">
-              界面语言 <span className="pending-tag">仅中文</span>
-            </legend>
-            {LANGS.map((l) => (
-              <label key={l.value} className="radio-row">
-                <input
-                  type="radio"
-                  name="lang"
-                  value={l.value}
-                  checked={state.lang === l.value}
-                  onChange={() => patch({ lang: l.value })}
-                />
-                <span>{l.label}</span>
-              </label>
-            ))}
-          </fieldset>
+          <label className="set-row">
+            <span>界面语言 <span className="pending-tag">仅中文</span></span>
+            <select className="setting-select" value={state.lang} disabled>
+              {LANGS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+            </select>
+          </label>
         </section>
 
         <section className="set-group">

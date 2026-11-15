@@ -39,3 +39,13 @@
 > `typescript`（`transpileModule` + `data:` URL 动态导入），未引入
 > vitest / jest，也未直接依赖 vite 的传递依赖 esbuild。目录大小与时间无效值
 > 兜底均为既有 React / CSS / TS 逻辑。详见 `docs/DECISIONS.md` #81。
+>
+> **动效与质感收尾轮（2026-11-15）：同样零新增依赖。** 窗口唤出/隐藏与右键菜单
+> 动效全部为 CSS keyframes + `cubic-bezier` 曲线（`--ease-spring` 手感参考
+> CompressO 的 Framer Motion spring 与 ZTools 的移动端交互，但**未引入**
+> framer-motion 或任何动画库）；Rust 侧延迟隐藏用标准库线程 + `AtomicU64`
+> 代数计数，无新 crate。详见 `docs/DECISIONS.md` #83。
+>
+> **UI 重整（#84）：零新增应用/构建依赖。** 复用 React、CSS、既有 SVG 与原生
+> select/details。`test:ui` 使用外部安装的 Playwright/Chromium，通过环境变量定位；
+> 不进入 package.json 依赖或锁文件，不打进安装包，复现见 `BENCH.md`。

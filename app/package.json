@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test:format": "node scripts/check-format.mjs",
+    "test:ui": "node scripts/check-ui.cjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "dev:tauri": "tauri dev",

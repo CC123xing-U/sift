@@ -357,3 +357,60 @@ hide/show 循环、中文 IME 组词。首屏 50 ms 口径冲突已由下一节�
 **判定**：按 #66/#82 口径，执行段 ~26 ms **≤50 ms 达标**；端到端口径不达标
 （如实保留记录，不改写为达标）。「典型查询」明确为 ≥3 字符子串、命中 ≤10 万；
 单/双字符查询的性能优化属 M5 遗留（Top-K 部分选择），另行立项。
+
+### 动效与质感收尾真机验证（2026-11-15，DECISIONS #83）
+
+release `sift-app.exe`（新前端 dist + 动效 + capabilities 补 `core:event`），
+真实卷 2,182,599 条；Win32 真实键鼠 + CDP DOM/样式断言。
+
+| 项 | 验证方式 | 真实回显 |
+|---|---|---|
+| 布局基线 | CDP 量 `.app-window`/`.statusbar`/`scrollWidth` | `display:flex`、`.app-window [0,0,760,480]`、状态栏贴底 gap 1px、`scrollW 760`；`report` 结果态 **23 个行节点**（虚拟化正常，异常期曾全量渲染 2,899 个） |
+| 挂载进入动画 | 读 `.app-window` class 与 `animationName` | `.window-enter` + `window-in` ✅ |
+| 隐藏链路 | CDP 直调 `hide_window`，40ms 时查中间帧，300ms 后查 Win32 | `sift:hiding` 收到 → `.window-exit`/`window-out` 播放中（opacity 0.84 中间帧）→ `visible=false`，日志 `gen_match=true` + `hide result ok=true` ✅ |
+| 唤出恢复 | 直调 `show_window` | `.window-enter` 重播、opacity 恢复 1、`visible=true` ✅ |
+| 竞态（热键连按） | hide 后 30ms 内 show，500ms 后查 | 挂起隐藏作废（`gen_match=false`），窗口保持可见 ✅ |
+| Esc 隐藏（#83 修复） | 清空输入后真实键盘 `Esc` | `visible=false`，走 `hide_window` 命令链路 ✅（修复前 `invoke('hide')` 命令名错误静默失效） |
+| 右键菜单动效 | 真实右键后读计算样式 | `menu-in` 0.12s、`transform-origin: 0px 0px` ✅ |
+| 行状态过渡 | 读 `.row` 计算样式 | `background 0.16s cubic-bezier(0.1,0.9,0.2,1)`（`dur-base`+`ease-out`）✅ |
+| 失焦自动隐藏 | 真实焦点切换（终端抢前台，含 fg_pid=0 瞬态） | 日志多次正确触发 hide_window 并真隐藏 ✅ |
+| 搜索回归 | 真实键入 `report` | 找到 2,899 · 8 ms，状态栏/时间列/目录大小均正常（P1-8 无回归）✅ |
+
+**过程中修复的三个实现坑**（完整过程见 `DECISIONS.md` #83）：① ACL 拦
+`plugin:event|listen`（同 #79 模式）→ capabilities 补 `core:event:allow-listen/unlisten`；
+② `fetch_add` 返回旧值导致延迟隐藏校验恒 false、100% 自动作废 → 改
+`load() == gen + 1`；③ 一次 Edit 误把 `.app-window` CSS 块提前闭合，
+`display:flex` 等三行失效 → flex 塌成 block、虚拟列表全量渲染 2,899 行、
+界面整体错位（用户报告的「UI 变异常」，证据即用户截图；修复后布局全绿）。
+证据图：`docs/evidence/gui-menu-anim.png`。诊断日志（`%TEMP%\sift-debug.log`，
+1MB 上限）本轮保留用于回归观察。
+
+## UI 重整浏览器回归（2026-11-15，#84）
+
+本节只代表 Chromium + Vite + MockEngine，不是 Tauri 真机、真实索引或性能基准。
+
+- `npm run build`：TypeScript/Vite 通过，50 modules；`npm run test:format`：29 assertions 通过。
+- `npm run test:ui`：通过，页面异常 0；覆盖排序方向/回相关度、筛选写入/清除、
+  索引详情 Esc、右键菜单 Esc、真实与待接线控件状态、设置页头固定高度、
+  深浅主题选中行颜色、虚拟行 <50、错误条不覆盖筛选、reduced-motion。
+- 浏览器 480×600 预览无横向溢出；切换原生布局模式模拟 760×480 与 480×320，
+  状态栏留在客户区、虚拟化仍有效。这不验证原生拖动、热键、失焦隐藏或 IME。
+- 新高亮文字对比按 sRGB 相对亮度公式计算：浅 8.33:1、深 7.04:1；
+  筛选选中文字对底色浅 5.96:1、深 6.16:1。
+- 截图：`docs/evidence/sift-ui-{light,dark,settings,narrow}.png`。主题切换后等待
+  300ms 再截图，避免 160ms 行背景过渡产生浅底深主题混合的中间帧。
+
+复现（PowerShell，先另开终端在 `app` 运行 `npm run dev -- --host 127.0.0.1 --port 5177`）：
+
+```powershell
+cd D:\Sift\app
+# Playwright 是外部验证工具，不进入 package.json；已安装时可省略对应变量。
+$env:PLAYWRIGHT_MODULE = 'C:/Users/Administrator/AppData/Local/npm-cache/_npx/9833c18b2d85bc59/node_modules/playwright'
+$env:CHROMIUM_PATH = 'C:/Users/Administrator/AppData/Local/ms-playwright/chromium-1254/chrome-win64/chrome.exe'
+$env:UI_BASE_URL = 'http://127.0.0.1:5177/'
+npm run test:ui
+```
+
+脚本支持 `UI_EVIDENCE_DIR` 指定截图目录（默认 `.work/ui-evidence`）。外部工具本机版本
+Playwright `1.66.0-alpha-2026-11-09`，Chromium 缓存构建 1254；没有改应用锁文件。
+本轮待验收：真实 Tauri/WebView2 新布局、125% 系统缩放、长路径/错误卷状态，及用户视觉确认。

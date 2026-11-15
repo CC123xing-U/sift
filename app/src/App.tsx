@@ -186,6 +186,34 @@ export default function App() {
     return () => window.removeEventListener('focus', onFocus);
   }, [view]);
 
+  // 窗口唤出/隐藏动效（UI_SPEC §2.6 dur-window-in/out，2026-11-15 落地）。
+  // Tauri 下 main.rs 在 show 后发 `sift:shown`、在延迟真隐藏前发 `sift:hiding`；
+  // 这里直接操作 .app-window 的动画 class（不经 React 状态，避免整树重渲染）。
+  // 浏览器原型无 Tauri 事件，跳过（原型由 hidden state 控制显隐，不受影响）。
+  useEffect(() => {
+    if (!isTauri()) return;
+    const playIn = () => {
+      const el = document.querySelector('.app-window');
+      if (!el) return;
+      el.classList.remove('window-enter', 'window-exit');
+      void (el as HTMLElement).offsetWidth; // 强制 reflow 重启动画
+      el.classList.add('window-enter');
+    };
+    const playOut = () => {
+      const el = document.querySelector('.app-window');
+      if (!el) return;
+      el.classList.remove('window-enter');
+      el.classList.add('window-exit');
+    };
+    const listen = window.__TAURI__?.event?.listen;
+    if (!listen) return;
+    const unlistens: Array<() => void> = [];
+    void listen('sift:shown', () => playIn()).then((u) => unlistens.push(u));
+    void listen('sift:hiding', () => playOut()).then((u) => unlistens.push(u));
+    playIn(); // 初次挂载播一次进入动画
+    return () => unlistens.forEach((u) => u());
+  }, []);
+
   const runSearch = useCallback(
     (q: string) => {
       const seq = ++searchSeqRef.current;
@@ -285,6 +313,8 @@ export default function App() {
     const tgt = e.target as HTMLElement;
     const inInput = tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA';
     const isSearchInput = tgt.id === 'sift-input';
+    // Native selects and status disclosures own their keyboard interaction.
+    if (tgt.closest('select, .index-status')) return;
 
     // P1-5：输入法组词中的按键（keyCode 229 / isComposing）不要拦截，
     // 否则微软拼音下回车确认候选词会误触「打开」，↑↓ 也会乱跳。
@@ -306,8 +336,10 @@ export default function App() {
       }
       // UI_SPEC §5 + M3：输入已为空 → 隐藏窗口。
       // Tauri 下调用真实窗口命令；原型下隐藏 DOM。
+      // 命令名必须与 main.rs 的 generate_handler! 一致（hide_window）；
+      // 此前写 'hide' 导致真机 Esc 隐藏静默失效（#83）。
       if (isTauri()) {
-        void window.__TAURI__?.core.invoke('hide');
+        void window.__TAURI__?.core.invoke('hide_window');
       } else {
         setHidden(true);
       }
@@ -422,6 +454,8 @@ export default function App() {
                 onClear={onClear}
                 parseError={parseError}
                 spinner={showSpinner}
+                sort={sort}
+                onSort={setSort}
                 inputRef={inputRef}
                 onCompositionStart={() => {
                   composingRef.current = true;

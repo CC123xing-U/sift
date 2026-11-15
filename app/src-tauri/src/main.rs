@@ -7,7 +7,7 @@
 // 若日后要调试日志，用 dbgview 或改为 cfg_attr 条件编译）。
 #![windows_subsystem = "windows"]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 mod timeconv;
@@ -18,7 +18,7 @@ use ff_engine::api::{
 use ff_engine::InProcessEngine;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 
 /// 进程内引擎的托管状态（注入到 Tauri 状态容器，命令据此访问）。
@@ -98,19 +98,54 @@ fn open(
 }
 
 // ───────────────────────── 窗口命令（OS 级 show/hide/toggle） ─────────────────────────
+//
+// 窗口动效（UI_SPEC §2.6 dur-window-in/out，2026-11-15 落地，DECISIONS #83）：
+// show 后向前端发 `sift:shown`，前端重播 140ms 进入动画；hide 前发 `sift:hiding`，
+// 等 90ms 退出动画播完再真隐藏——原生 hide 是瞬时的，直接调会把退出动画吞掉。
+
+/// 隐藏挂起的代数计数：`hide_window` 调度延迟隐藏时记下当前代数，到点后代数
+/// 一致才真隐藏；`show_window` 递增代数使所有挂起的隐藏作废（热键连按竞态）。
+static HIDE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// 退出动画时长（UI_SPEC §2.6 `dur-window-out`），Rust 侧等它播完再真隐藏。
+const WINDOW_OUT_MS: u64 = 90;
 
 #[tauri::command]
 fn show_window(app: tauri::AppHandle) {
+    dbg_log("show_window called");
+    HIDE_GEN.fetch_add(1, Ordering::SeqCst); // 作废挂起的延迟隐藏
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
+        let _ = w.emit("sift:shown", ());
     }
 }
 
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle) {
+    dbg_log("hide_window called");
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.hide();
+        let _ = w.emit("sift:hiding", ());
+        let gen = HIDE_GEN.fetch_add(1, Ordering::SeqCst);
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(WINDOW_OUT_MS));
+            // fetch_add 返回旧值且自身已 +1：无后来者时 load() == gen + 1。
+            // （曾写成 load() == gen，导致每次延迟隐藏 100% 被自己作废，#83。）
+            let matched = HIDE_GEN.load(Ordering::SeqCst) == gen + 1;
+            dbg_log(&format!(
+                "delayed hide: gen_match={} (gen={}, now={})",
+                matched,
+                gen,
+                HIDE_GEN.load(Ordering::SeqCst)
+            ));
+            if matched {
+                if let Some(w) = app.get_webview_window("main") {
+                    let r = w.hide();
+                    dbg_log(&format!("hide result ok={}", r.is_ok()));
+                }
+            }
+        });
     }
 }
 
@@ -118,10 +153,9 @@ fn hide_window(app: tauri::AppHandle) {
 fn toggle_window(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         if w.is_visible().unwrap_or(false) {
-            let _ = w.hide();
+            hide_window(app);
         } else {
-            let _ = w.show();
-            let _ = w.set_focus();
+            show_window(app);
         }
     }
 }
@@ -340,7 +374,9 @@ pub fn run() {
                     dbg_log("  -> ignore: foreground is own process (webview child/IME)");
                 } else {
                     dbg_log("  -> hide: focus moved to another app");
-                    let _ = window.hide();
+                    // 统一走 hide_window：让前端先播 90ms 退出动画再真隐藏（§2.6）。
+                    let app = window.app_handle().clone();
+                    hide_window(app);
                 }
             }
         })

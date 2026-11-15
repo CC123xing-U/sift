@@ -293,27 +293,10 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   else if (hasSummary && total === 0) panel = 'noResult';
   else if (!emptyQuery && !hasSummary && total === 0) panel = 'searchingEmpty';
 
-  // P1-1：列头排序交互。名称/路径默认升序、大小/时间默认降序；
-  // 同一列点第三次回到「相关度」排序（COLS 里没有 score 列，靠此循环回到）。
-  const sortClick = useRef<{ key: SortKey | null; count: number }>({
-    key: null,
-    count: 0,
-  });
+  // Relevance has an explicit entry in the sorting menu; headers only toggle direction.
   const onHeaderClick = (key: SortKey) => {
-    const st = sortClick.current;
-    if (st.key === key) st.count += 1;
-    else {
-      st.key = key;
-      st.count = 1;
-    }
-    if (st.count >= 3) {
-      onSort({ key: 'score', descending: true });
-      st.key = null;
-      st.count = 0;
-      return;
-    }
     const defaultDesc = key === 'size' || key === 'modified';
-    const descending = st.count === 1 ? defaultDesc : !defaultDesc;
+    const descending = sort.key === key ? !sort.descending : defaultDesc;
     onSort({ key, descending });
   };
 
@@ -476,8 +459,8 @@ function RowContent({ row, skeleton }: { row: ResultRow | undefined; skeleton: b
   return (
     <>
       <span className="c-name" title={row.name}>
-        <span className="ficon">{row.is_dir ? <FolderIcon /> : <FileIcon />}</span>
-        <NameHL name={row.name} ranges={row.name_matches} />
+        <span className={'ficon ' + fileCategory(row)}>{row.is_dir ? <FolderIcon /> : <FileIcon />}</span>
+        <span className="filename"><NameHL name={row.name} ranges={row.name_matches} /></span>
       </span>
       <span className="c-path" title={row.dir}>
         {row.dir}
@@ -490,6 +473,15 @@ function RowContent({ row, skeleton }: { row: ResultRow | undefined; skeleton: b
       </span>
     </>
   );
+}
+
+function fileCategory(row: ResultRow): string {
+  if (row.is_dir) return 'type-folder';
+  const ext = row.name.split('.').pop()?.toLowerCase() ?? '';
+  if (['doc', 'docx', 'txt', 'md', 'pdf', 'rtf'].includes(ext)) return 'type-document';
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return 'type-sheet';
+  if (['png', 'jpg', 'jpeg', 'svg', 'webp', 'gif'].includes(ext)) return 'type-image';
+  return 'type-file';
 }
 
 function NameHL({ name, ranges }: { name: string; ranges: MatchRange[] }) {

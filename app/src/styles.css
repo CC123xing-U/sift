@@ -12,7 +12,7 @@
   --bg-chip: #ffffff;
   --bg-chip-selected: #0067c0;
   --bg-elevated: #ffffff;
-  --bg-highlight: #ffd500;
+  --bg-highlight: #dbeeff;
   --bg-error: #fde7e9;
   --text-primary: #1c1c1c;
   --text-secondary: #595959;
@@ -20,7 +20,7 @@
   --text-on-accent: #ffffff;
   --text-accent: #005a9e;
   --text-error: #b10e1c;
-  --text-on-highlight: #1c1c1c;
+  --text-on-highlight: #004578;
   --border-subtle: #e1e1e1;
   --border-strong: #bfbfbf;
   --border-hover: #8f8f8f;
@@ -43,7 +43,12 @@
   --knob-bg-on: #ffffff;
 
   /* 预览外壳底色（浏览器原型里模拟桌面，Tauri 阶段不使用） */
-  --preview-bg: #6f6f6f;
+  --preview-bg: #e3e6e8;
+  --file-folder: #987016;
+  --file-document: #316eaa;
+  --file-sheet: #28775a;
+  --file-image: #9b507c;
+  --status-ready: #28775a;
 
   /* 字体栈（UI_SPEC §2.3） */
   --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei",
@@ -60,6 +65,15 @@
      解决 §10 待办 #1 的"需先定 token"，实现侧统一引用，不再硬编码 1.4s。 */
   --dur-progress: 1.4s;
   --ease-out: cubic-bezier(0.1, 0.9, 0.2, 1);
+  /* 退出曲线（UI_SPEC §2.6 定义，2026-11-15 随窗口动效落地首次引用）。 */
+  --ease-in: cubic-bezier(0.6, 0, 0.9, 0.4);
+  /* 进入曲线带 ~0.4% 轻微过冲：参考 CompressO（Framer Motion spring）与
+     ZTools 的移动端手感，只用于窗口唤出与右键菜单出现两处（DECISIONS #83）；
+     其余状态过渡仍用 --ease-out，维持 §2.6「动效克制」。 */
+  --ease-spring: cubic-bezier(0.2, 1.08, 0.3, 1);
+  /* 窗口唤出/隐藏（UI_SPEC §2.6 dur-window-in/out，2026-11-15 落地）。 */
+  --dur-window-in: 140ms;
+  --dur-window-out: 90ms;
 
   --window-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
 }
@@ -76,7 +90,7 @@
     --bg-chip: #2b2b2b;
     --bg-chip-selected: #60cdff;
     --bg-elevated: #2c2c2c;
-    --bg-highlight: #ffd500;
+    --bg-highlight: #30495b;
     --bg-error: #3a1518;
     --text-primary: #ffffff;
     --text-secondary: #c6c6c6;
@@ -84,7 +98,7 @@
     --text-on-accent: #1b1b1b;
     --text-accent: #60cdff;
     --text-error: #ff99a4;
-    --text-on-highlight: #1c1c1c;
+    --text-on-highlight: #b8e5ff;
     --border-subtle: #333333;
     --border-strong: #4d4d4d;
     --border-hover: #8f8f8f;
@@ -97,12 +111,17 @@
 
     /* 深色：关闭态保持 #4D4D4D 轨道 + 白旋钮（8.45:1）；
        开启态为 accent #60CDFF 轨道，旋钮改用 text-on-accent #1B1B1B（9.58:1，
-       与"选中 chip = accent 实底 + 深字"同一套语言）。 */
+       关闭与开启均保持旋钮可辨识）。 */
     --toggle-track-off: #4d4d4d;
     --knob-bg: #ffffff;
     --knob-bg-on: #1b1b1b;
 
-    --preview-bg: #6f6f6f;
+    --preview-bg: #191b1d;
+    --file-folder: #dfbc70;
+    --file-document: #83b6e5;
+    --file-sheet: #7cc6a6;
+    --file-image: #d9a1c6;
+    --status-ready: #7cc6a6;
     --window-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
   }
 }
@@ -115,6 +134,24 @@ html,
 body {
   margin: 0;
   height: 100%;
+}
+
+#root {
+  width: min(760px, calc(100vw - 32px));
+}
+html[data-runtime="tauri"] body {
+  background: var(--bg-surface);
+  display: block;
+  min-height: 0;
+}
+html[data-runtime="tauri"] #root {
+  width: 100%;
+  height: 100%;
+}
+html[data-runtime="tauri"] .app-window {
+  width: 100%;
+  height: 100%;
+  box-shadow: none;
 }
 
 body {
@@ -156,10 +193,9 @@ body {
 
 /* 浮动窗口（UI_SPEC §3.1） */
 .app-window {
-  width: 760px;
-  height: 480px;
-  min-width: 640px;
-  min-height: 380px;
+  width: 100%;
+  height: min(520px, calc(100dvh - 32px));
+  min-height: 280px;
   background: var(--bg-surface);
   color: var(--text-primary);
   border: 1px solid var(--window-border);
@@ -169,20 +205,86 @@ body {
   display: flex;
   flex-direction: column;
   font-size: 13px;
+  /* 注意：不要给 .app-window 加 will-change / 常驻 transform，也不要改动本块
+     结尾的大括号配对——2026-11-15 一次 Edit 误把本块提前闭合，display:flex
+     三行变成无效规则，flex 布局塌成 block：状态栏悬在中部、虚拟列表容器测高
+     异常全量渲染 2899 行、窗口内容整体错位（真机事故，DECISIONS #83）。
+     动画仅 140ms 一次性，无需合成层提示。 */
 }
 
+/* 窗口唤出/隐藏（UI_SPEC §2.6 dur-window-in 140ms / dur-window-out 90ms，
+   2026-11-15 落地——此前三个 token 定义了但零引用）。class 由 App.tsx 在
+   Tauri `sift:shown` / `sift:hiding` 事件时切换，不经 React 状态（动画类
+   与渲染无关，避免整树重渲染）。fill-mode：进入用 backwards（结束回自然态，
+   不长期保留 transform，避免永久建立 containing block）；退出用 forwards
+   （真隐藏前 90ms 保持透明，见 main.rs 的延迟 hide）。 */
+.window-enter {
+  animation: window-in var(--dur-window-in) var(--ease-spring) backwards;
+}
+.window-exit {
+  animation: window-out var(--dur-window-out) var(--ease-in) forwards;
+}
+@keyframes window-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.004);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes window-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
 /* 顶栏：输入 + chips */
 .topbar {
-  position: relative; /* 错误条浮层的定位参照 */
+  position: relative;
   background: var(--bg-app);
-  padding: 8px 12px 0;
+  padding: 14px 16px 0;
   flex: 0 0 auto;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.searchline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 .searchrow {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 44px;
+  gap: 10px;
+  height: 42px;
+  min-width: 0;
+  flex: 1;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.searchrow:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.search-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  height: 28px;
 }
 .searchicon {
   color: var(--icon-default);
@@ -191,25 +293,29 @@ body {
 }
 .searchinput {
   flex: 1 1 auto;
+  min-width: 0;
   height: 36px;
   border: 1px solid transparent;
-  border-radius: 4px;
-  background: var(--bg-surface);
+  border-radius: 0;
+  background: transparent;
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 14px;
-  padding: 0 10px;
+  font-size: 16px;
+  padding: 0;
   outline: none;
 }
 .searchinput::placeholder {
   color: var(--text-tertiary);
 }
 .searchinput:hover {
-  border-color: var(--border-hover);
+  border-color: transparent;
 }
 .searchinput:focus {
-  border-color: var(--border-focus);
-  box-shadow: 0 0 0 2px var(--border-focus);
+  border-color: transparent;
+  box-shadow: none;
+}
+.searchinput:focus-visible {
+  outline: none;
 }
 .iconbtn {
   flex: 0 0 auto;
@@ -233,17 +339,25 @@ body {
   transform: scale(0.94);
 }
 
+.filterbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 0 9px;
+}
 .chips {
   display: flex;
-  gap: 8px;
-  height: 24px;
-  margin: 8px 0;
+  gap: 2px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 .chip {
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-chip);
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--text-secondary);
   border-radius: 4px;
   font-size: 12px;
@@ -253,33 +367,47 @@ body {
     color var(--dur-fast) var(--ease-out);
 }
 .chip:hover {
-  border-color: var(--border-hover);
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 .chip:active {
   transform: scale(0.97);
 }
 .chip-on {
-  background: var(--bg-chip-selected);
-  border-color: var(--bg-chip-selected);
-  color: var(--text-on-accent);
-  font-weight: 500;
+  background: var(--bg-selected);
+  color: var(--text-accent);
+  font-weight: 600;
+}
+.sort-select,
+.setting-select {
+  min-height: 28px;
+  max-width: 180px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.sort-select {
+  flex: 0 0 auto;
+  width: 132px;
 }
 
-/* 错误条：绝对定位浮层，避免撑高顶栏导致列表跳动（UI_SPEC §3.3） */
+/* 错误条参与布局，避免覆盖筛选和排序控件。 */
 .errorbar {
-  position: absolute;
-  top: 52px;
-  left: 12px;
-  right: 12px;
+  position: relative;
   z-index: 3;
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 10px;
+  min-height: 28px;
+  padding: 6px 10px;
+  margin: 0 0 10px;
   background: var(--bg-error);
   color: var(--text-error);
-  border-radius: 16px;
+  border-radius: 4px;
   font-size: 12px;
 }
 .erricon {
@@ -326,15 +454,15 @@ body {
   }
 }
 
-/* UI_SPEC §2.5 / §3.1：四列最小占用 140+110+68+116 = 434px，
-   连同左右内边距 24px 后远小于最小窗口宽 640px，无需断点隐藏列。 */
+/* 两个弹性文字列；窄窗口保留四列并降低最小宽度。 */
 .colhead {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(110px, 1fr) 68px 116px;
+  column-gap: 8px;
+  grid-template-columns: minmax(110px, 1.15fr) minmax(80px, 1fr) 68px 120px;
   align-items: center;
-  height: 24px;
-  padding: 0 12px;
-  background: var(--bg-subtle);
+  height: 30px;
+  padding: 0 16px;
+  background: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
   flex: 0 0 auto;
 }
@@ -381,12 +509,15 @@ body {
   left: 0;
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(110px, 1fr) 68px 116px;
+  column-gap: 8px;
+  grid-template-columns: minmax(110px, 1.15fr) minmax(80px, 1fr) 68px 120px;
   align-items: center;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 0 16px;
+  border-bottom: 1px solid transparent;
   cursor: pointer;
   contain: layout style;
+  /* UI_SPEC §2.6 `dur-base`：列表行状态过渡（hover / 选中底色）。 */
+  transition: background var(--dur-base) var(--ease-out);
 }
 .row:hover {
   background: var(--bg-hover);
@@ -422,6 +553,16 @@ body {
   color: var(--icon-default);
   display: inline-flex;
 }
+.filename {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.type-folder { color: var(--file-folder); }
+.type-document { color: var(--file-document); }
+.type-sheet { color: var(--file-sheet); }
+.type-image { color: var(--file-image); }
 .row .c-path {
   color: var(--text-secondary);
   font-size: 12px;
@@ -436,6 +577,7 @@ body {
   justify-self: end;
   color: var(--text-secondary);
   font-size: 12px;
+  white-space: nowrap;
 }
 .mono {
   font-family: var(--font-mono);
@@ -514,12 +656,14 @@ body {
 
 /* 底栏 */
 .statusbar {
+  position: relative;
   flex: 0 0 auto;
-  height: 28px;
+  height: 32px;
+  gap: 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 12px;
+  padding: 0 16px;
   background: var(--bg-app);
   border-top: 1px solid var(--border-subtle);
   font-size: 12px;
@@ -531,6 +675,62 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.status-left { min-width: 0; flex: 1; }
+.status-toast {
+  position: absolute;
+  bottom: 40px;
+  left: 16px;
+  right: 16px;
+  width: fit-content;
+  max-width: calc(100% - 32px);
+  padding: 8px 12px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: var(--window-shadow);
+  overflow-wrap: anywhere;
+  z-index: 30;
+}
+.index-status { flex: 0 0 auto; }
+.index-status > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.index-status > summary::-webkit-details-marker { display: none; }
+.index-status > summary:hover { background: var(--bg-hover); }
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-ready);
+}
+.status-dot.error { background: var(--error); }
+.status-dot.scanning { background: var(--accent); }
+.index-popover {
+  position: absolute;
+  bottom: 38px;
+  right: 12px;
+  z-index: 25;
+  width: min(320px, calc(100vw - 56px));
+  max-height: min(300px, 60dvh);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--window-shadow);
+}
+.index-popover p { line-height: 1.5; overflow-wrap: anywhere; color: var(--text-secondary); }
+.volume-status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border-subtle); }
+.volume-status p { width: 100%; margin: 0; }
 
 /* P0-3：结果行右键菜单（UI_SPEC §4.2 / REVIEW_BRIEF §5 P0-3）。
    全部颜色取现有 token，浅/深色主题自动跟随；字号 >= 12px（§2.3.2）。 */
@@ -544,6 +744,20 @@ body {
   border-radius: 6px;
   box-shadow: var(--window-shadow);
   outline: none;
+  /* 出现动效（#83）：原点跟随鼠标侧（左上），scale+fade 120ms；关闭即卸载，
+     不做退出（90ms 退出动画会挡住用户下一步点击，收益为负）。 */
+  transform-origin: top left;
+  animation: menu-in var(--dur-fast) var(--ease-spring) both;
+}
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .ctxitem {
   display: flex;
@@ -593,6 +807,7 @@ body {
 }
 .settings-head {
   display: flex;
+  flex: 0 0 44px;
   align-items: center;
   gap: 12px;
   height: 44px;
@@ -622,14 +837,17 @@ body {
 }
 .settings-body {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  padding: 16px 24px;
+  padding: 20px 24px;
 }
 .set-group {
   margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 .set-group-title {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
   margin: 0 0 12px;
@@ -638,27 +856,23 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 32px;
+  min-height: 40px;
+  gap: 16px;
+  padding: 4px 0;
   font-size: 13px;
   color: var(--text-primary);
 }
 .set-row.disabled {
-  opacity: 0.5;
+  color: var(--text-secondary);
 }
-/* 未接线项标注（UI_SPEC §4.8）：**可见文字**，不靠 title。
-   三个开关（模糊/拼音/显示系统-隐藏文件）在原型里只改界面不产生行为，
-   不在界面上说清楚，界面本身就在撒谎。
-   字号 12px 而非 11px —— §2.3.2 明定最小 12px，本标注不得成为首个 11px 文字。
-   颜色用 text-secondary，其对比度已在 §2.2 实测（浅 4.98:1 / 深 8.74:1）。 */
+/* 未接线项同时使用可见说明和 disabled，不以本地状态变化冒充生效。 */
 .pending-tag {
   margin-left: 8px;
-  padding: 0 5px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  padding: 0;
   font-size: 12px;
   line-height: 18px;
   color: var(--text-secondary);
-  white-space: nowrap;
+  white-space: normal;
 }
 /* 可变高度的设置块（卷/排除路径/语言等成组控件） */
 .set-block {
@@ -668,6 +882,34 @@ body {
   font-size: 13px;
   color: var(--text-primary);
   padding: 4px 0;
+}
+.exclude-fieldset { border: 0; margin: 0; min-width: 0; padding: 10px 0; }
+.setting-command {
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: inherit;
+  white-space: nowrap;
+}
+.advanced-settings > summary { cursor: pointer; min-height: 28px; line-height: 28px; }
+button:disabled, select:disabled, fieldset:disabled { cursor: not-allowed; }
+button:disabled { opacity: .55; }
+.toggle:disabled { opacity: .55; }
+.exclude-row .mono { min-width: 0; overflow-wrap: anywhere; }
+.set-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.set-row > .mono { max-width: 65%; text-align: right; }
+.empty .empty-sub { flex-wrap: wrap; justify-content: center; overflow-wrap: anywhere; }
+.empty-main { max-width: 100%; overflow-wrap: anywhere; }
+
+@media (max-width: 600px) {
+  .filterbar { flex-wrap: wrap; }
+  .sort-select { margin-left: auto; }
+  .topbar { padding: 10px 12px 0; }
+  .colhead, .row { padding: 0 12px; grid-template-columns: minmax(100px, 1.2fr) minmax(60px, 1fr) 56px 112px; }
+  .settings-body { padding: 16px; }
 }
 .set-block-label {
   font-weight: 500;

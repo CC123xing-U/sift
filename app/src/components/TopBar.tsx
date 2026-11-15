@@ -1,6 +1,7 @@
 import React, { RefObject, useRef, useState } from 'react';
 import { I18N } from '../i18n';
 import { CloseIcon, SearchIcon, SettingsIcon, WarnIcon } from '../icons';
+import type { SortSpec } from '../types';
 
 interface Props {
   input: string;
@@ -11,6 +12,8 @@ interface Props {
   onClear: () => void;
   parseError: { message: string; span: { start: number; end: number } } | null;
   spinner: boolean;
+  sort: SortSpec;
+  onSort: (sort: SortSpec) => void;
   inputRef: RefObject<HTMLInputElement>;
   onCompositionStart?: () => void;
   onCompositionEnd?: (value: string) => void;
@@ -25,6 +28,8 @@ export default function TopBar({
   onClear,
   parseError,
   spinner,
+  sort,
+  onSort,
   inputRef,
   onCompositionStart,
   onCompositionEnd,
@@ -73,36 +78,41 @@ export default function TopBar({
     // 只有图标与空白区触发 start_dragging。不额外加自绘关闭按钮（UI_SPEC
     // §3.1 明确标题栏按钮只有 ✕/⚙，关闭语义由 Esc / 失焦 / 托盘承担）。
     <div className="topbar" data-tauri-drag-region="deep">
-      <div className="searchrow">
-        <span className="searchicon" aria-hidden="true">
-          <SearchIcon />
-        </span>
-        <input
-          ref={inputRef}
-          id="sift-input"
-          className="searchinput"
-          type="text"
-          value={input}
-          placeholder={I18N.placeholder}
-          aria-label={I18N.a11y.search}
-          autoFocus
-          spellCheck={false}
-          autoComplete="off"
-          onChange={(e) => onInput(e.target.value)}
-          onCompositionStart={onCompositionStart}
-          onCompositionEnd={(e) => onCompositionEnd?.(e.currentTarget.value)}
-        />
-        {spinner && <span className="spinner" aria-hidden="true" />}
-        {!spinner && input && (
-          <button
-            className="iconbtn"
-            aria-label={I18N.a11y.clearBtn}
-            title={I18N.clear}
-            onClick={onClear}
-          >
-            <CloseIcon />
-          </button>
-        )}
+      <div className="searchline">
+        <div className="searchrow">
+          <span className="searchicon" aria-hidden="true">
+            <SearchIcon />
+          </span>
+          <input
+            ref={inputRef}
+            id="sift-input"
+            className="searchinput"
+            type="text"
+            value={input}
+            placeholder={I18N.placeholder}
+            aria-label={I18N.a11y.search}
+            autoFocus
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(e) => onInput(e.target.value)}
+            onCompositionStart={onCompositionStart}
+            onCompositionEnd={(e) => onCompositionEnd?.(e.currentTarget.value)}
+          />
+          <span className="search-action">
+            {spinner ? (
+              <span className="spinner" aria-hidden="true" />
+            ) : input ? (
+              <button
+                className="iconbtn"
+                aria-label={I18N.a11y.clearBtn}
+                title={I18N.clear}
+                onClick={onClear}
+              >
+                <CloseIcon />
+              </button>
+            ) : null}
+          </span>
+        </div>
         <button
           className="iconbtn"
           aria-label={I18N.a11y.settingsBtn}
@@ -113,28 +123,50 @@ export default function TopBar({
         </button>
       </div>
 
-      <div
-        className="chips"
-        role="toolbar"
-        aria-label="筛选"
-        aria-orientation="horizontal"
-        onKeyDown={onChipKeyDown}
-      >
-        {I18N.chips.map((c, i) => (
-          <button
-            key={c}
-            ref={(el) => {
-              chipRefs.current[i] = el;
-            }}
-            className={'chip' + (c === activeChip ? ' chip-on' : '')}
-            aria-pressed={c === activeChip}
-            tabIndex={i === tabbable ? 0 : -1}
-            onFocus={() => setFocusIdx(i)}
-            onClick={() => onChip(c)}
-          >
-            {c}
-          </button>
-        ))}
+      <div className="filterbar">
+        <div
+          className="chips"
+          role="toolbar"
+          aria-label="筛选"
+          aria-orientation="horizontal"
+          onKeyDown={onChipKeyDown}
+        >
+          {I18N.chips.map((c, i) => (
+            <button
+              key={c}
+              ref={(el) => {
+                chipRefs.current[i] = el;
+              }}
+              className={'chip' + (c === activeChip ? ' chip-on' : '')}
+              aria-pressed={c === activeChip}
+              tabIndex={i === tabbable ? 0 : -1}
+              onFocus={() => setFocusIdx(i)}
+              onClick={() => onChip(c)}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+        <select
+          className="sort-select"
+          aria-label="结果排序"
+          value={`${sort.key}:${sort.descending ? 'desc' : 'asc'}`}
+          onChange={(e) => {
+            const [key, direction] = e.target.value.split(':');
+            onSort({ key: key as SortSpec['key'], descending: direction === 'desc' });
+          }}
+        >
+          <option value="score:desc">相关度</option>
+          <option value="score:asc">相关度 · 低到高</option>
+          <option value="name:asc">名称 · A → Z</option>
+          <option value="name:desc">名称 · Z → A</option>
+          <option value="path:asc">路径 · A → Z</option>
+          <option value="path:desc">路径 · Z → A</option>
+          <option value="size:desc">大小 · 大到小</option>
+          <option value="size:asc">大小 · 小到大</option>
+          <option value="modified:desc">修改时间 · 最新</option>
+          <option value="modified:asc">修改时间 · 最早</option>
+        </select>
       </div>
 
       {parseError && (

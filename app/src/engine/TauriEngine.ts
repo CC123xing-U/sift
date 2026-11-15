@@ -16,8 +16,13 @@ import type {
 interface TauriCore {
   invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
 }
+interface TauriEvent {
+  listen(event: string, handler: (e: unknown) => void): Promise<() => void>;
+}
 interface TauriGlobal {
   core: TauriCore;
+  /** 窗口动效事件（sift:shown / sift:hiding），main.rs 在 show/延迟 hide 前发出。 */
+  event?: TauriEvent;
 }
 declare global {
   interface Window {
