@@ -795,6 +795,7 @@ dependencies = [
  "ff-ntfs",
  "rustc-hash",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

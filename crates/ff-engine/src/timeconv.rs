@@ -10,10 +10,10 @@
 //! 反过来，转换后的 epoch 毫秒最大约 9.22e14（`i64::MAX` ticks / 1e4），
 //! 始终小于 2^53，JSON number 可无损表示。
 //!
-//! 本模块只做「单位换算 + 无效值兜底」，不碰引擎契约：`range` / `status`
-//! 两个 Tauri 命令在序列化前调用，字段名与类型都不变。
+//! 本模块只做「单位换算 + 无效值兜底」，不碰引擎契约。Tauri 与后续 HTTP
+//! 在面向 JS 的最终边界调用；Rust ↔ Rust 命名管道保留 FILETIME，不重复转换。
 
-use ff_engine::api::{EngineStatus, ResultRow};
+use crate::api::{EngineStatus, ResultRow};
 
 /// 1601-01-01（FILETIME 纪元）到 1970-01-01（Unix 纪元）的毫秒数。
 const UNIX_TO_FILETIME_MS: i128 = 11_644_473_600_000;

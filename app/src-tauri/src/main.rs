@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-mod timeconv;
+use ff_engine::timeconv;
 
 use ff_engine::api::{
     EngineClient, EngineStatus, OpenAction, RequestId, ResultRow, SearchRequest, SearchSummary,

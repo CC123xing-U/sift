@@ -14,6 +14,7 @@
 | criterion | 0.8.2 | Apache-2.0 OR MIT | 合成数据 criterion 基准（§14，dev-dependency） | sift-bench | 2026-10-24 |
 | time | 0.3.55 | MIT OR Apache-2.0 | `ntfs-reader` 的 `OffsetDateTime` → FILETIME 转换（§4.1/§5.1 时间单位） | ff-ntfs | 2026-10-24 |
 | tracing | 0.1.44 | MIT | USN 跳过的 V3/未知版本记录与解析中断的日志（§5.3；§2.1 准入） | ff-ntfs | 2026-10-24 |
+| serde_json | 1.0.154 | MIT OR Apache-2.0 | M6 长度前缀 JSON 协议编解码（§10.1），从已有锁定版本复用 | ff-engine（新增直接依赖，Tauri 已有） | 2026-11-15 |
 
 > 说明：`windows` 会连带拉入 `windows-sys` / `windows-numerics` 等子 crate（均为 MIT OR Apache-2.0）；`ff-core`/`ff-match` 保持 `#![forbid(unsafe_code)]`，仅依赖纯逻辑 crate；`ntfs-reader`/`windows` 经 `#[cfg(windows)]` 隔离，非 Windows 平台下 `ff-ntfs` 仍编译通过但不含实扫逻辑。
 >

@@ -623,3 +623,23 @@
     - 设置 220ms/24px 向上淡入、150ms/16px 向下淡出，沿用现有曲线与
       reduced-motion；180ms 超时兜底。打开聚焦返回按钮，关闭保留查询并恢复
       输入焦点。其余布局、颜色、组件不变。
+
+86. **M6 首批先落共享协议和时间边界，不直接把单客户端引擎套成服务**（2026-11-15）：
+    - 用户确认进入 M6，#85 设置轻转场提交为 `b9075e9`。本批可验收目标是
+      长度前缀 JSON 协议正确处理有效帧、分片/粘连帧、断线、坏帧和资源上限，
+      同时让 Tauri/HTTP 复用同一 FILETIME 转换，不改变现有应用的运行形态。
+    - `ff-engine::ipc` 为纯 Rust/serde 模块，无 OS 管道、无网络监听，接口消息
+      与 EngineClient 方法对应；版本 1、非零传输 request_id，区别于搜索句柄 id。
+      每帧 ≤1 MiB、查询 ≤16 KiB、range ≤1000 且校验 offset+limit 溢出；
+      写端先有界编码，再写长度头，编码错误不会留下半帧。I/O/解析失败后应断开连接。
+    - `Open` 响应只携带解析后的行与 action，未来服务不得调用 SYSTEM shell/剪贴板；
+      Pipe 客户端仍由 UI 身份执行真实动作（DESIGN §12）。
+    - `timeconv.rs` 从 Tauri 移到 ff-engine，原 7 项测试原样迁移；引擎与 Rust
+      管道保持 FILETIME，最终面向 JS 的 Tauri/HTTP 边界转换，避免二次换算。
+    - 直接依赖复用锁定 serde_json 1.0.154，已读本地源码核对序列化接口与
+      MIT OR Apache-2.0 许可证；无新网络框架/运行时/服务依赖。
+    - 先写 11 项 IPC 集成测试，缺模块/依赖时编译失败，再补实现后全部通过。
+      根 workspace fmt/clippy 与 229 测试通过；其中包含迁移的 7 项时间测试。
+      Tauri fmt/clippy/test/custom-protocol check 通过（本地测试 0 项，已迁移而非删除）。
+    - **仍未实现**：多客户端会话隔离、SID ACL 管道与重连、ff-service/SCM 安装卸载、
+      普通权限 UI、HTTP 开关/token/Host/rate-limit 与其验收测试；不标记 M6 完成。

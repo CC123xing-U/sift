@@ -1,101 +1,61 @@
-# Sift 交接（2026-11-15，UI 重整续接）
+# Sift 交接（2026-11-15，M6 已开始）
 
-## 最新状态（本节覆盖下方旧轮次的下一步）
+## 当前状态
 
-用户已认可当前 UI 调整并授权提交、进入 M6；#83/#84 基线提交为 `e536db0`。设置参考 CompressO，但用户强调不要硬塞不一致风格，因此最终仅补轻量上下转场（#85），不引入抽屉库、拖拽把手或背景缩放。下方 #83 动效记录保留作历史，其旧「等 M6 确认」计划已失效。
+- M0–M5 已完成。用户已认可当前 UI、授权提交并进入 M6。
+- `e536db0`：搜索/设置 UI 重整、旧轮次窗口动效与 ACL 修复、规范及证据。
+- `b9075e9`：设置轻量上下转场。用户强调风格一致，因此没有照搬 CompressO 的
+  Vaul 抽屉、大圆角、拖拽把手或背景缩放；仅借鉴进入/退出节奏。
+- **M6-1 已实现共享协议和时间边界，M6 整体仍进行中。** 当前应用仍为
+  InProcess 引擎，没有切换服务，没有安装 SCM，没有开放 HTTP。
 
-- 已修改 `TopBar` / `ResultArea` / `StatusBar` / `Settings`、`App.tsx`、`main.tsx` 与 CSS：统一搜索框、轻筛选、显式排序、低干扰高亮、类型色图标、索引详情展开、设置控件语义及禁用、原生窗口自适应。
-- 清掉 `@keyframes window-out` 后遗留的无选择器声明及多余大括号；此前它还会吞掉 `.topbar` 规则。补设置页头不收缩约束。
-- 保留先前 dirty work（#83 Rust/ACL/事件/时间转换等），无后端代码改动；120ms 搜索防抖和 32px 虚拟列表未改。
-- `UI_SPEC` 更新 v0.2，`DESIGN`、`DECISIONS #84` 与 `BENCH` 同步。新增 `app/scripts/check-ui.cjs`，浏览器测试工具外置，不新增依赖。
-- 本轮前端构建、格式测试、浏览器交互回归通过；新设计尚未在真实 Tauri/WebView2 上重跑，旧 #83 真机证据不代表新 UI 已验收。
-- 浏览器预览 `http://127.0.0.1:5177/` 使用 MockEngine，不是真实文件结果。先让用户视觉验收，再做原生真机复验；M6 等用户另行确认。
-- 下一轮重点：真实 760×480 / 480×320、125% 缩放、拖动/失焦/热键/IME、状态异常与长路径；设置持久化、Shell 图标及可调列宽仍有欠账。
+## 本批已落地（DECISIONS #86）
 
-## 以下为上一轮 #83 历史记录
+- `crates/ff-engine/src/ipc.rs`：版本化消息、六种方法、结构化错误、有界
+  4 字节小端长度前缀 + UTF-8 JSON 编解码；每帧 1 MiB、查询 16 KiB、
+  range 1000 上限与加法溢出校验。断线与截断区别处理，错误后应丢弃连接。
+- `Open` 回复只携带解析行和 action；未来服务不能以 SYSTEM 身份执行
+  打开文件/剪贴板动作，必须由 UI 执行（DESIGN §12）。
+- `crates/ff-engine/src/timeconv.rs`：从 Tauri 移入，原 7 测试随迁移；
+  Tauri 改用共享模块。Rust ↔ Rust 管道保留 FILETIME，最终 JS/HTTP 边界
+  才转 epoch 毫秒，避免重复转换。不得在 TS 侧处理已丢精度的 FILETIME。
+- `crates/ff-engine/tests/ipc_contract.rs`：11 项协议测试，先红后绿。
+- 复用锁定 `serde_json 1.0.154` 为 ff-engine 直接依赖，无新网络/服务运行时。
+- 细节以 `DESIGN`、`DECISIONS #85/#86`、`BENCH`、`DEPENDENCIES` 为准。
 
-> 给下一个对话看。规范、历史、决策都在 `docs/*.md`，本文件只写「现在在哪、下一步做什么、别踩什么坑」，不重复那些内容。
+## 下一步顺序
 
-## 一句话状态
+1. **客户端会话隔离**：当前 `EngineInner::search_impl` 清掉全局 results/access，
+   cancels 只保留最新 id。UI 与 HTTP 直接共用会互相作废；必须先隔离结果集、
+   活跃搜索和取消令牌，同时共享索引，不为每个客户端复制全盘数据。
+2. `ff-service`、SID ACL 命名管道、Pipe 客户端、断线提示/重连；管道超时、
+   帧错误和权限用 Windows 实测，不把纯内存编解码当作 OS 管道验收。
+3. SCM 安装/卸载与启动停止、普通权限 Tauri；打开文件仍由 UI 用户执行。
+4. 默认关闭的 HTTP：127.0.0.1、Bearer token、严格 Host、无宽松 CORS、
+   count/速率限制；错误 token/Host 等必须自动化测试。
+5. 普通权限搜索、服务崩溃后提示与重连、HTTP 完整端到端验收后才标 M6 完成。
+   不进入 M7，不自动改里程碑范围。
 
-M0–M5 已全部完成并提交；**当前工作树有一整轮「动效/质感收尾」改动已写完、已真机验证、门禁全绿，但还没提交**。HEAD 停在 `247629a`（docs: 裁定首屏 50ms 口径，DECISIONS #82）。
+## 验证
 
-## 工作树现状（11 改 + 1 新，全部未提交）
+- 根 workspace fmt/clippy：通过；test：**229 passed、5 ignored、0 failed**。
+  包含从 Tauri 迁来的 7 时间测试与新 11 IPC 测试。
+- Tauri fmt/clippy/test/custom-protocol check：通过；本地测试 0，
+  不是丢失覆盖，时间测试在 ff-engine。
+- 前端 build：50 modules；format：29 assertions；外置 Playwright UI 回归通过。
+  转场检查涵盖动画名称、返回按钮焦点、Esc 保留查询与恢复输入焦点。
+- **新 UI/转场尚未真实 WebView2 复验**。旧 #83 真机日志与截图只代表旧轮次。
+  125% 缩放、IME、热键/失焦稳定性与原生窄窗口仍需覆盖。
+- 浏览器预览 `http://127.0.0.1:5177/` 为 MockEngine，不是真实文件结果。
+  UI 脚本 `app/scripts/check-ui.cjs` 的外部浏览器路径配置见 BENCH。
 
-```
- M .workbuddy/memory/2026-11-15.md     ← 工作日志（第十一轮补记，按轮次追加）
- M app/src-tauri/capabilities/default.json
- M app/src-tauri/src/main.rs           ← 窗口动效核心（HIDE_GEN / WINDOW_OUT_MS / sift:* 事件）
- M app/src/App.tsx                     ← 事件监听 + 修 Esc 隐藏
- M app/src/engine/TauriEngine.ts       ← TauriGlobal 类型加 event
- M app/src/styles.css                  ← window-in/out、--ease-spring、菜单动效、行过渡
- M docs/{BENCH,DECISIONS,DEPENDENCIES,DESIGN,UI_SPEC}.md
-?? docs/evidence/gui-menu-anim.png     ← 真机菜单动效截图
-```
+## 保留约束与欠账
 
-**没有残留进程**：验证用的 `sift-app.exe` 已全部 taskkill。
-
-## 这轮做了什么（DECISIONS #83）
-
-按用户拍板：补规范欠账 + 轻微质感/动效，**纯 CSS + 少量 Rust 事件，不引依赖、不动色板字体**。
-
-1. `main.rs`：`show_window`/`hide_window`/`toggle_window` 统一走 hide 流程，发 `sift:shown` / `sift:hiding` Tauri 事件；前端收事件播 `.window-enter`（140ms scale+fade 带过冲）/ `.window-exit`（90ms），退出动画播完再真隐藏。`HIDE_GEN` 代数计数防热键连按竞态。
-2. `capabilities/default.json`：加 `core:event:allow-listen` / `allow-unlisten`（原有 `core:window:allow-start-dragging`）。
-3. `styles.css`：`--ease-spring`、窗口进出动画、`.ctxmenu` 进入动效、`.row` 选中/悬停过渡；`prefers-reduced-motion` 下 0.01ms。
-4. 顺手修真 bug：`App.tsx` 里 `invoke('hide')` 命令名错（实际注册的是 `hide_window`），错误被 `void` 吞掉，Esc 隐藏此前在真机是失效的。
-
-### 三个坑（都已修，别再踩）
-
-- **CSS 多写一个 `}`**：给 `.app-window` 加 `will-change` 时把块提前闭合，`display:flex`/`flex-direction`/`font-size` 被挤出选择器，布局塌成 block → 用户看到状态栏悬空、整屏错位。`will-change` 本身在 WebView2 下也会撑出滚动条，**不要加**。
-- **`fetch_add` 返回旧值**：写成 `HIDE_GEN.load() == gen` 会让每次延迟隐藏 100% 被自己作废；正确是 `== gen + 1`。
-- **Tauri ACL 第二次咬人**：跟 #79 的 `start_dragging` 同款——事件 `listen` 也被 ACL 拦（`plugin:event|listen not allowed by ACL`）。以后前端用任何 `window.__TAURI__.event` / `core` 新 API，先查 capabilities。
-
-## 真机验证结论（已做，非推断）
-
-release `sift-app.exe` + Win32 SendInput + WebView2 CDP（脚本在 `.work/gui_act.py` / `.work/cdp.py`，已 gitignore）：
-
-- 布局恢复：`display:flex`、状态栏贴底 gap 1px、虚拟化 23 行（不是 2899）、`scrollW=760`。
-- `hide_window` → `sift:hiding` → `.window-exit` → 90ms 后真隐藏（visible=false、`hide result ok=true`）。
-- 连按竞态：hide 后 30ms 内 show → 500ms 后仍可见。
-- Esc 空输入 → 真隐藏通过（`log: visible:false`）。
-- 菜单动效 `ctx-menu-in` 命中，截图 `docs/evidence/gui-menu-anim.png`。
-- 动画中间帧 `scrollW 752 / sbGap -3` 是 scale 0.98 的正常几何，不是布局损坏。
-
-## 门禁（交接时刚跑，全绿）
-
-根 workspace `fmt` / `clippy -D warnings` 0，`cargo test --workspace` **211 passed**；`app/src-tauri` fmt/clippy 0、`cargo test` **7 passed**、`cargo check --features custom-protocol` 0；前端 `npm run test:format` **29 assertions**、`npm run build` 50 modules（CSS 13.16 kB）。
-
-## 下一步（接手顺序）
-
-1. **先把这轮提交掉**，按惯例分两次（conventional commits，中文正文）：
-
-```bash
-cd /d/Sift && git add app/src-tauri/capabilities/default.json app/src-tauri/src/main.rs \
-  app/src/App.tsx app/src/engine/TauriEngine.ts app/src/styles.css
-git commit -m "feat(ui): 窗口唤出/隐藏动效与轻微质感收尾" -m "<正文见 DECISIONS #83>"
-git add docs/ .workbuddy/memory/
-git commit -m "docs(ui): 回填动效真机验证、决策 #83 与三坑记录" -m "<正文见 BENCH/DECISIONS>"
-# git status --short 应为空
-```
-
-2. 提交后**停下汇报**，等用户确认是否进 M6。用户最后的话是「轻微调整后就可以 M6 阶段了」——但按 `DESIGN.md` §0 一次一个里程碑，不要自作主张开 M6。
-3. 本交接文档 `docs/HANDOVER.md` 自身也未提交，可在上述文档提交里一并 `git add docs/`，让新对话删掉或留档由用户定。
-
-## 开放项（本轮没碰，别误判为已完成）
-
-- **M6 服务化**：`timeconv` 目前在 Tauri 外壳，M6 暴露 HTTP 时必须抽到 `ff-engine` 公共模块复用，否则复现 #81 的时间 bug。
-- Top-K 部分选择未做（#71）→ 单/双字符查询 93–443 ms（#82 实测）。
-- 托盘菜单、全局热键物理触发、失焦隐藏稳定性、IME 组词：未实机覆盖。
-- 设置页其余项不落盘（P1-7）。
-
-## 常用命令
-
-```bash
-export TMP=/f/Temp TMPDIR=/f/Temp TEMP=/f/Temp   # C: 盘易满，构建前必设
-cd /d/Sift && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
-cd /d/Sift/app && npm run test:format && npm run build
-cd /d/Sift && cargo build --release --manifest-path app/src-tauri/Cargo.toml --features custom-protocol
-# 真机：cd app/src-tauri/target/release && WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" ./sift-app.exe
-# 验证脚本：cd /d/Sift/.work && python gui_act.py <cmd> / python cdp.py <cmd>
-# 注意：全局热键被占会导致新实例 exit 101，启动前先 taskkill //IM sift-app.exe //F
-```
+- 不删除 120ms 搜索防抖；50ms 首屏指标不包含停顿窗口（#82）。
+- 32px 虚拟行、UTF-16 高亮范围、四列表格、无左侧栏保持。
+- 设置持久化、Shell 图标、列宽调整、Top-K 部分选择等仍有未完成项，
+  不因 UI 改好或进入 M6 而误标完成。
+- 窗口 CSS 不加常驻 will-change；避免多余大括号吞掉 topbar/flex 布局。
+  Tauri 新增 core/event API 时检查 capabilities（#79/#83）。
+- C: 空间约 1GB，Rust 构建设置 TMP/TEMP/TMPDIR 为 `F:/Temp`。
+- 本轮不推送；已提交历史与当前状态以 `git log`、`git status` 为准。

@@ -143,8 +143,8 @@ pub struct ResultRow {
     /// FILETIME（100 ns，1601 纪元）；None = 未补齐。
     ///
     /// **引擎契约保持 FILETIME**：`dm:` 求值、`SortKey::Modified` 排序、索引落盘都依赖它。
-    /// UI 边界在 Tauri `app/src-tauri/src/main.rs::range` 里经 `timeconv::convert_rows`
-    /// 转成 JS epoch 毫秒后序列化（P1-8）；`ff-cli` / M6 服务化复用同一转换。
+    /// UI 边界在 Tauri `range` 里经 `ff_engine::timeconv::convert_rows`
+    /// 转成 JS epoch 毫秒后序列化；Rust ↔ Rust 管道保留 FILETIME，HTTP 复用此转换。
     pub mtime: Option<i64>,
     /// 名字内命中区间（UTF-16 码元区间，相对 `name`），供前端 `<mark>` 切片；
     /// 仅为取数窗口内的行计算。UTF-8 → UTF-16 的转换已在 `resolve_row` 完成。

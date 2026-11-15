@@ -10,7 +10,9 @@
 
 pub mod api;
 pub mod inprocess;
+pub mod ipc;
 pub mod overlay;
+pub mod timeconv;
 
 pub use api::{
     EngineClient, EngineError, EngineStatus, OpenAction, ParseError, RequestId, Result, ResultRow,

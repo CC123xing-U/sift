@@ -361,6 +361,15 @@ pub trait EngineClient: Send + Sync {
 - 协议：4 字节小端长度前缀 + JSON（`serde_json`）；消息类型对应 `EngineClient` 的方法；每个请求带 `request_id`，响应带相同 id。
 - 服务重启或管道断开时，UI 自动重连并重新订阅状态。
 
+**M6-1 共享协议已落地（2026-11-15，#86；尚未接入 OS 管道）**：
+`ff-engine::ipc` 定义版本化 `Message { protocol_version, request_id, body }`，
+消息帧上限 1 MiB、查询上限 16 KiB、单次 range 上限 1000；版本不匹配、
+非法窗口、溢出、截断与非法 JSON 显式报错，干净 EOF 单独表示。编码先在有界
+缓冲区完成再写帧头；读写错误后调用方必须丢弃连接，不尝试猜测重同步。
+`Open` 响应只解析为 `ResolvedAction`，实际动作仍须 UI 执行。
+命名管道两端都是 Rust，保留 FILETIME 原值；Tauri/未来 HTTP 的最终 JS 边界
+调用共享 `ff_engine::timeconv` 转 epoch 毫秒。不要在 Pipe 客户端和 Tauri 重复转换。
+
 ### 10.2 本地 HTTP API（默认关闭，设置里开启）
 
 - `GET /search?q=<query>&offset=0&count=100&sort=score` → JSON：`{ "total": N, "offset": 0, "results": [ { "name", "path", "is_dir", "size", "mtime" } ] }`。
@@ -557,6 +566,10 @@ pub trait EngineClient: Send + Sync {
 ### M6 服务与开放接口
 - 第 10、12 节：服务拆分、命名管道、HTTP API（含全部安全要求）。
 - **验收**：UI 以普通权限运行即可搜索；HTTP 用错误 token / 错误 Host 头请求会被拒绝（写测试）；服务崩溃后 UI 能提示并重连。
+- **当前进度（2026-11-15）**：用户已确认进入 M6。M6-1 已完成共享协议/帧编码与
+  时间边界抽取、测试；尚未切换当前 InProcess 应用。下一步先隔离客户端搜索会话
+  （目前新搜索清空全局结果，直接接 UI+HTTP 会互相作废），再实现 SID ACL 管道、
+  服务生命周期、普通权限 UI、HTTP 鉴权及端到端验收。**M6 整体尚未完成**。
 
 ### M7 进阶（逐项单独立项）
 对话框集成（`SetWinEventHook` + UI Automation，先在记事本"打开"对话框验证）· 内容搜索 · 硬链接多路径 · filelist 导入 · 非 NTFS 回退遍历 · 属性窗口。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2，不再列在 M7。）

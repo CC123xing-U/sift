@@ -421,3 +421,23 @@ Playwright `1.66.0-alpha-2026-11-09`，Chromium 缓存构建 1254；没有改应
 Tauri fmt/clippy/test（7 passed）通过。设置转场继续沿用 CSS，无新增依赖。
 前端 build（50 modules）、29 格式断言及浏览器 UI 回归通过；新增进入动画名称、
 返回按钮焦点、Esc 关闭保留查询和恢复输入焦点断言。真实 WebView2 转场未复验。
+
+## M6-1 共享协议与时间边界（#86）
+
+本批不运行服务、不安装 SCM、不开放 HTTP，不代表 M6 整体验收通过。
+
+- 测试先行：`cargo test -p ff-engine --test ipc_contract` 初次因缺少 ipc 模块和
+  serde_json 直接依赖编译失败；补实现后 **11 passed**。
+- 覆盖：小端长度、搜索/六方法往返、UTF-8 查询、分片/粘连读取、干净断线、
+  截断头/体、0/超大长度、非法 JSON/UTF-8/方法/版本/id、查询和 range 上限、
+  offset 溢出、超限响应不写半帧、结构化错误、FILETIME/UTF-16 高亮精确往返。
+- 7 项时间转换测试从 Tauri 迁到 ff-engine；Rust 管道原样往返
+  `134116992000000001` FILETIME，面向 JS 的转换仍只在最终边界调用。
+- 根 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+  `cargo test --workspace`：**229 passed**，5 ignored（既有条件性/Windows 实扫测试），0 failed。
+- Tauri `cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`、
+  `cargo check --features custom-protocol`：通过；本地测试现为 0（时间测试已迁移）。
+- TMP/TEMP/TMPDIR 设为 `F:/Temp`；本批不重复测真实索引/搜索性能，不报告推算性能。
+
+后续验收：先做多客户端独立取消与结果集，再测 SID ACL 管道、SCM、普通权限 UI、
+HTTP 错误 token/Host/count/速率拒绝、断线重连与服务崩溃恢复。
