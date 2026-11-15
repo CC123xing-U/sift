@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Sift 主窗口：放行无边框窗口拖动所需的 core:window 命令。前端其余调用均为 #[tauri::command] 自定义命令，不受 ACL 约束。",
+  "windows": ["main"],
+  "permissions": [
+    "core:window:allow-start-dragging"
+  ]
+}
