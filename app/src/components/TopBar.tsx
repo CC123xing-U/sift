@@ -66,7 +66,13 @@ export default function TopBar({
   };
 
   return (
-    <div className="topbar">
+    // P1-1：无边框窗口（decorations: false）必须能拖动。UI_SPEC §3.1 指定
+    // 「输入行空白区为拖动区」；Tauri v2 的 drag.js 对 `deep` 沿 composedPath
+    // 上溯，遇到 INPUT / BUTTON 等可交互元素且未带该属性时会阻止拖动，
+    // 因此整块 topbar 标 deep 后，输入框选字、chips、✕/⚙ 按钮仍完全可用，
+    // 只有图标与空白区触发 start_dragging。不额外加自绘关闭按钮（UI_SPEC
+    // §3.1 明确标题栏按钮只有 ✕/⚙，关闭语义由 Esc / 失焦 / 托盘承担）。
+    <div className="topbar" data-tauri-drag-region="deep">
       <div className="searchrow">
         <span className="searchicon" aria-hidden="true">
           <SearchIcon />

@@ -2,7 +2,9 @@
 //!
 //! 直接用 `ff-core` 的 [`VolumeIndex`] 承接 `ff-ntfs` 的 [`RawEntry`]，在进程内
 //! 打通 `search` / `range`（含排序与 `ResultRow` 构造）/ `cancel` / `status` /
-//! `rescan` / `open`。不依赖任何 Windows 专有 API，保证 `ff-engine` 跨平台可编译。
+//! `rescan` / `open`。Windows 专有的 `ShellExecuteW` 与剪贴板 FFI 由
+//! `#[cfg(windows)]` 隔离，非 Windows 分支保留可编译的显式回退，
+//! 保证 `ff-engine` 跨平台可编译。
 //!
 //! 多卷映射：每条命中记录为 `(VolumeId, Hit)`。排序与 `range` 时据此回到对应
 //! 卷的 `VolumeIndex` 取字段，天然支持多卷并集。
@@ -517,8 +519,10 @@ impl EngineInner {
         };
         drop(vols);
         match action {
-            // 复制到剪贴板由 UI 层处理；InProcess 下暂视为成功
-            OpenAction::CopyPath => Ok(()),
+            // P0-2：真实写入系统剪贴板。InProcess 引擎运行在 UI 进程内，
+            // 由 UI 进程以当前用户身份执行符合 DESIGN §12；不再「静默成功」。
+            OpenAction::CopyPath => clipboard_set_text(&full),
+            OpenAction::CopyName => clipboard_set_text(file_name_from_full(&full)),
             OpenAction::Open => shell_open(&full, false),
             OpenAction::OpenFolder => shell_open(&full, true),
         }
@@ -1393,6 +1397,104 @@ fn shell_open(path: &str, folder: bool) -> Result<()> {
 #[cfg(not(windows))]
 fn shell_open(_path: &str, _folder: bool) -> Result<()> {
     Ok(())
+}
+
+/// 字符串转 UTF-16 + 结尾 NUL（Win32 宽串约定）。纯函数，便于单测。
+fn wide_with_nul(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0u16)).collect()
+}
+
+/// 从完整路径取出最后一段名字。
+///
+/// 末尾分隔符（盘符根 `C:\`）先裁掉；无分隔符时返回整串（`C:`）。
+/// 不用 `std::path::Path::file_name`，避免非 Windows 构建把 `\` 当普通字符。
+fn file_name_from_full(full: &str) -> &str {
+    let trimmed = full.trim_end_matches(['\\', '/']);
+    trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed)
+}
+
+/// 把文本写入系统剪贴板（P0-2，Windows）。
+///
+/// 与 `shell_open` 同风格：直接 Win32 FFI，不引入 `arboard` 等新依赖
+/// （DESIGN §2.1 依赖准入）。要点：
+/// - `CF_UNICODETEXT` 要求 `GMEM_MOVEABLE` 的全局内存，且文本以 UTF-16 NUL 结尾；
+/// - `SetClipboardData` **成功后内存所有权移交系统**，绝不能再 `GlobalFree`；
+///   失败才由调用方释放；
+/// - `OpenClipboard` 可能被别的进程短暂占用，有限重试 5×10 ms，不长期阻塞 UI；
+/// - 失败返回 `Err`，经 `TauriEngine.open` → `onOpenError` 在状态栏显示（P1-9），
+///   不再像旧实现那样静默 `Ok(())` 让界面撒谎。
+#[cfg(windows)]
+fn clipboard_set_text(text: &str) -> Result<()> {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn OpenClipboard(hwnd: *mut c_void) -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, mem: *mut c_void) -> *mut c_void;
+        fn CloseClipboard() -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
+        fn GlobalLock(mem: *mut c_void) -> *mut c_void;
+        fn GlobalUnlock(mem: *mut c_void) -> i32;
+        fn GlobalFree(mem: *mut c_void) -> *mut c_void;
+    }
+
+    let wide = wide_with_nul(text);
+    let bytes = wide.len() * std::mem::size_of::<u16>();
+
+    // SAFETY：所有句柄均由本函数分配、生命周期限于本函数；
+    // SetClipboardData 成功后不再触碰 mem（所有权已移交系统）。
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if mem.is_null() {
+            return Err(EngineError::Io("剪贴板内存分配失败".into()));
+        }
+        let dst = GlobalLock(mem);
+        if dst.is_null() {
+            GlobalFree(mem);
+            return Err(EngineError::Io("剪贴板内存锁定失败".into()));
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), dst.cast::<u16>(), wide.len());
+        GlobalUnlock(mem);
+
+        let mut opened = false;
+        for _ in 0..5 {
+            if OpenClipboard(null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            sleep(Duration::from_millis(10));
+        }
+        if !opened {
+            GlobalFree(mem);
+            return Err(EngineError::Io("剪贴板被其他程序占用".into()));
+        }
+
+        EmptyClipboard();
+        let ok = !SetClipboardData(CF_UNICODETEXT, mem).is_null();
+        CloseClipboard();
+        if ok {
+            Ok(())
+        } else {
+            GlobalFree(mem);
+            Err(EngineError::Io("写入剪贴板失败".into()))
+        }
+    }
+}
+
+/// 非 Windows：显式报错而不是假成功——前端会如实提示「剪贴板不可用」。
+#[cfg(not(windows))]
+fn clipboard_set_text(_text: &str) -> Result<()> {
+    Err(EngineError::Io("当前平台不支持系统剪贴板".into()))
 }
 
 #[cfg(test)]
@@ -2333,5 +2435,93 @@ mod tests {
             explorer_select_arg("C:\\中文 (1).txt"),
             "/select,\"C:\\中文 (1).txt\""
         );
+    }
+
+    #[test]
+    fn wide_with_nul_handles_unicode_and_empty() {
+        assert_eq!(wide_with_nul(""), vec![0u16]);
+        assert_eq!(wide_with_nul("ab"), vec![b'a' as u16, b'b' as u16, 0]);
+        // emoji 是代理对（2 个 UTF-16 单元），中文 1 个；结尾恒有 NUL。
+        let w = wide_with_nul("中😀");
+        assert_eq!(w, vec![0x4E2D, 0xD83D, 0xDE00, 0]);
+    }
+
+    #[test]
+    fn file_name_from_full_strips_dirs_and_trailing_sep() {
+        assert_eq!(file_name_from_full("C:\\Work\\report.txt"), "report.txt");
+        assert_eq!(file_name_from_full("D:/a/b/中文 名.md"), "中文 名.md");
+        assert_eq!(file_name_from_full("C:\\Windows\\"), "Windows");
+        assert_eq!(file_name_from_full("C:\\"), "C:");
+        assert_eq!(file_name_from_full("readme.txt"), "readme.txt");
+    }
+
+    /// P0-2：真实剪贴板往返。先备份原文本，测试结束恢复，避免污染用户剪贴板；
+    /// 原剪贴板不是纯文本时直接跳过本次验证（不破坏图片等格式）。
+    #[test]
+    #[cfg(windows)]
+    fn clipboard_roundtrip_writes_unicode_and_restores_previous() {
+        use std::ffi::c_void;
+        use std::ptr::null_mut;
+
+        const CF_UNICODETEXT: u32 = 13;
+        #[link(name = "user32")]
+        extern "system" {
+            fn OpenClipboard(hwnd: *mut c_void) -> i32;
+            fn IsClipboardFormatAvailable(format: u32) -> i32;
+            fn GetClipboardData(format: u32) -> *mut c_void;
+            fn CloseClipboard() -> i32;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalLock(mem: *mut c_void) -> *mut c_void;
+            fn GlobalUnlock(mem: *mut c_void) -> i32;
+        }
+
+        /// 读取当前剪贴板文本；None = 本次验证应跳过
+        /// （无文本格式 / 剪贴板被占用），避免覆盖图片等非文本内容。
+        fn read_clipboard_text() -> Option<String> {
+            unsafe {
+                if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+                    return None;
+                }
+                if OpenClipboard(null_mut()) == 0 {
+                    return None;
+                }
+                let h = GetClipboardData(CF_UNICODETEXT);
+                if h.is_null() {
+                    CloseClipboard();
+                    return Some(String::new());
+                }
+                let p = GlobalLock(h).cast::<u16>();
+                let mut s = String::new();
+                if !p.is_null() {
+                    let mut i = 0usize;
+                    while *p.add(i) != 0 {
+                        i += 1;
+                    }
+                    s = String::from_utf16_lossy(std::slice::from_raw_parts(p, i));
+                    GlobalUnlock(h);
+                }
+                CloseClipboard();
+                Some(s)
+            }
+        }
+
+        let previous = match read_clipboard_text() {
+            Some(s) => s,
+            None => {
+                eprintln!("clipboard roundtrip SKIPPED: 无文本格式或剪贴板被占用");
+                return; // 不动用户剪贴板
+            }
+        };
+
+        let probe = "Sift 剪贴板自测 😀 C:\\中文 目录\\文件.txt";
+        assert!(clipboard_set_text(probe).is_ok(), "写剪贴板应成功");
+        assert_eq!(read_clipboard_text().as_deref(), Some(probe));
+
+        // 恢复原内容（原为空时写空串，等价于清空）。
+        assert!(clipboard_set_text(&previous).is_ok());
+        assert_eq!(read_clipboard_text().as_deref(), Some(previous.as_str()));
+        eprintln!("clipboard roundtrip OK: 写入并回读 {} 字节", probe.len());
     }
 }

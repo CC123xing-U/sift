@@ -184,10 +184,11 @@ export class MockEngine implements EngineClient {
     if (!rec) return;
     const e = this.ds.entries[rec.indices[index]];
     if (!e) return;
-    if (action === 'copy_path') {
+    if (action === 'copy_path' || action === 'copy_name') {
       const full = e.dir + (e.dir.endsWith('\\') ? '' : '\\') + e.name;
+      const text = action === 'copy_path' ? full : e.name;
       try {
-        await navigator.clipboard.writeText(full);
+        await navigator.clipboard.writeText(text);
       } catch {
         /* 非安全上下文或拒绝授权时静默忽略 */
       }

@@ -1,5 +1,6 @@
 import React, {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
@@ -48,9 +49,21 @@ interface Props {
   onRescan: () => void;
   /** P1-9：打开 / 复制失败时回调（如文件已删、结果集已回收）。 */
   onOpenError?: (msg: string) => void;
+  /** P0-2：复制成功的可见反馈（复用状态栏 toast 通道）。 */
+  onActionDone?: (msg: string) => void;
 }
 
 type Panel = 'list' | 'scanning' | 'emptyQuery' | 'noResult' | 'searchingEmpty' | 'error';
+
+// P0-3：右键菜单项。快捷键显示在右侧，让键盘路径可发现（REVIEW_BRIEF §5 P0-3）。
+const MENU_ITEMS: { action: OpenAction; label: string; hint: string }[] = [
+  { action: 'open', label: I18N.ctxOpen, hint: 'Enter' },
+  { action: 'open_folder', label: I18N.ctxOpenFolder, hint: 'Ctrl+Enter' },
+  { action: 'copy_path', label: I18N.ctxCopyPath, hint: 'Ctrl+C' },
+  { action: 'copy_name', label: I18N.ctxCopyName, hint: '' },
+];
+const MENU_W = 216;
+const MENU_H = 160;
 
 const PAGE = 15;
 // 滚动停止后才发 range 请求（UI_SPEC §6.5 / §10 待办 #2）。
@@ -81,13 +94,20 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     onClearFilter,
     onRescan,
     onOpenError,
+    onActionDone,
   } = props;
 
   const parentRef = useRef<HTMLDivElement>(null);
+  const areaRef = useRef<HTMLDivElement>(null);
   const rangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selected, setSelected] = useState(0);
   const selectedRef = useRef(0);
   selectedRef.current = selected;
+
+  // P0-3：右键菜单状态（x/y 为视口坐标，index 为被右击的结果行）。
+  const [menu, setMenu] = useState<{ x: number; y: number; index: number } | null>(null);
+  const [menuActive, setMenuActive] = useState(0);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const virtualizer = useVirtualizer({
     count: total,
@@ -160,6 +180,24 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, total, items, engine]);
 
+  /** 统一的动作入口：键盘快捷键与右键菜单共用，成功 / 失败都有可见反馈。 */
+  const runAction = useCallback(
+    (action: OpenAction, index: number) => {
+      // P1-9：open 返回 Result，失败（文件已删 / 结果集已回收 / 剪贴板不可用）
+      // 通过 onOpenError 在状态栏提示，而不是静默吞掉。
+      engine
+        .open(currentId, index, action)
+        .then(() => {
+          if (action === 'copy_path') onActionDone?.(I18N.copiedPath);
+          else if (action === 'copy_name') onActionDone?.(I18N.copiedName);
+        })
+        .catch((err: unknown) =>
+          onOpenError?.(err instanceof Error ? err.message : String(err)),
+        );
+    },
+    [engine, currentId, onOpenError, onActionDone],
+  );
+
   useImperativeHandle(
     ref,
     () => ({
@@ -170,19 +208,69 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
       open: (action) => {
         const i = selectedRef.current;
         if (i >= total) return;
-        // P1-9：open 现在返回 Result，失败时（文件已删 / 结果集已回收 / 权限）
-        // 通过 onOpenError 在状态栏提示，而不是静默吞掉。
-        engine
-          .open(currentId, i, action)
-          .catch((err: unknown) =>
-            onOpenError?.(err instanceof Error ? err.message : String(err)),
-          );
+        runAction(action, i);
       },
       hasSelection: () => total > 0,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [total, currentId, engine, virtualizer],
+    [total, currentId, engine, virtualizer, runAction],
   );
+
+  /** P0-3：在结果行上右键，选中该行并在鼠标处弹出菜单（不越出窗口）。 */
+  const onContextMenu = (e: React.MouseEvent) => {
+    const rowEl = (e.target as HTMLElement).closest<HTMLElement>('.row');
+    if (!rowEl) return;
+    const idx = Number(rowEl.id.replace('sift-row-', ''));
+    if (!Number.isFinite(idx) || idx >= total) return;
+    // 菜单用 position:absolute 相对 .resultarea 定位：Tauri 下窗口即视口、
+    // 浏览器原型里窗口是居中模拟块，两种环境都不会把菜单弹到窗口外。
+    const box = areaRef.current?.getBoundingClientRect();
+    const w = box?.width ?? window.innerWidth;
+    const h = box?.height ?? window.innerHeight;
+    const x = e.clientX - (box?.left ?? 0);
+    const y = e.clientY - (box?.top ?? 0);
+    e.preventDefault();
+    setSelected(idx);
+    setMenu({
+      x: Math.max(8, Math.min(x, w - MENU_W - 8)),
+      y: Math.max(8, Math.min(y, h - MENU_H - 8)),
+      index: idx,
+    });
+    setMenuActive(0);
+  };
+
+  // 菜单生命周期：打开后自动聚焦；外部点击 / Esc / 滚动 / 窗口尺寸变化 /
+  // 搜索结果切换时关闭。Esc 用 document capture 拦截并 stopImmediatePropagation，
+  // 抢在 App 的全局 Esc（清空输入 → 隐藏窗口）之前，避免「关菜单顺带隐藏窗口」。
+  useEffect(() => {
+    if (!menu) return;
+    menuRef.current?.focus();
+    const onDown = (ev: MouseEvent) => {
+      if (!menuRef.current?.contains(ev.target as Node)) setMenu(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        setMenu(null);
+      }
+    };
+    const close = () => setMenu(null);
+    const listEl = parentRef.current;
+    document.addEventListener('mousedown', onDown, true);
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', close);
+    listEl?.addEventListener('scroll', close, { passive: true });
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', close);
+      listEl?.removeEventListener('scroll', close);
+    };
+  }, [menu]);
+
+  // 搜索结果换了（currentId 变化）就关掉旧菜单，避免对过期结果集执行动作。
+  useEffect(() => setMenu(null), [currentId]);
 
   const scanningFresh = status.volumes.some((v) => v.state === 'scanning' && !v.stale);
   const errored = status.volumes.some((v) => v.state === 'error');
@@ -234,7 +322,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
   const firstScreenSkeleton = Object.keys(rows).length === 0;
 
   return (
-    <div className="resultarea">
+    <div className="resultarea" ref={areaRef}>
       {requested && <div className="topprogress" aria-hidden="true" />}
 
       {panel === 'list' ? (
@@ -269,6 +357,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
             aria-label={I18N.a11y.list}
             aria-busy={requested}
             aria-activedescendant={`sift-row-${selected}`}
+            onContextMenu={onContextMenu}
           >
             <div
               style={{ height: virtualizer.getTotalSize(), position: 'relative' }}
@@ -316,6 +405,56 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
           onClearFilter={onClearFilter}
           onRescan={onRescan}
         />
+      )}
+
+      {menu && (
+        <div
+          ref={menuRef}
+          className="ctxmenu"
+          role="menu"
+          aria-label={I18N.ctxMenuLabel}
+          tabIndex={-1}
+          style={{ left: menu.x, top: menu.y }}
+          onKeyDown={(e) => {
+            // 菜单打开期间接管键盘：不让 App 的 ↑↓/Enter/Esc 同时改动选中行或隐藏窗口。
+            e.stopPropagation();
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault();
+              const d = e.key === 'ArrowDown' ? 1 : -1;
+              setMenuActive((a) => (a + d + MENU_ITEMS.length) % MENU_ITEMS.length);
+            } else if (e.key === 'Home' || e.key === 'End') {
+              e.preventDefault();
+              setMenuActive(e.key === 'Home' ? 0 : MENU_ITEMS.length - 1);
+            } else if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setMenu(null);
+              runAction(MENU_ITEMS[menuActive].action, menu.index);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              setMenu(null);
+            }
+          }}
+        >
+          {MENU_ITEMS.map((it, k) => (
+            <React.Fragment key={it.action}>
+              {k === 2 && <div className="ctxsep" role="separator" />}
+              <button
+                type="button"
+                role="menuitem"
+                className={'ctxitem' + (k === menuActive ? ' active' : '')}
+                tabIndex={-1}
+                onMouseEnter={() => setMenuActive(k)}
+                onClick={() => {
+                  setMenu(null);
+                  runAction(it.action, menu.index);
+                }}
+              >
+                <span>{it.label}</span>
+                {it.hint && <span className="ctxhint">{it.hint}</span>}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
       )}
     </div>
   );

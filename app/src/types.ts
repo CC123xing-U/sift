@@ -58,7 +58,7 @@ export interface ResultRow {
   name_matches: MatchRange[];
 }
 
-export type OpenAction = 'open' | 'open_folder' | 'copy_path';
+export type OpenAction = 'open' | 'open_folder' | 'copy_path' | 'copy_name';
 
 export type VolumeState = 'scanning' | 'ready' | 'error';
 

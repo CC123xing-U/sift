@@ -28,6 +28,15 @@ export const I18N = {
   settings: '设置',
   back: '← 返回',
   clear: '清空',
+  // P0-3：结果行右键菜单。快捷键在菜单项右侧显示，让键盘路径可发现。
+  ctxOpen: '打开',
+  ctxOpenFolder: '打开所在文件夹',
+  ctxCopyPath: '复制完整路径',
+  ctxCopyName: '复制文件名',
+  ctxMenuLabel: '结果操作菜单',
+  ctxHint: '右键查看更多操作',
+  copiedPath: '已复制完整路径',
+  copiedName: '已复制文件名',
   // 设置页
   recordingHint: '按下组合键…（Esc 取消）',
   recording: '录制中…',

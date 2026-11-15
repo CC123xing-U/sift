@@ -156,8 +156,10 @@ pub enum OpenAction {
     Open,
     /// 打开所在文件夹并选中。
     OpenFolder,
-    /// 复制完整路径。
+    /// 复制完整路径（Windows 剪贴板由 UI 进程写入，DESIGN §12）。
     CopyPath,
+    /// 复制文件名（不含目录）；供右键菜单使用。
+    CopyName,
 }
 
 /// 引擎错误。

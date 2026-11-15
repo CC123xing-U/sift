@@ -59,6 +59,12 @@ export default function StatusBar({ summary, requested, query, status, toast }: 
         <span className="mono" aria-hidden="true">
           {left}
         </span>
+        {/* P0-3：快捷键 / 右键路径的可见提示（REVIEW_BRIEF §5 P0-3 建议）。 */}
+        {!requested && summary && query.trim() !== '' && summary.total > 0 && (
+          <span className="status-hint" aria-hidden="true">
+            {I18N.ctxHint}
+          </span>
+        )}
         <span className="sr-only" aria-live="polite">
           {announce}
         </span>

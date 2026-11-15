@@ -444,6 +444,7 @@ export default function App() {
                 onClearFilter={onClearFilter}
                 onRescan={onRescan}
                 onOpenError={showToast}
+                onActionDone={showToast}
               />
               <StatusBar
                 summary={summary}
