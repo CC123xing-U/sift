@@ -10,6 +10,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod timeconv;
+
 use ff_engine::api::{
     EngineClient, EngineStatus, OpenAction, RequestId, ResultRow, SearchRequest, SearchSummary,
 };
@@ -43,10 +45,15 @@ fn range(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<ResultRow>, String> {
-    state
+    // P1-8：引擎给的是 FILETIME，前端 `types.ts` 契约是 JS epoch 毫秒。
+    // 必须在序列化前转换——FILETIME ≈1.34e17 超过 2^53，直接送进 JS 会先丢精度
+    // 再被 `new Date()` 判为 Invalid Date，前端补算也救不回来（见 timeconv.rs）。
+    let mut rows = state
         .engine
         .range(id, offset, limit)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    timeconv::convert_rows(&mut rows);
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -56,7 +63,10 @@ fn cancel(state: tauri::State<EngineState>, id: RequestId) {
 
 #[tauri::command]
 fn status(state: tauri::State<EngineState>) -> EngineStatus {
-    state.engine.status()
+    // P1-8：状态栏「已保存 HH:MM」同样需要 epoch 毫秒，转换口径与 `range` 一致。
+    let mut s = state.engine.status();
+    timeconv::convert_status(&mut s);
+    s
 }
 
 #[tauri::command]

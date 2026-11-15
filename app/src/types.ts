@@ -53,7 +53,7 @@ export interface ResultRow {
   dir: string;
   is_dir: boolean;
   size: number | null;
-  /** JS epoch 毫秒（M3 IPC 边界再转 FILETIME）。 */
+  /** JS epoch 毫秒；Tauri IPC 层从引擎的 FILETIME 转换（P1-8）。null = 元数据未补齐或时间无效。 */
   mtime: number | null;
   name_matches: MatchRange[];
 }
@@ -76,6 +76,7 @@ export interface VolumeStatus {
 export interface EngineStatus {
   volumes: VolumeStatus[];
   total_entries: number;
+  /** JS epoch 毫秒；Tauri IPC 层从 FILETIME 转换（P1-8）。null = 从未保存。 */
   last_saved: number | null;
   searching: boolean;
   /** P0-5：最近一次落盘失败原因；成功或未尝试时为 null。 */

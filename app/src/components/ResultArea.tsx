@@ -482,7 +482,9 @@ function RowContent({ row, skeleton }: { row: ResultRow | undefined; skeleton: b
       <span className="c-path" title={row.dir}>
         {row.dir}
       </span>
-      <span className="c-size mono">{formatSize(row.size)}</span>
+      {/* UI_SPEC §4.2：目录大小列显示空白。引擎对目录给 Some(0)（NTFS 无目录字节数），
+          直接渲染会变成误导性的 `0 B`；MockEngine 的目录本来就是 null，此处统一。 */}
+      <span className="c-size mono">{formatSize(row.is_dir ? null : row.size)}</span>
       <span className="c-mod mono" title={formatTimeFull(row.mtime)}>
         {formatTime(row.mtime)}
       </span>

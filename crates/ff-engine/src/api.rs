@@ -140,10 +140,14 @@ pub struct ResultRow {
     pub is_dir: bool,
     /// None = 元数据未补齐（DESIGN §4.3 `STALE_META`，M2 增量条目）。
     pub size: Option<u64>,
-    /// FILETIME（100ns，1601 纪元）；None = 未补齐。IPC/UI 边界再转换。
+    /// FILETIME（100 ns，1601 纪元）；None = 未补齐。
+    ///
+    /// **引擎契约保持 FILETIME**：`dm:` 求值、`SortKey::Modified` 排序、索引落盘都依赖它。
+    /// UI 边界在 Tauri `app/src-tauri/src/main.rs::range` 里经 `timeconv::convert_rows`
+    /// 转成 JS epoch 毫秒后序列化（P1-8）；`ff-cli` / M6 服务化复用同一转换。
     pub mtime: Option<i64>,
-    /// 名字内命中区间（UTF-8 字节区间，相对 `name`），供前端高亮；
-    /// 仅为取数窗口内的行计算。转前端索引在 IPC 层（M6）处理。
+    /// 名字内命中区间（UTF-16 码元区间，相对 `name`），供前端 `<mark>` 切片；
+    /// 仅为取数窗口内的行计算。UTF-8 → UTF-16 的转换已在 `resolve_row` 完成。
     #[serde(with = "serde_ranges")]
     pub name_matches: Vec<Range<u32>>,
 }
@@ -225,6 +229,7 @@ pub struct EngineStatus {
     /// 各卷条目数之和。
     pub total_entries: u64,
     /// 最近一次成功保存索引的时间（FILETIME；从未保存为 None）。
+    /// Tauri IPC 的 `status` 命令经 `timeconv::convert_status` 转为 epoch 毫秒（P1-8）。
     pub last_saved: Option<i64>,
     /// 当前是否有搜索在进行。
     pub searching: bool,
