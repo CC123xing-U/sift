@@ -20,6 +20,10 @@ export const I18N = {
   // 引擎带回具体原因时优先展示原因（如"修饰符语法尚未支持"），而不是泛泛的"语法错误"。
   parseErrorWith: (pos: number, message: string) => `第 ${pos + 1} 位：${message}`,
   indexError: (err: string) => `索引出错：${err}`,
+  // P1-3：仍有可搜卷时，只提示具体失败的那一卷（而非占满全局错误面板）。
+  volumeError: (vol: string, msg: string) => `${vol} 索引失败：${msg}`,
+  // P0-5：落盘失败透传。
+  saveError: (msg: string) => `索引保存失败：${msg}`,
   retry: '重试',
   settings: '设置',
   back: '← 返回',

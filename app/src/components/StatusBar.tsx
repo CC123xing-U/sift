@@ -8,11 +8,17 @@ interface Props {
   requested: boolean;
   query: string;
   status: EngineStatus;
+  /** P1-9：打开 / 复制失败的临时提示。 */
+  toast?: string | null;
 }
 
-export default function StatusBar({ summary, requested, query, status }: Props) {
+export default function StatusBar({ summary, requested, query, status, toast }: Props) {
   const scanning = status.volumes.some((v) => v.state === 'scanning');
   const errored = status.volumes.some((v) => v.state === 'error');
+  // P1-3：仍有可搜卷（Ready 或正在刷新旧索引）时，失败卷不当作全局错误。
+  const searchable = status.volumes.some(
+    (v) => v.state === 'ready' || (v.state === 'scanning' && v.stale),
+  );
   const ready = status.volumes.every((v) => v.state === 'ready');
 
   let left: string;
@@ -22,9 +28,18 @@ export default function StatusBar({ summary, requested, query, status }: Props) 
   else left = '';
 
   let right: string;
-  if (errored) {
-    const m = status.volumes.find((v) => v.state === 'error');
-    right = I18N.indexError(m?.message ?? '未知');
+  if (status.save_error) {
+    right = I18N.saveError(status.save_error); // P0-5
+  } else if (errored) {
+    const failed = status.volumes.filter((v) => v.state === 'error');
+    if (searchable && failed.length > 0) {
+      // 仍有可搜卷：只提示失败的那一卷（P1-3）。
+      const f = failed[0];
+      right = I18N.volumeError(f.volume, f.message ?? '未知');
+    } else {
+      const m = failed[0];
+      right = I18N.indexError(m?.message ?? '未知');
+    }
   } else if (scanning) {
     const maxP = overallScanProgress(status.volumes);
     right = I18N.scanning(maxP);
@@ -48,6 +63,11 @@ export default function StatusBar({ summary, requested, query, status }: Props) 
           {announce}
         </span>
       </span>
+      {toast && (
+        <span className="status-toast" role="status">
+          {toast}
+        </span>
+      )}
       <span className="status-right">{right}</span>
     </div>
   );

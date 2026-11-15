@@ -1,8 +1,9 @@
-//! 统一匹配 trait 与 T1 子串匹配器（DESIGN §8.1）。
+//! 统一匹配 trait 与 T1 子串 / T3 模糊匹配器（DESIGN §8.1）。
 //!
-//! M5 将新增 `PinyinMatcher`（T2，`ib-pinyin`）与 `FuzzyMatcher`（T3，
-//! `nucleo-matcher`），二者实现同一 [`Matcher`] trait，由 ff-core 的匹配
-//! 分层（T1→T2→T3）调度。
+//! T2 `PinyinMatcher`（`pinyin.rs`）与 T3 `FuzzyMatcher` 实现同一 [`Matcher`]
+//! trait，由 ff-core 的匹配分层（T1→T2→T3）调度。当前用自实现的精简拼音
+//! 字典与有序子序列；生产库 `ib-pinyin` / `nucleo-matcher` 的替换条件见
+//! `docs/DECISIONS.md` #70。
 
 use std::ops::Range;
 
@@ -75,6 +76,86 @@ impl Matcher for SubstringMatcher {
     }
 }
 
+/// T3 模糊匹配器（DESIGN §8.1）。
+///
+/// 用**有序子序列**判定（字符序模糊，等价于 `nucleo-matcher` 的基本行为）：
+/// `needle` 的字符按序出现在 `name` 中即命中。`vsc` 能在 `Visual Studio Code`
+/// 中命中即此原理。命中位置用于高亮。生产可换用 `nucleo-matcher` 以获得更优的
+/// 连续度评分与预过滤，但匹配语义一致。
+///
+/// 约定：与 `SubstringMatcher` 相同，`needle` 已由调用方大小写折叠。
+#[derive(Clone, Debug)]
+pub struct FuzzyMatcher {
+    needle: Vec<u8>,
+}
+
+impl FuzzyMatcher {
+    pub fn new(needle: &[u8]) -> Self {
+        Self {
+            needle: needle.to_vec(),
+        }
+    }
+
+    /// 零分配的大小写不敏感子序列判定（T3 全表预过滤用，DESIGN §8.1）。
+    ///
+    /// `needle` 已折叠为 ASCII 小写；逐字节把 `name` 做 ASCII 小写比较，
+    /// 避免为 200 万条名字各分配一份小写副本和命中位置向量。
+    pub fn matches_folded(&self, name: &[u8]) -> bool {
+        if self.needle.is_empty() {
+            return false;
+        }
+        let mut ni = 0;
+        for &b in name {
+            if b.to_ascii_lowercase() == self.needle[ni] {
+                ni += 1;
+                if ni == self.needle.len() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 返回命中的字节位置（升序）；非子序列返回 `None`。
+    fn positions(&self, name: &[u8]) -> Option<Vec<usize>> {
+        if self.needle.is_empty() {
+            return None;
+        }
+        let mut out = Vec::new();
+        let mut ni = 0;
+        for (i, &b) in name.iter().enumerate() {
+            if b == self.needle[ni] {
+                out.push(i);
+                ni += 1;
+                if ni == self.needle.len() {
+                    return Some(out);
+                }
+            }
+        }
+        None
+    }
+}
+
+impl Matcher for FuzzyMatcher {
+    fn tier(&self) -> Tier {
+        Tier::Fuzzy
+    }
+
+    fn matches(&self, name: &[u8]) -> bool {
+        self.positions(name).is_some()
+    }
+
+    fn find_ranges(&self, name: &[u8]) -> Vec<Range<u32>> {
+        match self.positions(name) {
+            Some(p) => p
+                .into_iter()
+                .map(|i| (i as u32)..((i + 1) as u32))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +198,28 @@ mod tests {
         let m = SubstringMatcher::new("搜索".as_bytes());
         assert!(m.matches("拼音搜索Everything".as_bytes()));
         assert!(!m.matches("拼听搜查".as_bytes()));
+    }
+
+    #[test]
+    fn fuzzy_subsequence_vsc_hits_vsc() {
+        // 金标准：vsc → Visual Studio Code。
+        // 注意：匹配器按字节比较、大小写不折叠（由调用方用 names_lower 折叠），
+        // 故此处用全小写串（与引擎 names_lower 一致）。
+        let m = FuzzyMatcher::new(b"vsc");
+        assert!(m.matches(b"visual studio code"));
+        let r = m.find_ranges(b"visual studio code");
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn fuzzy_no_match_when_out_of_order() {
+        let m = FuzzyMatcher::new(b"xyz");
+        assert!(!m.matches(b"Visual Studio Code"));
+    }
+
+    #[test]
+    fn fuzzy_empty_needle_no_match() {
+        let m = FuzzyMatcher::new(b"");
+        assert!(!m.matches(b"abc"));
     }
 }

@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { I18N } from '../i18n';
 
-/** 设置项状态。原型阶段仅存内存（跨视图切换保留），落盘在 M3 接 Tauri 后补。 */
+/** 设置项状态。当前仅存内存（跨视图切换保留）；匹配/隐藏三项已接引擎，落盘待 M6。 */
 export interface SettingsState {
   autostart: boolean;
   hideOnBlur: boolean;
@@ -128,11 +128,13 @@ function HotkeyRow({ value, onChange }: { value: string; onChange: (v: string) =
 
   return (
     <div className="set-row">
-      <span>全局热键</span>
+      <span>
+        全局热键 <span className="pending-tag">自定义未接线</span>
+      </span>
       <button
         type="button"
         className={'hotkey hotkey-btn' + (recording ? ' recording' : '')}
-        aria-label={I18N.a11y.hotkeyRecord(value)}
+        aria-label={`${I18N.a11y.hotkeyRecord(value)}，自定义未接线`}
         aria-pressed={recording}
         onClick={() => setRecording((r) => !r)}
         onKeyDown={onKeyDown}
@@ -168,7 +170,9 @@ function ExcludePaths({
 
   return (
     <div className="set-block">
-      <span className="set-block-label">排除路径</span>
+      <span className="set-block-label">
+        排除路径 <span className="pending-tag">未接线</span>
+      </span>
       {paths.length === 0 ? (
         <div className="exclude-empty">{I18N.noExclude}</div>
       ) : (
@@ -231,20 +235,34 @@ export default function Settings({ onBack, state, patch }: Props) {
       <div className="settings-body">
         <section className="set-group">
           <h2 className="set-group-title">常规</h2>
-          <Toggle label="开机自启" on={state.autostart} onToggle={setFlag('autostart')} />
+          {/* UI_SPEC §4.8.1：未接线控件必须按各自真实阶段作可见标注，不统一套用。 */}
+          <Toggle
+            label="开机自启"
+            on={state.autostart}
+            onToggle={setFlag('autostart')}
+            pendingNote="M6 提供"
+          />
           <Toggle
             label="失去焦点自动隐藏"
             on={state.hideOnBlur}
             onToggle={setFlag('hideOnBlur')}
+            pendingNote="开关未接线"
           />
-          <Toggle label="双击 Ctrl 唤出" on={state.doubleCtrl} onToggle={setFlag('doubleCtrl')} />
+          <Toggle
+            label="双击 Ctrl 唤出"
+            on={state.doubleCtrl}
+            onToggle={setFlag('doubleCtrl')}
+            pendingNote="未实现"
+          />
           <HotkeyRow value={state.hotkey} onChange={(hotkey) => patch({ hotkey })} />
         </section>
 
         <section className="set-group">
           <h2 className="set-group-title">索引</h2>
           <fieldset className="set-fieldset">
-            <legend className="set-block-label">索引卷</legend>
+            <legend className="set-block-label">
+              索引卷 <span className="pending-tag">未接线</span>
+            </legend>
             {ALL_VOLUMES.map((v) => (
               <label key={v} className="checkbox-row">
                 <input
@@ -263,20 +281,19 @@ export default function Settings({ onBack, state, patch }: Props) {
             ))}
           </fieldset>
           <ExcludePaths paths={state.excludes} onChange={(excludes) => patch({ excludes })} />
-          <Toggle
-            label="显示系统/隐藏文件"
-            on={state.showHidden}
-            onToggle={setFlag('showHidden')}
-            pendingNote="M3 接线后生效"
-          />
+          {/* M5 已接线：showHidden 成对驱动 hide_system / hide_hidden（App.tsx::searchOpts）。 */}
+          <Toggle label="显示系统/隐藏文件" on={state.showHidden} onToggle={setFlag('showHidden')} />
         </section>
 
         <section className="set-group">
           <h2 className="set-group-title">匹配</h2>
-          <Toggle label="模糊匹配" on={state.fuzzy} onToggle={setFlag('fuzzy')} pendingNote="M5 生效" />
-          <Toggle label="拼音匹配" on={state.pinyin} onToggle={setFlag('pinyin')} pendingNote="M5 生效" />
+          {/* M5 已接线：两项直通 SearchOptions.fuzzy / .pinyin，不再标「M5 生效」。 */}
+          <Toggle label="模糊匹配" on={state.fuzzy} onToggle={setFlag('fuzzy')} />
+          <Toggle label="拼音匹配" on={state.pinyin} onToggle={setFlag('pinyin')} />
           <fieldset className="set-fieldset">
-            <legend className="set-block-label">双拼方案</legend>
+            <legend className="set-block-label">
+              双拼方案 <span className="pending-tag">暂未支持</span>
+            </legend>
             {SHUANGPIN.map((s) => (
               <label key={s.value} className="radio-row">
                 <input
@@ -295,12 +312,14 @@ export default function Settings({ onBack, state, patch }: Props) {
         <section className="set-group">
           <h2 className="set-group-title">高级（本期占位）</h2>
           <div className="set-row disabled">
-            <span>评分规则编辑器</span>
+            <span>
+              评分规则编辑器 <span className="pending-tag">M5 预留，未实现</span>
+            </span>
             <button
               type="button"
               role="switch"
               aria-checked={false}
-              aria-label="评分规则编辑器（M5 提供）"
+              aria-label="评分规则编辑器（M5 预留，未实现）"
               className="toggle"
               disabled
             >
@@ -325,7 +344,9 @@ export default function Settings({ onBack, state, patch }: Props) {
         <section className="set-group">
           <h2 className="set-group-title">语言</h2>
           <fieldset className="set-fieldset">
-            <legend className="set-block-label">界面语言</legend>
+            <legend className="set-block-label">
+              界面语言 <span className="pending-tag">仅中文</span>
+            </legend>
             {LANGS.map((l) => (
               <label key={l.value} className="radio-row">
                 <input

@@ -68,6 +68,9 @@ export interface VolumeStatus {
   entries: number;
   progress: number | null;
   message: string | null;
+  /** P0-1：有旧索引正在后台刷新（true=仍可搜索，UI 淡淡提示「正在更新」；
+   *  false 且 state==='scanning' 表示首次建索引，UI 显示「索引中」）。 */
+  stale: boolean;
 }
 
 export interface EngineStatus {
@@ -75,6 +78,8 @@ export interface EngineStatus {
   total_entries: number;
   last_saved: number | null;
   searching: boolean;
+  /** P0-5：最近一次落盘失败原因；成功或未尝试时为 null。 */
+  save_error: string | null;
 }
 
 /**

@@ -9,6 +9,8 @@ publish = false
 # Track B 按 DESIGN.md §2.1 清单添加，版本已核对 docs.rs / crates.io：
 # - memchr 2.8（MIT OR Apache-2.0）：memmem 子串搜索，不自写 Boyer-Moore。
 # - rayon 1.12（MIT OR Apache-2.0）：名字 arena 按 0x00 边界切块并行扫描。
-# nucleo-matcher / ib-pinyin 属 M5（DESIGN §8.1），不在本轮。
+# M5 的 T2 拼音 / T3 模糊当前用自实现（精简拼音字典 + 有序子序列），零新增依赖。
+# DESIGN §8.1 点名的 ib-pinyin / nucleo-matcher 是生产库替换选项，引入前须按
+# §2.1 核对版本与许可证并登记 DEPENDENCIES（见 DECISIONS #70）。
 memchr = "2.8"
 rayon = "1.12"

@@ -144,14 +144,18 @@ fn parse_errors_surface() {
 fn highlight_surface() {
     let ix = build();
     let q = parse("read").unwrap();
-    let r: Vec<Range<u32>> = ix.highlight_ranges(4, &q);
+    // M5 起 `highlight_ranges` 增加 fuzzy / pinyin 两个开关；本契约测试只验 T1，
+    // 故传 false,false（T2/T3 的契约由 highlight.rs 内的 M5 用例覆盖）。
+    let r: Vec<Range<u32>> = ix.highlight_ranges(4, &q, false, false);
     assert_eq!(r, vec![0..4]);
     // 中文按字节偏移
-    let r = ix.highlight_ranges(7, &parse("简历").unwrap());
+    let r = ix.highlight_ranges(7, &parse("简历").unwrap(), false, false);
     assert_eq!(r, vec![0..6]);
     // 空 / 无效
-    assert!(ix.highlight_ranges(4, &Query::default()).is_empty());
-    assert!(ix.highlight_ranges(NONE, &q).is_empty());
+    assert!(ix
+        .highlight_ranges(4, &Query::default(), false, false)
+        .is_empty());
+    assert!(ix.highlight_ranges(NONE, &q, false, false).is_empty());
 }
 
 #[test]

@@ -25,6 +25,11 @@ struct EngineState {
 }
 
 // ───────────────────────── 引擎命令（镜像 EngineClient，DESIGN §9） ─────────────────────────
+//
+// P0-4：搜索 / 取行 / 打开都是毫秒级（引擎重活在后台线程跑），同步执行即可，
+// 不会冻结 UI；真正会卡住主线程的是「重建索引」（全量扫描）与「Overlay 合并
+// 持写锁」。因此 `rescan` 改为起线程后立即返回（下方），其余命令保持同步。
+// 引擎侧的合并已在读锁下构建（见 InProcessEngine），进一步避免主线程阻塞。
 
 #[tauri::command]
 fn search(state: tauri::State<EngineState>, req: SearchRequest) -> Result<SearchSummary, String> {
@@ -60,7 +65,13 @@ fn rescan(state: tauri::State<EngineState>, volume: Option<String>) -> Result<()
     // 真实 UI 的 rescan 按钮不带参数（重建全部）；带盘符的单卷重建需引擎暴露卷列表（留待后续）。
     // 此处忽略 `volume` 参数，统一重建全部——行为正确，只是粒度粗。
     let _ = volume;
-    state.engine.rescan(None).map_err(|e| e.to_string())
+    // P0-4：起线程立即返回，避免在主线程跑全量扫描（否则托盘「重建索引」会让
+    // 窗口与托盘无响应数秒到数十秒）。
+    let engine = state.engine.clone();
+    std::thread::spawn(move || {
+        let _ = engine.rescan(None);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -111,6 +122,7 @@ fn toggle_window(app: tauri::AppHandle) {
 // `WM_ACTIVATE(WA_INACTIVATE)` → Tauri `Focused(false)`，但那不是「用户切到别的
 // 应用」，不应隐藏窗口（2026-10-25 实测：启动 2.3s 页面加载完就被误藏）。
 // 用 user32 裸 extern 声明，避免为此引入 winapi/windows crate。
+#[cfg(windows)]
 #[link(name = "user32")]
 extern "system" {
     fn GetForegroundWindow() -> *mut std::ffi::c_void;
@@ -118,6 +130,8 @@ extern "system" {
 }
 
 fn foreground_pid() -> u32 {
+    // P2：非 Windows 平台下没有 user32，直接返回 0（不启用「前台属于本进程」豁免）。
+    #[cfg(windows)]
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_null() {
@@ -127,15 +141,26 @@ fn foreground_pid() -> u32 {
         GetWindowThreadProcessId(hwnd, &mut pid);
         pid
     }
+    #[cfg(not(windows))]
+    0
 }
 
 /// 临时调试日志（热键/焦点链路排查用，定位后移除）：写 %TEMP%\sift-debug.log。
+///
+/// P2：无大小上限会随焦点/热键事件无限增长，这里超过 1MB 就先删除旧文件再写。
 fn dbg_log(msg: &str) {
     use std::io::Write;
+    let path = std::env::temp_dir().join("sift-debug.log");
+    // 超过 1MB 先删除，避免无限膨胀（调试日志，丢旧内容无妨）。
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 1_048_576 {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(std::env::temp_dir().join("sift-debug.log"))
+        .open(&path)
     {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -168,7 +193,10 @@ fn build_engine() -> Arc<InProcessEngine> {
     if let Err(e) = engine.load_all(&save_dir) {
         dbg_log(&format!("engine: load_all failed (will full-scan): {}", e));
     } else {
-        dbg_log(&format!("engine: loaded persisted indexes from {:?}", save_dir));
+        dbg_log(&format!(
+            "engine: loaded persisted indexes from {:?}",
+            save_dir
+        ));
     }
 
     // 后台线程逐个卷触发全量扫描，避免阻塞窗口显示（DESIGN §5.2：扫描期间 UI 显示 Scanning）。

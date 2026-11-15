@@ -12,6 +12,8 @@ interface Props {
   parseError: { message: string; span: { start: number; end: number } } | null;
   spinner: boolean;
   inputRef: RefObject<HTMLInputElement>;
+  onCompositionStart?: () => void;
+  onCompositionEnd?: (value: string) => void;
 }
 
 export default function TopBar({
@@ -24,6 +26,8 @@ export default function TopBar({
   parseError,
   spinner,
   inputRef,
+  onCompositionStart,
+  onCompositionEnd,
 }: Props) {
   // chips 用 toolbar + roving tabindex：整组只占 1 个 Tab stop（UI_SPEC §5）。
   const chipRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -79,6 +83,8 @@ export default function TopBar({
           spellCheck={false}
           autoComplete="off"
           onChange={(e) => onInput(e.target.value)}
+          onCompositionStart={onCompositionStart}
+          onCompositionEnd={(e) => onCompositionEnd?.(e.currentTarget.value)}
         />
         {spinner && <span className="spinner" aria-hidden="true" />}
         {!spinner && input && (

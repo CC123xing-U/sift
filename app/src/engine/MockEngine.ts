@@ -33,13 +33,14 @@ export class MockEngine implements EngineClient {
     this.ds = generate(SEED, TOTAL);
     this.statusState = {
       volumes: [
-        { volume: 'C:\\', state: 'scanning', entries: 0, progress: 0, message: null },
-        { volume: 'D:\\', state: 'scanning', entries: 0, progress: 0, message: null },
-        { volume: 'E:\\', state: 'scanning', entries: 0, progress: 0, message: null },
+        { volume: 'C:\\', state: 'scanning', entries: 0, progress: 0, message: null, stale: false },
+        { volume: 'D:\\', state: 'scanning', entries: 0, progress: 0, message: null, stale: false },
+        { volume: 'E:\\', state: 'scanning', entries: 0, progress: 0, message: null, stale: false },
       ],
       total_entries: 0,
       last_saved: null,
       searching: false,
+      save_error: null,
     };
     this.startScan();
   }

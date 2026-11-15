@@ -238,6 +238,7 @@ impl IndexBuilder {
 ///
 /// 列字段公开只读（引擎 / 测试直接读列）；FRN 映射、`cjk_ids` 等派生数据私有，
 /// 经访问器读取。`frn_map` **不落盘**，载入后由 `finish` 重建（DESIGN §4.1）。
+#[derive(Clone, Debug)]
 pub struct VolumeIndex {
     /// 卷元数据。
     pub volume: VolumeInfo,

@@ -318,6 +318,32 @@ impl Query {
     pub fn is_empty(&self) -> bool {
         matches!(self.root, Expr::Empty)
     }
+
+    /// 求值是否需要「完整路径 / 父名 / 深度」上下文（P1-2 优化）。
+    ///
+    /// 仅当查询用到 `path:` / `infolder:` / `parent:` / `depth:` 时才需要为每条
+    /// Overlay 增量条目现算路径上下文；普通名字子串查询不需要，可省掉这部分
+    /// 每按键几十到上百毫秒的分配（实机 Overlay 积累到数万条时，P1-2 前的实现
+    /// 每次搜索都对每条增量现算父名 / 拼完整路径 / 算深度）。
+    pub fn needs_path_context(&self) -> bool {
+        self.expr_needs_path(&self.root)
+    }
+
+    fn expr_needs_path(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Empty => false,
+            Expr::Name(t) => {
+                matches!(
+                    t.kind,
+                    NameKind::Path | NameKind::InFolder | NameKind::Parent
+                )
+            }
+            Expr::Pred(Predicate::Depth(_)) => true,
+            Expr::Pred(_) => false,
+            Expr::Not(i) => self.expr_needs_path(i),
+            Expr::And(v) | Expr::Or(v) => v.iter().any(|x| self.expr_needs_path(x)),
+        }
+    }
 }
 
 impl Default for Query {

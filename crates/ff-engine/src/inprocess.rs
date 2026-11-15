@@ -24,10 +24,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ff_core::{
-    attrs, eval::EntryFacts, flags, parse, simple_lowercase, CancelToken, EntryId, EntryInput,
-    IndexBuilder, Query, VolumeIndex, VolumeInfo, NONE,
+    attrs, eval::EntryFacts, flags, highlight_name, match_overlay_name, parse, CancelToken,
+    EntryId, EntryInput, IndexBuilder, MatchOptions, Query, ScoreConfig, Tier, VolumeIndex,
+    VolumeInfo, NONE,
 };
-use ff_match::{Matcher, SubstringMatcher};
 use ff_ntfs::{RawEntry, ScanError, VolumeId, VolumeScanner};
 
 use crate::api::{
@@ -38,8 +38,6 @@ use crate::overlay::{Overlay, OverlayEntry};
 
 /// Overlay 合并阈值（DESIGN §4.3：增量条目超过此数即落入 Base）。
 const MERGE_THRESHOLD: usize = 50_000;
-/// 落盘节流间隔（后台线程最慢每 `SAVE_INTERVAL` 落盘一次）。
-const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// 结果集无访问释放时限（DESIGN §9：60 秒）。
 const RESULT_TTL: Duration = Duration::from_secs(60);
 
@@ -56,10 +54,12 @@ struct VolumeData {
     scan_progress: Arc<AtomicU64>,
 }
 
-/// 一次搜索的持久结果：命中列表（全局有序，每条带所属卷 + 命中来源）+ 原查询（供高亮）。
+/// 一次搜索的持久结果：命中列表（全局有序，每条带所属卷 + 命中来源）+ 原查询 +
+/// 本次搜索的 M5 开关（供 `range` 高亮时复用同一套 T2/T3 判定）。
 struct StoredResult {
     hits: Vec<(VolumeId, Hit)>,
     query: Query,
+    mopts: MatchOptions,
 }
 
 /// 命中来源（Base 条目或 Overlay 增量条目）。
@@ -91,10 +91,12 @@ struct EngineInner {
     last_saved: Mutex<Option<i64>>,
     /// 落盘目录（`None` 表示不持久化）。
     save_dir: Mutex<Option<PathBuf>>,
-    /// 上次尝试落盘的时间（节流用）。
-    last_save_attempt: Mutex<Option<Instant>>,
     /// 后台线程退出标志。
     bg_running: AtomicBool,
+    /// 索引是否需要落盘（P0-5：只在 Base 变化时落盘，而非每 10s 无条件重写）。
+    dirty: AtomicBool,
+    /// 最近一次落盘失败原因（透传给 UI；None = 未失败 / 未尝试）。
+    save_error: Mutex<Option<String>>,
 }
 
 impl EngineInner {
@@ -109,8 +111,9 @@ impl EngineInner {
             searching: AtomicBool::new(false),
             last_saved: Mutex::new(None),
             save_dir: Mutex::new(None),
-            last_save_attempt: Mutex::new(None),
             bg_running: AtomicBool::new(true),
+            dirty: AtomicBool::new(false),
+            save_error: Mutex::new(None),
         }
     }
 
@@ -118,6 +121,8 @@ impl EngineInner {
     fn add_volume(&self, vol: VolumeId, index: VolumeIndex) {
         let info = index.volume.clone();
         let mut vols = self.volumes.write().unwrap();
+        // P0-5：直接注入的索引视为「已就绪、可能需落盘」（测试持久化 / 合成数据）。
+        self.dirty.store(true, Ordering::SeqCst);
         vols.insert(
             vol,
             VolumeData {
@@ -207,6 +212,8 @@ impl EngineInner {
                 vd.overlay = Overlay::default();
                 vd.state = VolumeState::Ready;
                 vd.message = None;
+                // P0-5：索引已变，标记需落盘。
+                self.dirty.store(true, Ordering::SeqCst);
                 Ok(())
             }
             Err(e) => {
@@ -234,7 +241,12 @@ impl EngineInner {
             access.clear();
         }
         let token = CancelToken::new();
-        self.cancels.lock().unwrap().insert(id, token.clone());
+        {
+            let mut cancels = self.cancels.lock().unwrap();
+            cancels.insert(id, token.clone());
+            // P2：清理过期令牌（id 单调递增，只保留最新一个）。
+            cancels.retain(|k, _| *k >= id);
+        }
 
         // 解析查询；语法错误不返回 Err，写入 parse_error
         let parsed = match parse(&req.query) {
@@ -258,18 +270,37 @@ impl EngineInner {
             query.context.utc_offset_minutes = ff_ntfs::win32::local_utc_offset_minutes();
         }
 
+        // M5：匹配开关由 UI 的 fuzzy / pinyin 驱动，评分权重集中在 `ScoreConfig`。
+        let mopts = MatchOptions {
+            fuzzy: req.opts.fuzzy,
+            pinyin: req.opts.pinyin,
+        };
+        let score_cfg = ScoreConfig::default();
+
         // 在所有 Ready 卷上求并集命中：Base + Overlay 合并
         let hide_system = req.opts.hide_system;
         let hide_hidden = req.opts.hide_hidden;
-        let mut hits: Vec<(VolumeId, Hit)> = Vec::new();
+        // 三元组：所属卷 + 命中来源 + M5 评分（SortKey::Score 的排序键）。
+        let mut hits: Vec<(VolumeId, Hit, f64)> = Vec::new();
         {
             let vols = self.volumes.read().unwrap();
             for (vid, vd) in vols.iter() {
-                if vd.state != VolumeState::Ready {
+                // P0-1：旧索引正在后台刷新（`Scanning` 但已有条目）的卷仍应参与搜索；
+                // 只有「首次建索引、毫无可用索引」的卷（`Scanning` 且 `entries==0`）
+                // 才跳过。这样启动 / 重扫期间旧索引立即可搜，不会误报「没有找到」。
+                let searchable = vd.state == VolumeState::Ready
+                    || (vd.state == VolumeState::Scanning && vd.index.entry_count() > 0);
+                if !searchable {
                     continue;
                 }
-                // —— Base 命中 ——
-                for eid in vd.index.search(&query, &token) {
+                // —— Base 命中：M5 分层搜索（T1 子串 / T2 拼音 / T3 模糊）+ 评分 ——
+                let ranked = vd.index.search_ranked(&query, &mopts, &score_cfg, &token);
+                // T3 稀疏触发条件（DESIGN §8.1）：Base 上 T1+T2 命中 < 100 时，
+                // 才让 Overlay 增量条目也参与模糊匹配。
+                let allow_fuzzy = ranked.needle.is_some()
+                    && ranked.hits.iter().filter(|h| h.tier != Tier::Fuzzy).count() < 100;
+                for rh in &ranked.hits {
+                    let eid = rh.id;
                     // DESIGN §5.2：系统文件"默认可在设置中隐藏"——`hide_system` 在此生效。
                     // 两个开关独立判断，不合并成一个掩码常量，便于 M4 按 UI 拆分成两个 toggle。
                     let f = vd.index.flags[eid as usize];
@@ -288,9 +319,13 @@ impl EngineInner {
                     if vd.overlay.added_or_changed.contains_key(&frn) {
                         continue;
                     }
-                    hits.push((vid.clone(), Hit::Base(eid)));
+                    hits.push((vid.clone(), Hit::Base(eid), rh.score));
                 }
                 // —— Overlay 增量命中 ——
+                // P1-2：仅当查询用到 path:/parent:/infolder:/depth: 时才为每条
+                // 增量现算父名 / 完整路径 / 深度（这些分配在大 Overlay 上成本很高）；
+                // 普通名字子串查询传 None，省掉这部分开销。
+                let need_path = query.needs_path_context();
                 for (frn, oe) in vd.overlay.added_or_changed.iter() {
                     let f = oe.flags();
                     if hide_system && f & flags::SYSTEM != 0 {
@@ -299,7 +334,12 @@ impl EngineInner {
                     if hide_hidden && f & flags::HIDDEN != 0 {
                         continue;
                     }
-                    let (parent_name, path, depth) = overlay_context(&vd.index, oe);
+                    // 路径上下文（若需要）提升到外层作用域，确保 `facts` 借用时仍存活。
+                    let (parent_name, path, depth) = if need_path {
+                        overlay_context(&vd.index, oe)
+                    } else {
+                        (None, None, 0u32)
+                    };
                     let facts = EntryFacts {
                         name: &oe.name,
                         is_dir: oe.is_dir,
@@ -312,20 +352,31 @@ impl EngineInner {
                         path: path.as_deref(),
                         depth,
                     };
-                    if !overlay_matches(&query, &facts) {
-                        continue;
+                    // T1 由完整 AST 判定；未命中时按 M5 分层追加 T2 / T3，
+                    // 与 Base 共用 `match_overlay_name`，避免增量条目漏匹配。
+                    let t1_hit = overlay_matches(&query, &facts);
+                    if let Some((_tier, score)) = match_overlay_name(
+                        oe.name.as_bytes(),
+                        &query,
+                        &mopts,
+                        &score_cfg,
+                        depth,
+                        t1_hit,
+                        allow_fuzzy,
+                    ) {
+                        hits.push((vid.clone(), Hit::Overlay(*frn), score));
                     }
-                    hits.push((vid.clone(), Hit::Overlay(*frn)));
                 }
             }
-            // 排序（Score 在 M1 无评分，按来源+id 升序近似；见 `sort_hits`）
+            // 排序（M5：Score 用真实评分，其他列用真值；见 `sort_hits`）
             sort_hits(&mut hits, &vols, &req.sort);
         }
 
-        // max_hits 截断（排序后）
+        // max_hits 截断（排序后）；评分仅用于排序，存入结果集时丢弃。
         if let Some(k) = req.max_hits {
             hits.truncate(k);
         }
+        let hits: Vec<(VolumeId, Hit)> = hits.into_iter().map(|(v, h, _)| (v, h)).collect();
 
         let total = hits.len();
         {
@@ -335,6 +386,7 @@ impl EngineInner {
                 Arc::new(StoredResult {
                     hits,
                     query: query.clone(),
+                    mopts,
                 }),
             );
             let mut access = self.result_access.lock().unwrap();
@@ -351,7 +403,7 @@ impl EngineInner {
 
     fn range_impl(&self, id: RequestId, offset: usize, limit: usize) -> Result<Vec<ResultRow>> {
         // 先取窗口命中 + 查询（避免同时持有两个锁导致加锁顺序反转死锁）
-        let (window, query) = {
+        let (window, query, mopts) = {
             let results = self.results.lock().unwrap();
             let stored = results.get(&id).ok_or(EngineError::NotFound)?;
             let len = stored.hits.len();
@@ -359,7 +411,11 @@ impl EngineInner {
                 return Ok(Vec::new());
             }
             let end = (offset + limit).min(len);
-            (stored.hits[offset..end].to_vec(), stored.query.clone())
+            (
+                stored.hits[offset..end].to_vec(),
+                stored.query.clone(),
+                stored.mopts,
+            )
         };
         // 更新访问时间（60 秒无访问释放，DESIGN §9）
         self.result_access
@@ -370,7 +426,7 @@ impl EngineInner {
         let vols = self.volumes.read().unwrap();
         let mut rows = Vec::with_capacity(window.len());
         for (vid, hit) in &window {
-            rows.push(resolve_row(&vols, vid, hit, &query));
+            rows.push(resolve_row(&vols, vid, hit, &query, mopts));
         }
         Ok(rows)
     }
@@ -405,13 +461,19 @@ impl EngineInner {
                 entries,
                 progress,
                 message: vd.message.clone(), // P1-3：不再硬编码 None
+                // P0-1：`Scanning` 但有旧索引 → 仍可搜，UI 只提示「正在更新」。
+                stale: vd.state == VolumeState::Scanning && entries > 0,
             });
         }
+        // P2：卷来自 HashMap 迭代，顺序每次不同会让状态栏每秒闪动、也让前端的
+        // 浅比较失效。按盘符（显示名）稳定排序后再返回。
+        volumes.sort_by(|a, b| a.volume.cmp(&b.volume));
         EngineStatus {
             volumes,
             total_entries,
             last_saved: *self.last_saved.lock().unwrap(),
             searching: self.searching.load(Ordering::SeqCst),
+            save_error: self.save_error.lock().unwrap().clone(),
         }
     }
 
@@ -426,7 +488,8 @@ impl EngineInner {
             None => {
                 let ids: Vec<VolumeId> = self.volumes.read().unwrap().keys().cloned().collect();
                 for id in ids {
-                    self.load_volume_with(&**scanner, &id)?;
+                    // P2：单个卷扫描失败不应中断其余卷（一个 U 盘拔出不影响 C: 重扫）。
+                    let _ = self.load_volume_with(&**scanner, &id);
                 }
                 Ok(())
             }
@@ -505,15 +568,56 @@ impl EngineInner {
         // Phase 3: 应用结果。
         match res {
             Ok((changes, new_usn)) => {
+                // P2：无变更时不持写锁（否则每 1s 轮询都短暂阻塞搜索 / 取行）。
+                // 空变更也意味着 USN 位置未推进，下次从同一起点续读即可，无害。
+                if changes.is_empty() {
+                    return;
+                }
+                // 先判断本次是否会触发「增量过大 → 重建 Base」合并。合并要重建整份
+                // 索引（数十万条、逐条 to_string），绝不能持写锁做（P0-4：否则
+                // search/range/status 全被卡住，窗口冻结）。因此合并走「读锁快照 →
+                // 锁外重建 → 短暂写锁换入」三阶段。
+                let need_merge = {
+                    let vols = self.volumes.read().unwrap();
+                    match vols.get(vid) {
+                        Some(vd) => vd.overlay.len() + changes.len() > MERGE_THRESHOLD,
+                        None => return,
+                    }
+                };
+                if !need_merge {
+                    // 常见路径：增量未达阈值，短暂持写锁应用即可（廉价，不重建索引）。
+                    let mut vols = self.volumes.write().unwrap();
+                    if let Some(vd) = vols.get_mut(vid) {
+                        vd.overlay.apply(&changes);
+                        vd.info.next_usn = new_usn;
+                    }
+                    return;
+                }
+                // 合并路径（昂贵）：读锁取快照（index + overlay + 代次 usn）→ 释放
+                // 读锁 → 锁外重建 merged → 短暂写锁换入并校验代次。
+                let (snap_index, snap_overlay, snap_usn) = {
+                    let vols = self.volumes.read().unwrap();
+                    let vd = match vols.get(vid) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    // 读锁下克隆：RwLock 允许多读者，此克隆不阻塞 search/range/status；
+                    // 仅阻塞其他写者（rescan 等），可接受。
+                    (vd.index.clone(), vd.overlay.clone(), vd.info.next_usn)
+                }; // 读锁释放
+                let mut overlay = snap_overlay;
+                overlay.apply(&changes);
+                let merged = merge_overlay_into_base(&snap_index, &overlay);
                 let mut vols = self.volumes.write().unwrap();
                 if let Some(vd) = vols.get_mut(vid) {
-                    vd.overlay.apply(&changes);
-                    vd.info.next_usn = new_usn;
-                    // 合并触发：增量过大即落入 Base（DESIGN §4.3）
-                    if vd.overlay.len() > MERGE_THRESHOLD {
-                        let merged = merge_overlay_into_base(&vd.index, &vd.overlay);
+                    // 代次校验：若期间被 rescan 替换（index 已变、usn 已推进），
+                    // 丢弃本次合并结果，交给 rescan 产生的新索引。
+                    if vd.state == VolumeState::Ready && vd.info.next_usn == snap_usn {
                         vd.index = merged;
                         vd.overlay = Overlay::default();
+                        vd.info.next_usn = new_usn;
+                        // P0-5：Base 已变，标记需落盘。
+                        self.dirty.store(true, Ordering::SeqCst);
                     }
                 }
             }
@@ -535,13 +639,13 @@ impl EngineInner {
 
     // ───────────────────────── 落盘与回收（M2-②/④） ─────────────────────────
 
-    /// 节流落盘：仅在设定了目录且距上次尝试超过 `SAVE_INTERVAL` 时执行。
+    /// 落盘（P0-5：只在 Base 变化时落盘，而非每 10s 无条件重写字节完全相同的索引）。
+    ///
+    /// 仅在 `dirty` 为 true 时执行；执行后清零 `dirty`。写盘失败写入 `save_error`
+    /// 透传给 UI（旧代码 `let _ =` 吞掉，C 盘满时连「写入失败」都看不到）。
     fn maybe_save(&self) {
-        let last = *self.last_save_attempt.lock().unwrap();
-        if let Some(t) = last {
-            if t.elapsed() < SAVE_INTERVAL {
-                return;
-            }
+        if !self.dirty.swap(false, Ordering::SeqCst) {
+            return;
         }
         let dir = self.save_dir.lock().unwrap().clone();
         let dir = match dir {
@@ -549,10 +653,13 @@ impl EngineInner {
             None => return,
         };
         let ids: Vec<VolumeId> = self.volumes.read().unwrap().keys().cloned().collect();
+        let mut err: Option<String> = None;
         for id in ids {
-            let _ = self.save_volume(&id, &dir);
+            if let Err(e) = self.save_volume(&id, &dir) {
+                err = Some(e.to_string());
+            }
         }
-        *self.last_save_attempt.lock().unwrap() = Some(Instant::now());
+        *self.save_error.lock().unwrap() = err;
     }
 
     /// 结果集 60 秒无访问即释放（DESIGN §9 / #54）。
@@ -604,6 +711,26 @@ impl EngineInner {
             self.save_volume(&id, &dir)?;
         }
         Ok(())
+    }
+
+    /// 退出前落盘（P0-5）：先把 Overlay 合并进 Base，再整盘落盘。
+    ///
+    /// 避免「退出时只存了 Base、Overlay 增量丢失」——下次启动这些增量要靠 USN
+    /// 回放补齐，若 USN 起点未随索引落盘（P1-7）就会被迫全量重扫。
+    fn flush(&self) {
+        {
+            let mut vols = self.volumes.write().unwrap();
+            for vd in vols.values_mut() {
+                if vd.state == VolumeState::Ready && !vd.overlay.is_empty() {
+                    let merged = merge_overlay_into_base(&vd.index, &vd.overlay);
+                    vd.index = merged;
+                    vd.overlay = Overlay::default();
+                }
+            }
+        }
+        if let Err(e) = self.save_all() {
+            *self.save_error.lock().unwrap() = Some(e.to_string());
+        }
     }
 
     /// 把一批卷置为「待扫描」（见 [`InProcessEngine::mark_pending`]）。
@@ -733,6 +860,8 @@ impl Drop for InProcessEngine {
         if let Some(h) = self._bg.take() {
             let _ = h.join();
         }
+        // P0-5：退出前合并 Overlay 并进 Base 落盘（避免增量丢失 / 下次被迫全量重扫）。
+        self.inner.flush();
     }
 }
 
@@ -879,25 +1008,67 @@ fn now_filetime() -> i64 {
 }
 
 /// 按 `SortSpec` 对命中列表排序（Base 与 Overlay 统一处理）。
-fn sort_hits(hits: &mut [(VolumeId, Hit)], vols: &HashMap<VolumeId, VolumeData>, sort: &SortSpec) {
-    hits.sort_by(|a, b| {
-        let ord = match sort.key {
-            SortKey::Score => hit_order_key(vols, &a.0, &a.1).cmp(&hit_order_key(vols, &b.0, &b.1)),
-            SortKey::Name => hit_name(vols, &a.0, &a.1).cmp(&hit_name(vols, &b.0, &b.1)),
-            SortKey::Path => hit_path(vols, &a.0, &a.1).cmp(&hit_path(vols, &b.0, &b.1)),
-            SortKey::Size => hit_size(vols, &a.0, &a.1).cmp(&hit_size(vols, &b.0, &b.1)),
-            SortKey::Modified => hit_mtime(vols, &a.0, &a.1).cmp(&hit_mtime(vols, &b.0, &b.1)),
-        };
-        if sort.key != SortKey::Score && sort.descending {
-            ord.reverse()
-        } else {
-            ord
+///
+/// M5：`Score` 用 `search_ranked` / `match_overlay_name` 给出的真实评分排序
+/// （DESIGN §8.2，高分在前），同分按命中来源 + id 稳定 tie-break；
+/// 按列排序仍取真值，语义与 M4 一致。
+fn sort_hits(
+    hits: &mut [(VolumeId, Hit, f64)],
+    vols: &HashMap<VolumeId, VolumeData>,
+    sort: &SortSpec,
+) {
+    hits.sort_by(|a, b| match sort.key {
+        SortKey::Score => {
+            let ord =
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        hit_order_key(vols, &a.0, &a.1).cmp(&hit_order_key(vols, &b.0, &b.1))
+                    });
+            // ord 本身是「评分降序」；descending=true（默认）即高分在前。
+            if sort.descending {
+                ord
+            } else {
+                ord.reverse()
+            }
+        }
+        SortKey::Name => {
+            let ord = hit_name(vols, &a.0, &a.1).cmp(&hit_name(vols, &b.0, &b.1));
+            if sort.descending {
+                ord.reverse()
+            } else {
+                ord
+            }
+        }
+        SortKey::Path => {
+            let ord = hit_path(vols, &a.0, &a.1).cmp(&hit_path(vols, &b.0, &b.1));
+            if sort.descending {
+                ord.reverse()
+            } else {
+                ord
+            }
+        }
+        SortKey::Size => {
+            let ord = hit_size(vols, &a.0, &a.1).cmp(&hit_size(vols, &b.0, &b.1));
+            if sort.descending {
+                ord.reverse()
+            } else {
+                ord
+            }
+        }
+        SortKey::Modified => {
+            let ord = hit_mtime(vols, &a.0, &a.1).cmp(&hit_mtime(vols, &b.0, &b.1));
+            if sort.descending {
+                ord.reverse()
+            } else {
+                ord
+            }
         }
     });
 }
 
-/// Score 排序键：（来源序 Base 先于 Overlay，0<1）+ 原 id（eid 或 frn）升序。
-/// `vols` / `vid` 保留以备未来扩展（如稳定 tie-break），当前实现仅用 `hit`。
+/// Score 同分时的稳定 tie-break：（来源序 Base 先于 Overlay，0<1）+ 原 id（eid 或 frn）升序。
+/// `vols` / `vid` 保留以备未来扩展（如跨卷优先级），当前实现仅用 `hit`。
 #[allow(unused_variables)]
 fn hit_order_key(_vols: &HashMap<VolumeId, VolumeData>, _vid: &VolumeId, hit: &Hit) -> (u8, u64) {
     match hit {
@@ -956,12 +1127,36 @@ fn hit_mtime(vols: &HashMap<VolumeId, VolumeData>, vid: &VolumeId, hit: &Hit) ->
     }
 }
 
+/// 字节偏移 → UTF-16 偏移（P0-3：中文 / emoji 高亮错位修复）。
+///
+/// 引擎侧存的 `name_matches` 是相对名字的 **字节**偏移（与 names arena 布局一致）。
+/// 但前端是 JavaScript：JS 字符串下标是 **UTF-16 代码单元**，对 CJK（3 字节/字、1 单元）
+/// 与 emoji（4 字节/字、2 单元）而言字节偏移 ≠ 字符串下标，直接 `slice(s,e)` 会错位，
+/// 多词重叠命中还会重复显示字符（报告复现：`report` 搜 `re ep` 显示成 `reeport`）。
+///
+/// 这里把每个字节偏移经「字节位置 → UTF-16 位置」映射表换成 JS 可用的下标。
+fn to_utf16_ranges(name: &str, ranges: &[Range<u32>]) -> Vec<Range<u32>> {
+    // map[b] = 字节位置 b 对应的 UTF-16 位置；末位填入名字总长（UTF-16 单元数）。
+    let mut map = vec![0u32; name.len() + 1];
+    let mut pos = 0u32;
+    for (b, ch) in name.char_indices() {
+        map[b] = pos;
+        pos += ch.len_utf16() as u32;
+    }
+    map[name.len()] = pos;
+    ranges
+        .iter()
+        .map(|r| map[r.start as usize]..map[r.end as usize])
+        .collect()
+}
+
 /// 由 `(vid, hit)` 构造单条 `ResultRow`（Base 走索引原路径，Overlay 走增量路径解析）。
 fn resolve_row(
     vols: &HashMap<VolumeId, VolumeData>,
     vid: &VolumeId,
     hit: &Hit,
     query: &Query,
+    mopts: MatchOptions,
 ) -> ResultRow {
     let vd = vols.get(vid).expect("resolve_row: 卷必存在");
     match hit {
@@ -973,7 +1168,10 @@ fn resolve_row(
             let is_dir = (index.flags[*eid as usize] & flags::IS_DIR) != 0;
             let size = Some(index.size[*eid as usize]);
             let mtime = Some(index.mtime[*eid as usize]);
-            let name_matches = index.highlight_ranges(*eid, query);
+            let name_matches = to_utf16_ranges(
+                &name,
+                &index.highlight_ranges(*eid, query, mopts.fuzzy, mopts.pinyin),
+            );
             ResultRow {
                 name,
                 dir,
@@ -995,7 +1193,7 @@ fn resolve_row(
             let is_dir = (oe.flags() & flags::IS_DIR) != 0;
             let size = if oe.stale_meta { None } else { Some(oe.size) };
             let mtime = if oe.stale_meta { None } else { Some(oe.mtime) };
-            let name_matches = overlay_highlight(query, &name);
+            let name_matches = to_utf16_ranges(&name, &overlay_highlight(query, &name, mopts));
             ResultRow {
                 name,
                 dir,
@@ -1091,28 +1289,9 @@ fn overlay_matches(query: &Query, f: &EntryFacts<'_>) -> bool {
     query.matches_facts(f)
 }
 
-/// Overlay 名字内的命中区间（供高亮；与 Base `highlight_ranges` 语义一致）。
-fn overlay_highlight(query: &Query, name: &str) -> Vec<Range<u32>> {
-    if query.terms.is_empty() {
-        return Vec::new();
-    }
-    // simple_lowercase 逐字节等长（ASCII/CJK 字节数不变），偏移相对原名一致
-    let folded: String = if query.case_sensitive {
-        name.to_string()
-    } else {
-        String::from_utf8_lossy(&simple_lowercase(name.as_bytes())).into_owned()
-    };
-    let mut ranges: Vec<Range<u32>> = Vec::new();
-    for t in &query.terms {
-        let needle: Vec<u8> = if query.case_sensitive {
-            t.text.clone().into_bytes()
-        } else {
-            simple_lowercase(t.text.as_bytes())
-        };
-        ranges.extend(SubstringMatcher::new(&needle).find_ranges(folded.as_bytes()));
-    }
-    ranges.sort_by_key(|r| r.start);
-    ranges
+/// Overlay 名字内的命中区间（供高亮；与 Base 共用 ff-core 的 M5 分层判定）。
+fn overlay_highlight(query: &Query, name: &str, mopts: MatchOptions) -> Vec<Range<u32>> {
+    highlight_name(name.as_bytes(), query, mopts.fuzzy, mopts.pinyin)
 }
 
 /// 从完整路径提取父目录（含末尾 `\`）。根条目 `C:\` 的父目录为 `C:\`。
@@ -1133,30 +1312,80 @@ fn parent_dir(full: &str) -> String {
     }
 }
 
+/// 构造 `explorer /select,"<path>"` 的参数串（P0-2：纯函数，可测）。
+///
+/// 直接在 `ShellExecuteW` 里把这个参数作为宽字符串传给 `explorer.exe`，不经
+/// `cmd`，因此路径里的 `& % ^ ( )` 与空格都不会被 shell 当作命令 / 变量展开
+/// （旧实现走 `cmd /c start` 时 `D:\dl\x&calc.exe&.txt` 会以管理员权限执行 `calc`）。
+#[cfg(windows)]
+fn explorer_select_arg(path: &str) -> String {
+    format!("/select,\"{path}\"")
+}
+
 /// 跨平台打开 / 选中文件（真实进程行为由 OS 完成）。
+///
+/// P0-2（Windows）：改用 `ShellExecuteW`，**不再**经过 `cmd /c start`：
+/// - 路径含 `&` / `%` / 空格不再被解释为命令或变量（防命令注入）；
+/// - 不闪控制台黑窗（`CREATE_NO_WINDOW` 的等价效果：不经控制台子系统进程）；
+/// - 不以 `explorer` 退出码误判失败（`cmd` 链路里 explorer 常返回 1 被当成失败）；
+/// - 不再继承管理员权限去 `start` 任意程序（至少不再新起一个 admin 控制台）。
 #[cfg(windows)]
 fn shell_open(path: &str, folder: bool) -> Result<()> {
-    let (prog, args): (String, Vec<String>) = if folder {
-        ("explorer".to_string(), vec![format!("/select,\"{path}\"")])
-    } else {
-        (
-            "cmd".to_string(),
-            vec![
-                "/c".to_string(),
-                "start".to_string(),
-                "".to_string(),
-                path.to_string(),
-            ],
-        )
+    use std::ptr::{null, null_mut};
+
+    let to_wide = |s: &str| {
+        s.encode_utf16()
+            .chain(std::iter::once(0u16))
+            .collect::<Vec<u16>>()
     };
-    let status = std::process::Command::new(prog)
-        .args(args)
-        .status()
-        .map_err(|e| EngineError::Io(e.to_string()))?;
-    if status.success() {
+
+    // ShellExecuteW 在 shell32.dll；返回值 > 32 为成功（HINSTANCE 语义）。
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> isize;
+    }
+
+    let open_w = to_wide("open");
+    // SAFETY：宽串指针在调用期间有效；ShellExecuteW 不取所有权、不长期保存指针。
+    let ret = if folder {
+        let explorer_w = to_wide("explorer.exe");
+        let params_w = to_wide(&explorer_select_arg(path));
+        unsafe {
+            ShellExecuteW(
+                null_mut(),
+                open_w.as_ptr(),
+                explorer_w.as_ptr(),
+                params_w.as_ptr(),
+                null::<u16>(),
+                1, // SW_SHOWNORMAL
+            )
+        }
+    } else {
+        let file_w = to_wide(path);
+        unsafe {
+            ShellExecuteW(
+                null_mut(),
+                open_w.as_ptr(),
+                file_w.as_ptr(),
+                null::<u16>(),
+                null::<u16>(),
+                1,
+            )
+        }
+    };
+    if ret as isize > 32 {
         Ok(())
     } else {
-        Err(EngineError::Internal(format!("打开失败，退出码 {status}")))
+        Err(EngineError::Internal(format!(
+            "打开失败（ShellExecuteW 返回 {ret}）：{path}"
+        )))
     }
 }
 
@@ -1251,6 +1480,98 @@ mod tests {
         assert!(!rows[0].is_dir);
     }
 
+    // ───────────────── M5：T2 拼音 / T3 模糊 / 评分排序（引擎接线） ─────────────────
+
+    /// 中文名、模糊名、精确名与前缀名共存的索引。
+    fn m5_index() -> VolumeIndex {
+        let info = VolumeInfo {
+            drive: Some('C'),
+            ..Default::default()
+        };
+        let mut b = IndexBuilder::new(info);
+        b.push(dir(5, 0, ".", 0, 1));
+        b.push(file(101, 5, "中国人.txt", 100, 200));
+        b.push(file(102, 5, "Visual Studio Code", 100, 200));
+        b.push(file(103, 5, "report.txt", 100, 200));
+        b.push(file(104, 5, "report-final.txt", 100, 200));
+        b.push(file(105, 5, "拼音搜索Everything.txt", 100, 200));
+        b.finish()
+    }
+
+    fn m5_engine() -> InProcessEngine {
+        let e = InProcessEngine::empty();
+        e.add_volume(
+            VolumeId {
+                serial: 1,
+                drive: Some('C'),
+            },
+            m5_index(),
+        );
+        e
+    }
+
+    #[test]
+    fn m5_pinyin_hits_chinese_name() {
+        let e = m5_engine();
+        let sum = e.search(req("zgr")).unwrap();
+        assert!(sum.parse_error.is_none());
+        let rows = e.range(sum.id, 0, 20).unwrap();
+        let hit = rows
+            .iter()
+            .find(|r| r.name == "中国人.txt")
+            .expect("zgr 应经 T2 拼音命中 中国人.txt");
+        // 拼音命中也要有高亮区间（引擎侧已转成 UTF-16 下标）。
+        assert_eq!(hit.name_matches.len(), 3);
+    }
+
+    #[test]
+    fn m5_fuzzy_hits_visual_studio_code() {
+        let e = m5_engine();
+        let sum = e.search(req("vsc")).unwrap();
+        let rows = e.range(sum.id, 0, 20).unwrap();
+        assert!(
+            rows.iter().any(|r| r.name == "Visual Studio Code"),
+            "vsc 应经 T3 模糊命中"
+        );
+    }
+
+    #[test]
+    fn m5_score_sort_exact_first() {
+        let e = m5_engine();
+        let sum = e.search(req("report")).unwrap();
+        let rows = e.range(sum.id, 0, 20).unwrap();
+        assert_eq!(rows.len(), 2);
+        // DESIGN §8.2 金标准：更短 / 更精确的名字排在长前缀名之前。
+        assert_eq!(rows[0].name, "report.txt");
+    }
+
+    #[test]
+    fn m5_switches_disable_t2_t3() {
+        let e = m5_engine();
+        let mut no_fuzzy = req("vsc");
+        no_fuzzy.opts.fuzzy = false;
+        no_fuzzy.opts.pinyin = false;
+        assert_eq!(e.search(no_fuzzy).unwrap().total, 0);
+
+        let mut no_pinyin = req("zgr");
+        no_pinyin.opts.fuzzy = false;
+        no_pinyin.opts.pinyin = false;
+        assert_eq!(e.search(no_pinyin).unwrap().total, 0);
+    }
+
+    #[test]
+    fn m5_column_sort_still_uses_real_values() {
+        let e = m5_engine();
+        let mut r = req("report");
+        r.sort = SortSpec {
+            key: SortKey::Name,
+            descending: false,
+        };
+        let sum = e.search(r).unwrap();
+        let rows = e.range(sum.id, 0, 20).unwrap();
+        assert_eq!(rows[0].name, "report-final.txt");
+    }
+
     #[test]
     fn range_builds_row_and_highlight() {
         let e = engine();
@@ -1270,8 +1591,9 @@ mod tests {
         assert_eq!(rows[1].dir, "C:\\用户");
         assert_eq!(rows[1].size, Some(2048));
         assert_eq!(rows[1].mtime, Some(300));
-        // "文档.txt" = 2 个中文(6 字节) + "." + "txt" → "txt" 位于字节 7..10
-        assert_eq!(rows[1].name_matches, vec![7..10]);
+        // P0-3 修复：`name_matches` 现是 **UTF-16 代码单元**偏移（JS 字符串下标）。
+        // "文档.txt" = 文(1单元) 档(1) .(1) t(1) x(1) t(1) = 6 单元；"txt" 位于 3..6。
+        assert_eq!(rows[1].name_matches, vec![3..6]);
     }
 
     #[test]
@@ -1903,5 +2225,113 @@ mod tests {
         let sum = e2.search(req("txt")).unwrap();
         assert_eq!(sum.total, 2, "载入后可正常搜索");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ───────────────────── P0-3 / P0-2 新增单测 ─────────────────────
+
+    /// `to_utf16_ranges`：字节偏移 → JS 可用的 UTF-16 单元偏移。
+    #[test]
+    fn to_utf16_ranges_chinese_and_emoji_and_overlap() {
+        // 单区间收集成 Vec，避免 clippy 的 single_range_in_vec_init 误读 `[7..10]`。
+        let one =
+            |start: u32, end: u32| -> Vec<Range<u32>> { std::iter::once(start..end).collect() };
+        // 纯 ASCII：字节 == UTF-16 单元。
+        assert_eq!(to_utf16_ranges("readme.txt", &one(7, 10)), one(7, 10));
+        // 中文「文档」= 2 字 × 3 字节，但 UTF-16 各 1 单元 → "txt" 的字节 7..10 映射到单元 3..6。
+        // （"文档.txt" 共 10 字节：文0..3 档3..6 .6 t7 x8 t9）
+        assert_eq!(to_utf16_ranges("文档.txt", &one(7, 10)), one(3, 6));
+        // emoji「😀」= 4 字节、2 个 UTF-16 单元（代理对）。字符串 "a😀b"，字节：
+        // a=0, 😀=1..5, b=5。"😀" 的字节 1..5 应映射为单元 1..3。
+        assert_eq!(to_utf16_ranges("a😀b", &one(1, 5)), one(1, 3));
+        // 空区间 / 空名。
+        assert!(to_utf16_ranges("x", &[]).is_empty());
+    }
+
+    /// P0-1：Scanning 但有旧索引（entry_count>0）的卷仍可搜索；纯 Scanning（无索引）跳过。
+    #[test]
+    fn scanning_volume_with_old_index_is_searchable() {
+        let e = InProcessEngine::empty();
+        let vid = VolumeId {
+            serial: 1,
+            drive: Some('C'),
+        };
+        e.add_volume(vid.clone(), sample_index());
+        // 标记为「正在刷新」（有旧索引）。
+        {
+            let inner = &e.inner;
+            let mut vols = inner.volumes.write().unwrap();
+            vols.get_mut(&vid).unwrap().state = VolumeState::Scanning;
+        }
+        let sum = e.search(req("readme")).unwrap();
+        assert_eq!(sum.total, 1, "刷新中的旧索引仍应可搜");
+        let st = e.status();
+        assert!(st.volumes[0].stale, "Scanning 且有索引应标记 stale");
+
+        // 撤销索引（清空为无条目）再标 Scanning → 不应参与搜索。
+        {
+            let inner = &e.inner;
+            let mut vols = inner.volumes.write().unwrap();
+            let vd = vols.get_mut(&vid).unwrap();
+            vd.index = IndexBuilder::new(VolumeInfo {
+                drive: Some('C'),
+                ..Default::default()
+            })
+            .finish();
+            vd.state = VolumeState::Scanning;
+        }
+        let sum2 = e.search(req("readme")).unwrap();
+        assert_eq!(sum2.total, 0, "首次建索引（无可用索引）的卷应跳过");
+    }
+
+    /// P1-2：`needs_path_context` 控制 Overlay 路径上下文的按需计算。
+    #[test]
+    fn needs_path_context_only_when_required() {
+        assert!(!parse("report").unwrap().needs_path_context());
+        assert!(!parse("ext:pdf").unwrap().needs_path_context());
+        assert!(parse("path:Docs").unwrap().needs_path_context());
+        assert!(parse("infolder:Docs").unwrap().needs_path_context());
+        assert!(parse("parent:Docs").unwrap().needs_path_context());
+        assert!(parse("depth:2").unwrap().needs_path_context());
+        assert!(parse("report path:Docs").unwrap().needs_path_context());
+    }
+
+    /// P0-5：索引变化后置脏，落盘只发生在脏时；写盘失败透传。
+    #[test]
+    fn dirty_only_saves_on_change() {
+        let dir = std::env::temp_dir().join(format!("sift_dirty_{}", now_filetime()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vid = VolumeId {
+            serial: 1,
+            drive: Some('C'),
+        };
+        let e = InProcessEngine::empty();
+        e.add_volume(vid.clone(), sample_index());
+        e.set_save_dir(&dir);
+        // 注入：此时 dirty 应为 true（add_volume 置脏）。maybe_save 落盘后清零。
+        assert!(e.inner.dirty.load(Ordering::SeqCst));
+        e.inner.maybe_save();
+        assert!(!e.inner.dirty.load(Ordering::SeqCst), "落盘后 dirty 应清零");
+        // 再次 maybe_save 不应重写（dirty 为 false 直接返回，且文件 mtime 不变）。
+        // 注意：sample_index() 的 VolumeInfo.serial 默认 0，落盘文件名为 `0.ffix`。
+        let p = dir.join("0.ffix");
+        let m1 = std::fs::metadata(&p).unwrap().modified().unwrap();
+        e.inner.maybe_save();
+        let m2 = std::fs::metadata(&p).unwrap().modified().unwrap();
+        assert_eq!(m1, m2, "非脏时不应重写磁盘");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P0-2：参数构造函数对 `& % ^ ( )` 与空格 / 中文正确加引号（Windows 单测）。
+    #[test]
+    #[cfg(windows)]
+    fn explorer_select_arg_quotes_special_chars() {
+        assert_eq!(
+            explorer_select_arg("D:\\a b\\x&y.exe"),
+            "/select,\"D:\\a b\\x&y.exe\""
+        );
+        assert_eq!(
+            explorer_select_arg("C:\\中文 (1).txt"),
+            "/select,\"C:\\中文 (1).txt\""
+        );
     }
 }

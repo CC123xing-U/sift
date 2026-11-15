@@ -81,12 +81,12 @@ pub struct SearchOptions {
     /// 查询是否默认按正则解释（`regex:`，M4 细化；当前仅随请求传递）。
     pub regex_default: bool,
     /// 启用模糊匹配 tier T3（默认 true，见 DESIGN §8.1）。
-    /// **预留字段，M5 生效**：T3 属 M5（DESIGN §8.1 / §13），`ff-match` 尚无模糊匹配器，
-    /// `InProcessEngine::search` **当前不读此字段**——默认值 `true` 不代表模糊匹配已可用。
+    /// M5 已接线：`InProcessEngine::search` 把它映射为 `MatchOptions.fuzzy`，
+    /// 同时控制 T3 命中与高亮；关闭时结果集只含 T1 / T2 命中。
     pub fuzzy: bool,
     /// 启用拼音匹配 tier T2（默认 true，见 DESIGN §8.1）。
-    /// **预留字段，M5 生效**：T2 属 M5（DESIGN §8.1 / §13），`ff-match` 尚无拼音匹配器，
-    /// `InProcessEngine::search` **当前不读此字段**——默认值 `true` 不代表拼音匹配已可用。
+    /// M5 已接线：映射为 `MatchOptions.pinyin`；大写查询按 DESIGN §8.1
+    /// 强制排除拼音，与该开关无关。
     pub pinyin: bool,
     /// 隐藏系统文件（DESIGN §5.2：`$MFT` 等元数据默认可在设置中隐藏）。
     /// 只过滤 `flags::SYSTEM`（`FILE_ATTRIBUTE_SYSTEM`）；不过滤隐藏属性。
@@ -210,6 +210,10 @@ pub struct VolumeStatus {
     pub progress: Option<f32>,
     /// Error 时的说明；其他状态为 None。
     pub message: Option<String>,
+    /// 是否「有旧索引正在后台刷新」（P0-1）：`true` 时该卷仍可搜索，UI 只淡淡提示
+    /// 「正在更新」；`false` 且 `state == Scanning` 表示首次建索引（无可用索引），
+    /// UI 应显示「索引中」面板。
+    pub stale: bool,
 }
 
 /// 引擎状态（DESIGN §9 `status`：各卷状态、条目数、最后保存时间）。
@@ -222,6 +226,9 @@ pub struct EngineStatus {
     pub last_saved: Option<i64>,
     /// 当前是否有搜索在进行。
     pub searching: bool,
+    /// 最近一次落盘失败的原因（P0-5：只在 Base 变化时落盘，失败须透传给 UI）；
+    /// 成功或未尝试时为 None。
+    pub save_error: Option<String>,
 }
 
 /// 引擎客户端（DESIGN §9，契约冻结）。UI 只依赖本 trait。

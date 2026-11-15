@@ -8,7 +8,9 @@
 #![forbid(unsafe_code)]
 
 pub mod matcher;
+pub mod pinyin;
 pub mod scan;
 
-pub use matcher::{Matcher, SubstringMatcher, Tier};
+pub use matcher::{FuzzyMatcher, Matcher, SubstringMatcher, Tier};
+pub use pinyin::{name_pinyin, PinyinMatcher};
 pub use scan::scan_names;

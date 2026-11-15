@@ -46,6 +46,8 @@ interface Props {
   onSort: (s: SortSpec) => void;
   onClearFilter: () => void;
   onRescan: () => void;
+  /** P1-9：打开 / 复制失败时回调（如文件已删、结果集已回收）。 */
+  onOpenError?: (msg: string) => void;
 }
 
 type Panel = 'list' | 'scanning' | 'emptyQuery' | 'noResult' | 'searchingEmpty' | 'error';
@@ -78,6 +80,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     onSort,
     onClearFilter,
     onRescan,
+    onOpenError,
   } = props;
 
   const parentRef = useRef<HTMLDivElement>(null);
@@ -167,7 +170,13 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
       open: (action) => {
         const i = selectedRef.current;
         if (i >= total) return;
-        engine.open(currentId, i, action);
+        // P1-9：open 现在返回 Result，失败时（文件已删 / 结果集已回收 / 权限）
+        // 通过 onOpenError 在状态栏提示，而不是静默吞掉。
+        engine
+          .open(currentId, i, action)
+          .catch((err: unknown) =>
+            onOpenError?.(err instanceof Error ? err.message : String(err)),
+          );
       },
       hasSelection: () => total > 0,
     }),
@@ -175,21 +184,49 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     [total, currentId, engine, virtualizer],
   );
 
-  const scanning = status.volumes.some((v) => v.state === 'scanning');
+  const scanningFresh = status.volumes.some((v) => v.state === 'scanning' && !v.stale);
   const errored = status.volumes.some((v) => v.state === 'error');
+  // P1-3：只有「没有任何可搜卷」时才显示错误面板。可搜 = Ready 或正在刷新旧索引
+  // （scanning && stale）的卷；单纯 fresh-scanning（首次建索引）的卷不算可搜。
+  const hasSearchable = status.volumes.some(
+    (v) => v.state === 'ready' || (v.state === 'scanning' && v.stale),
+  );
   const emptyQuery = query.trim() === '';
   const scanProgress = overallScanProgress(status.volumes);
 
   let panel: Panel = 'list';
-  if (errored && !scanning) panel = 'error';
-  else if (emptyQuery && scanning) panel = 'scanning';
+  // P0-1 + P1-3：无任何可搜卷且确实有卷报错 → 全局错误面板；否则（哪怕某一卷
+  // 报错、但仍有可搜卷）不显示错误面板，仅由状态栏提示失败卷。
+  if (errored && !hasSearchable && !scanningFresh) panel = 'error';
+  // P0-1：有卷正在「首次建索引」（无可用旧索引）时，无论空查询还是尚零结果，
+  // 都显示「索引中」面板，不要误报「没有找到」。
+  else if (scanningFresh && (emptyQuery || total === 0)) panel = 'scanning';
   else if (emptyQuery) panel = 'emptyQuery';
   else if (hasSummary && total === 0) panel = 'noResult';
   else if (!emptyQuery && !hasSummary && total === 0) panel = 'searchingEmpty';
 
+  // P1-1：列头排序交互。名称/路径默认升序、大小/时间默认降序；
+  // 同一列点第三次回到「相关度」排序（COLS 里没有 score 列，靠此循环回到）。
+  const sortClick = useRef<{ key: SortKey | null; count: number }>({
+    key: null,
+    count: 0,
+  });
   const onHeaderClick = (key: SortKey) => {
-    if (sort.key === key) onSort({ key, descending: !sort.descending });
-    else onSort({ key, descending: true });
+    const st = sortClick.current;
+    if (st.key === key) st.count += 1;
+    else {
+      st.key = key;
+      st.count = 1;
+    }
+    if (st.count >= 3) {
+      onSort({ key: 'score', descending: true });
+      st.key = null;
+      st.count = 0;
+      return;
+    }
+    const defaultDesc = key === 'size' || key === 'modified';
+    const descending = st.count === 1 ? defaultDesc : !defaultDesc;
+    onSort({ key, descending });
   };
 
   // 骨架行只在"新搜索首屏且尚无任何行"时出现（UI_SPEC §4.5），
@@ -256,7 +293,13 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
                       setSelected(i);
                       focusRow(i);
                     }}
-                    onDoubleClick={() => engine.open(currentId, i, 'open')}
+                    onDoubleClick={() =>
+                      engine
+                        .open(currentId, i, 'open')
+                        .catch((err: unknown) =>
+                          onOpenError?.(err instanceof Error ? err.message : String(err)),
+                        )
+                    }
                   >
                     <RowContent row={r} skeleton={firstScreenSkeleton && i < 3} />
                   </div>
@@ -310,9 +353,31 @@ function RowContent({ row, skeleton }: { row: ResultRow | undefined; skeleton: b
 
 function NameHL({ name, ranges }: { name: string; ranges: MatchRange[] }) {
   if (!ranges.length) return <>{name}</>;
+  // 合并重叠 / 相邻区间：引擎可能返回重叠命中（多词 "re ep" 命中 "report"
+  // 会给出 [0,2]、[1,3]），直接切片会重复字符（"reeport"）。先排序再合并。
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: MatchRange[] = [];
+  let cs = -1;
+  let ce = -1;
+  for (const [s, e] of sorted) {
+    if (cs === -1) {
+      cs = s;
+      ce = e;
+      continue;
+    }
+    if (s <= ce) {
+      if (e > ce) ce = e; // 重叠 / 相邻，扩展
+    } else {
+      merged.push([cs, ce]);
+      cs = s;
+      ce = e;
+    }
+  }
+  if (cs !== -1) merged.push([cs, ce]);
+
   const nodes: React.ReactNode[] = [];
   let cur = 0;
-  ranges.forEach(([s, e], idx) => {
+  merged.forEach(([s, e], idx) => {
     if (s > cur) nodes.push(name.slice(cur, s));
     nodes.push(<mark key={idx}>{name.slice(s, e)}</mark>);
     cur = e;
