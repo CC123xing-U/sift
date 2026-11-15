@@ -193,3 +193,85 @@
       两处优化：① `case::simple_lowercase_into` + thread-local 复用缓冲；
       ② **字面探针剪枝**——`ext:` 用 `.ext`、`*.log` 用最长字面段先走 `memmem` 出候选再验证
       （多扩展名取并集）。结果：单扩展名 67→2 ms，通配符 67→5 ms，UI chips 76→33~46 ms。
+
+68. **M5 接线：分层匹配进入真实搜索链路（2026-11-15）**：
+    - **问题**：上一轮工作树里 `ff-core::score::search_ranked` / `PinyinMatcher` /
+      `FuzzyMatcher` / M5 高亮都已写好并有单测，但 `InProcessEngine::search`
+      仍调 `vd.index.search()`（M4 的 AST 求值），`opts.fuzzy` / `opts.pinyin`
+      在引擎里零引用 —— 模块存在，功能在 UI 上完全不生效。
+    - **实现**：`inprocess.rs::search_impl` 改调 `search_ranked`，命中以
+      `(VolumeId, Hit, f64)` 三元组收集（评分只在排序时用，存入 `StoredResult`
+      前丢弃，`range`/`open` 的契约不变）；`StoredResult` 增加 `mopts`
+      字段，保证 `range()` 高亮用与搜索同一套 T2/T3 开关。
+    - **Overlay 一致性**：新增 `ff-core::score::match_overlay_name`，T1 仍由
+      `Query::matches_facts`（完整 AST）判定，T1 未命中时按 `match_tokens`
+      追加 T2/T3；T3 的「T1+T2 < 100」由引擎按 Base 的非 Fuzzy 命中数传入
+      `allow_fuzzy`。M4 曾因 Overlay 只按 terms 做 AND 导致 OR/NOT/修饰符漏匹配，
+      这次不再让增量层与 Base 分叉。
+    - **高亮**：`highlight.rs` 把 M5 判定抽成自由函数 `highlight_name`，
+      Base 的 `VolumeIndex::highlight_ranges` 与 Overlay 共用；`api_m1.rs`
+      契约测试随签名演进补 `false,false`（只验 T1），T2/T3 契约交给 M5 用例。
+
+69. **`SortKey::Score` 改为真实评分并尊重升降序（2026-11-15）**：
+    - 旧 `sort_hits` 对 Score 用「来源序 + id 升序」近似，且**忽略**
+      `sort.descending`；M5 后改为按 `f64` 评分降序（同分用来源 + id 稳定
+      tie-break），`descending=true`（默认）高分在前，`false` 反转。
+    - 按列排序（Name/Path/Size/Modified）仍取真值、语义与 M4 一致；
+      `req.max_hits` 在排序后截断的行为不变。Top-K 部分选择未做，见 #71。
+
+70. **生产拼音 / 模糊依赖裁定：本轮不引入（2026-11-15）**：
+    - DESIGN §8.1 点名 `ib-pinyin`（T2）与 `nucleo-matcher`（T3）。按 §0
+      规则 2/3，引入清单外依赖须先核对 docs.rs 接口 + 许可证 + 登记
+      DEPENDENCIES，且 §15 特别提醒 nucleo 系列许可证条款需留意。本轮选择
+      **零新增依赖**：T2 用 `pinyin.rs` 内置常用汉字精简字典（约 60 字），
+      T3 用有序子序列匹配（语义等价 nucleo 基本行为）。
+    - **代价（诚实记录）**：未收录汉字不参与拼音、无多音字、无双拼，
+      DESIGN §13-M5 验收里的「多音字」未覆盖；`PinyinMatcher::pinyin_of` /
+      `name_pinyin` 是唯一替换点，匹配逻辑无需改动。
+    - **替换触发条件**：用户确认引入，或真实卷中文召回率不达标时。届时须补
+      版本/许可证核对、DEPENDENCIES 登记、金标准用例回归与 BENCH 重测。
+
+71. **M5 性能优化：200 万条三次实测（2026-11-15，BENCH M5 节）**：
+    - 首测（工作树初态）：T2 813 ms、T3 927 ms、评分排序 978 ms，
+      全部**超过** §8.1 的 150 ms 门槛，按规范必须优化。
+    - 三处热点：① `score_name_bytes` 每条命中 `from_utf8_lossy().to_lowercase()`
+      分配 String；② T2 串行遍历 591,778 个 `cjk_ids`，每条构造
+      `PinyinTokens`（4 处堆分配）；③ T3 每条名字分配小写副本与命中位置向量。
+    - 修法：评分改零分配 ASCII 不敏感比较（与 §15「不做完整 Unicode case
+      folding」一致）、T2 改 rayon 并行 + `quick_may_match` 首字符必要条件剪枝
+      （不改变匹配语义，单测验证）、T3 用 `FuzzyMatcher::matches_folded`
+      零分配预过滤、T1 的 `sub_ranges` 不再复制整条名字。
+    - 二测：T2 223 ms / T3 327 ms / 评分 463 ms；三测（剪枝后）：
+      **T2 31.8 ms / T3 23.0 ms / 评分 110.3 ms**，全部达标。注意 T3 计时
+      包含 T2，前两轮的主因都是拼音遍历而非模糊扫描。
+    - **Top-K 取舍**：§8.2 要求 `select_nth_unstable_by` 只排 Top-K。当前
+      对全部命中全量排序，78,607 命中实测 110.3 ms；若截断到 K 而
+      `SearchSummary.total` 仍报真实总数，虚拟列表滚过 K 会取到空行。
+      故本轮不做部分选择，等 UI 支持「结果上限」提示后再改，记为已知边界。
+
+72. **设置页开关接线与 UI_SPEC §4.8.1 标注同步（2026-11-15）**：
+    - `App.tsx` 原先一律传常量 `DEFAULT_OPTS`，设置页三个 toggle 点了只改
+      React state —— 正是 §4.8.1 要防的「界面撒谎」。现按 `settings` 派生
+      `searchOpts`（`useMemo`）：`fuzzy`/`pinyin` 直通，`showHidden` 成对
+      派生 `hide_system = hide_hidden = !开关`（§11.3 的硬口径）。
+    - 按 §4.8.1「接线后须移除对应标注」，摘掉模糊/拼音的「M5 生效」与
+      显示系统/隐藏文件的「M3 接线后生效」；双拼标注「暂未支持」、
+      评分规则编辑器标注「M5 预留，未实现」（真 disabled）。
+    - **仍未接线**（保留 backlog，按真实里程碑逐项标注）：开机自启（M6）、
+      失焦隐藏开关、双击 Ctrl（M7）、自定义热键、索引卷 / 排除路径、
+      界面语言。设置项仍只存内存、不落盘（M6 服务化时补）。
+
+73. **工作树收敛与门禁（2026-11-15）**：
+    - 承接时工作树有 16 个已改文件 + 2 个未跟踪新文件，**编译不过**：
+      `score.rs` 测试辅助 `dir()` 传 5 参（定义 3 参）、
+      `inprocess.rs:1096` 调 `highlight_ranges` 少传 `fuzzy`/`pinyin`。
+      另 `api_m1.rs` 4 处旧签名调用、`clippy -D warnings` 6 处 lint
+      （`single_range_in_vec_init` / `len_zero` / `needless_borrow` /
+      `iter_kv_map`）、`app/src-tauri` 一处 fmt 差异，一并收敛。
+    - 修 `score.rs::shallow_beats_deep_when_scores_tie`：原测试把 `EntryId`
+      误当 FRN 硬编码断言 20/21，且两个目录同深度根本没测到「浅优先」；
+      改为构造浅/深两条真实路径并断言 `depth_of` 关系（负向对照：改回
+      同深度即失败）。
+    - 终态门禁：根 workspace fmt/clippy/`cargo test --workspace`
+      **208 passed**；`app/src-tauri` fmt/clippy/check 绿；
+      `npm run build` 50 modules 绿；release 实测脚本 `m5probe` 绿。

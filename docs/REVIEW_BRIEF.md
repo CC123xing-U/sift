@@ -9,8 +9,15 @@
 >
 > **状态更新（2026-10-26 晚，提交 `415183b`）**：本文档写成后 **M4 查询语法与属性过滤已完成**，
 > 其中 **P0-1（筛选 chips 全部报解析错误）已修复**——`ext:` / `folder:` 等修饰符引擎侧现已支持，
-> 7 个 chips 全部可用。§3.2 的「查询解析」与 §5 的 P0-1 条目请按 M4 后的状态理解；
-> 其余缺陷条目（P0-2 复制路径、P0-3 右键菜单、P1 各项）仍然有效。
+> 7 个 chips 全部可用。§3.2 的「查询解析」与 §5 的 P0-1 条目请按 M4 后的状态理解。
+>
+> **状态更新（2026-11-15，M5 完成）**：**M5 模糊 + 拼音 + 评分排序已接线并实测达标**
+> （`InProcessEngine::search` 调 `search_ranked`，T1/T2/T3 分层 + `ScoreConfig` 评分，
+> 200 万条实测 T2 31.8 ms / T3 23.0 ms / 评分 110.3 ms，见 `docs/BENCH.md` M5 节）。
+> 设置页 `模糊匹配` / `拼音匹配` / `显示系统/隐藏文件` 三个开关已真正驱动引擎，
+> 按 UI_SPEC §4.8.1 摘除「未接线」标注。§1.2、§1.4、§3.2、§3.6、§7 已按 M5 后状态更新；
+> **§5 的 P0-2 复制路径、P0-3 右键菜单、P1-1 窗口拖动、P1-7 设置页其余项仍然有效**。
+> 当前工作树基线以 `git log` 为准，本文仍以「M3 原型期」视角写就的段落请按上述更新理解。
 
 ---
 
@@ -21,10 +28,10 @@
 | 顺序 | 文件 | 为什么先读它 |
 |---|---|---|
 | 1 | 本文件 §1 | 先知道软件是干什么、给谁用、现在做到哪一步 |
-| 2 | `docs/DESIGN.md` §1 目标与非目标、§13 里程碑 | 知道「本阶段**应该**有什么」，避免用 M5/M7 的标准评判 M3 |
+| 2 | `docs/DESIGN.md` §1 目标与非目标、§13 里程碑 | 知道「本阶段**应该**有什么」；当前 M0–M5 已完成，避免用 M6/M7 的标准评判 |
 | 3 | `docs/UI_SPEC.md` §2 设计 Tokens、§3 布局、§5 快捷键 | 界面评判的基准线 |
 | 4 | 本文件 §3–§5 | 逐功能对照实现方法与已知缺陷 |
-| 5 | `docs/DECISIONS.md` 第 63–66 条 | 最近几轮实机踩坑与修复记录，避免重复提已修问题 |
+| 5 | `docs/DECISIONS.md` 第 63–73 条 | 最近几轮实机踩坑、M5 接线与性能实测记录，避免重复提已修问题 |
 | 6 | `docs/AUDIT_M3_FINAL.md` | 上一轮另一位 AI 的代码审计报告（P0/P1 分级），避免重复 |
 
 ### 0.2 事实口径约定
@@ -38,7 +45,7 @@
 1. **合理性判断**：每个功能的实现方式是否合理？有无更简洁/更正确的做法？
 2. **交互设计判断**：窗口、布局、快捷键、状态反馈是否符合「搜索工具」的心智？缺失什么？
 3. **缺口清单**：按 P0（用户会以为坏了）/ P1（明显不好用）/ P2（锦上添花）分级，给出**具体改法**（改哪个文件、哪个函数）。
-4. **不要建议**引入大型依赖、重写架构、或提前做 M5/M7 的功能（拼音/模糊/评分/HTTP API/内容搜索）——这些有明确排期。
+4. **不要建议**引入大型依赖、重写架构、或提前做 M6/M7 的功能（服务拆分/HTTP API/对话框集成/内容搜索）——这些有明确排期。M5 的模糊/拼音/评分已完成，可正常评判其实现质量。
 
 ---
 
@@ -53,7 +60,7 @@
 | 对标产品 | 学它什么 | 本文对应实现 |
 |---|---|---|
 | **Everything** | 内存索引的速度：读 NTFS 的 `$MFT` 建索引，用 USN Journal 做增量；百万级条目毫秒级出结果 | `ff-ntfs`（MFT 扫描 + USN 解析）+ `ff-core`（SoA 列存 + memchr/rayon 并行 memmem） |
-| **Listary** | 匹配体验：模糊匹配、中文拼音（全拼/首字母）、评分排序 | **尚未实现**，排期 M5。当前只有子串 + 多词 AND |
+| **Listary** | 匹配体验：模糊匹配、中文拼音（全拼/首字母）、评分排序 | **M5 已实现**：`ff-match`（T2 拼音 / T3 模糊）+ `ff-core::score`（ScoreConfig 评分排序）；当前用精简拼音字典，双拼 / 多音字未覆盖 |
 
 ### 1.3 典型使用场景（请据此评判交互）
 
@@ -69,8 +76,8 @@
 | M1 | 引擎核心（数据结构、并行子串搜索、多词 AND） | ✅ 完成 |
 | M2 | 持久化 + USN 增量 | ✅ 完成（实机项部分待复核） |
 | **M3** | **能用的 UI（Tauri 窗口 + 热键 + 托盘 + 虚拟列表）** | ✅ **完成，正在自用打磨** |
-| M4 | 查询语法与属性过滤（`size:` `dm:` `ext:` `path:` `regex:`、OR/NOT/通配符） | ❌ 未开始 |
-| M5 | 模糊 + 拼音 + 评分排序 | ❌ 未开始 |
+| M4 | 查询语法与属性过滤（`size:` `dm:` `ext:` `path:` `regex:`、OR/NOT/通配符） | ✅ 完成（106 条语法用例，C: 卷实测 2–69 ms） |
+| M5 | 模糊 + 拼音 + 评分排序 | ✅ 完成（2026-11-15；T1/T2/T3 分层 + 评分排序，200 万条实测达标；规则编辑器 / 双拼 / 多音字未做） |
 | M6 | 服务拆分（普通权限 UI + 提权服务）、命名管道、HTTP API | ❌ 未开始 |
 | M7 | 对话框集成、内容搜索、硬链接、filelist 导入、右键菜单 | ❌ 未开始 |
 
@@ -167,13 +174,13 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 
 | 功能 | 状态 | 实现位置 | 实现方法 |
 |---|---|---|---|
-| 查询解析 | ⚠️ | `ff-core/src/query.rs::parse` | **仅 M1 子集**：空白分隔 = AND、`"..."` 短语、名字子串。遇到 `|` `!` `()` `<>` `*?` `:` `\` `/` **干净返回 `ParseError`**（带字节 span 与「计划 M4」的中文提示） |
+| 查询解析 | ✅ | `ff-core/src/query.rs::parse` | M4 AST（`And/Or/Not/Name/Pred`，NOT>AND>OR）+ 16 个修饰符；106 条表驱动语法用例，错误带字节 span 与中文原因 |
 | 子串匹配 | ✅ | `ff-match/src/matcher.rs::SubstringMatcher` | `memchr::memmem` 封装（不自写 Boyer-Moore）；在 `names_lower` 大 blob 上并行扫描 |
 | 多词 AND | ✅ | `ff-core/src/search.rs` | 稀有词优先：先搜命中数最少的 term，再对其结果集逐条验证其余 term |
-| 匹配分层 | ❌ | `ff-match/src/matcher.rs::Tier` | trait 与分层已定义（T1 子串 / T2 拼音 / T3 模糊），**T2、T3 未实现**，排期 M5 |
-| 评分排序 | ⚠️ | `inprocess.rs::sort_hits` | 5 个排序键（score / name / path / size / modified）均已接线且列头可点。**但 `Score` 当前没有真实评分**，按「卷来源 + EntryId 升序」近似（M5 才做评分） |
-| 大小写 | ✅ | `ff-core/src/case.rs` | `case_sensitive=false` 时走 `names_lower` 列；`true` 时走原名。**注意：前端硬编码 `DEFAULT_OPTS` 里的 6 个选项，设置页无法修改** |
-| 请求取消 / 防错乱 | ✅ | `SearchSummary.id` 单调递增 | 前端只接受 `id > lastAcceptedId` 的回包，旧回包丢弃并主动 `cancel(id)` 释放结果集（否则要等 60s TTL 回收） |
+| 匹配分层 | ✅ | `ff-core/src/score.rs::search_ranked` + `ff-match` | T1 子串（M4 AST）/ T2 拼音（只遍历 `cjk_ids`，首字符剪枝）/ T3 模糊（T1+T2<100 时并行全表，`matches_folded` 零分配）。Overlay 增量条目经 `match_overlay_name` 走同一套判定 |
+| 评分排序 | ✅ | `inprocess.rs::sort_hits` | `SortKey::Score` 用 `ScoreConfig` 真实评分降序（同分 tie-break 来源+id），其余 4 键取真值；200 万条 / 78,607 命中实测 110.3 ms。**Top-K 部分选择未做**（见 DECISIONS #71） |
+| 大小写 | ✅ | `ff-core/src/case.rs` | `case_sensitive=false` 时走 `names_lower` 列；`true` 时走原名。选项由 `App.tsx::searchOpts` 从设置页派生（不再是硬编码常量） |
+| 请求取消 / 防错乱 | ✅ | `App.tsx::searchSeqRef` + `SearchSummary.id` | 每次 `runSearch` 自增序号，过期回包丢弃并主动 `cancel(id)` 释放结果集（否则要等 60s TTL 回收）；扫描完成的卷会触发当前查询重跑 |
 | 取消令牌 | ✅ | `ff-core/src/cancel.rs` | `CancelToken`，搜索中可取消 |
 | 结果集回收 | ✅ | `inprocess.rs::reap_stale`，`RESULT_TTL = 60s` | 60s 未被 `range`/`open` 访问的结果集自动释放 |
 
@@ -183,7 +190,7 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 |---|---|---|---|
 | 虚拟滚动 | ✅ | `app/src/components/ResultArea.tsx` | `@tanstack/react-virtual`，行高固定 32px，`total` 即虚拟列表总长度 |
 | 分段取行 | ✅ | 同上 + `engine.range(id, offset, limit)` | 只拉可视窗口 + 缓冲区的行；**滚动 90ms 防抖**（`RANGE_DEBOUNCE_MS`），滚动中以已有数据渲染、缺失行渲染空白（避免满屏骨架闪烁） |
-| 命中高亮 | ✅ | `ff-core/src/highlight.rs` + 前端 `NameHL` | 引擎返回 `name_matches: [[start,end],...]`（UTF-8 字符区间），前端切片渲染 `<mark>`，高亮底色 `#FFD500` |
+| 命中高亮 | ✅ | `ff-core/src/highlight.rs::highlight_name` + 前端 `NameHL` | Base / Overlay 共用 T1/T2/T3 区间判定；引擎把 UTF-8 字节偏移转成 **UTF-16 下标**（中文/emoji 不再错位）后返回 `name_matches: [[start,end],...]`，前端切片渲染 `<mark>`，底色 `#FFD500`。M4 的通配符 / 正则仍不高亮 |
 | 列头排序 | ✅ | `ResultArea::onHeaderClick` | 点同一列切换升降序，点新列默认降序 |
 | 状态面板 | ✅ | `ResultArea::EmptyState` | 5 种面板：`scanning`（索引中）/ `emptyQuery`（空查询）/ `searchingEmpty`（搜索中）/ `noResult`（无结果，带「清除筛选」按钮）/ `error`（索引错误，带「重试」→ `rescan`） |
 | 骨架屏 | ✅ | `RowContent({skeleton})` | 仅「新搜索首屏且尚无任何行」时前 3 行显示骨架 |
@@ -226,15 +233,15 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 | 全局热键（可录制） | 🔌 | 录制交互可用（拼出 `Ctrl+Alt+Space` 字符串），但**不会重新注册真实热键**（Rust 侧硬编码） |
 | 索引卷（C:/D:/E: 勾选） | 🔌 | 硬编码 `ALL_VOLUMES = ['C:\\','D:\\','E:\\']`，**不是真实枚举结果**，勾选不影响实际扫描 |
 | 排除路径 | 🔌 | 增删改交互完整（含 a11y 标签），**不传给引擎** |
-| 显示系统/隐藏文件 | 🔌 | UI 标注「M3 接线后生效」，实际未接。前端硬编码 `DEFAULT_OPTS.hide_system = hide_hidden = true` |
-| 模糊匹配 / 拼音 | 🔌 | UI 标注「M5 生效」，M5 才实现 |
-| 双拼方案 | 🔌 | M5 |
-| 评分规则编辑器 | ❌ | 显式禁用，标注「M5 提供」 |
+| 显示系统/隐藏文件 | ✅ | **已接线**：`App.tsx::searchOpts` 按 `!开关` 成对派生 `hide_system` / `hide_hidden`（§11.3），标注已摘除 |
+| 模糊匹配 / 拼音 | ✅ | **已接线**：直通 `SearchOptions.fuzzy` / `.pinyin`，驱动 T3 / T2 分层与高亮，标注已摘除 |
+| 双拼方案 | 🔌 | 可见标注「暂未支持」；精简拼音字典不含双拼 |
+| 评分规则编辑器 | ❌ | 显式禁用，可见标注「M5 预留，未实现」（§8.3 用户规则 / PriorFolders 未做） |
 | HTTP API 开关与 token | ❌ | 显式禁用，标注「M6 提供」 |
 | 界面语言（中文/English） | 🔌 | `i18n.ts` 目前只有中文资源表，切换无效果 |
 | 版本 / 索引位置 / 许可 | ✅ | 静态展示 |
 
-**值得肯定的做法**：未接线项在**可见 UI 上**直接标注生效里程碑（不是只写在文档或 title 里），且每个占位项标注不同的里程碑（不统一套用同一个标签）——符合 `UI_SPEC.md` §4.8.1 的硬性要求。
+**标注现状（2026-11-15）**：三个已接线 toggle 按 `UI_SPEC.md` §4.8.1「接线后须移除标注」摘掉了 `pending-tag`；其余未接线项（开机自启 M6、失焦隐藏、双击 Ctrl、自定义热键、索引卷、排除路径、界面语言、双拼、规则编辑器）均按**各自真实阶段**补上可见小字标注，没有统一套用同一个标签。设置项仍只存 React state、不落盘（M6 服务化时补）。
 
 ### 3.7 IPC 契约（`crates/ff-engine/src/api.rs` ↔ `app/src/types.ts`）
 
@@ -338,6 +345,9 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 
 ### P0
 
+> **2026-11-15 更新**：P0-1 已由 M4 修复（`ext:` / `folder:` 引擎侧已支持，7 个 chips 全部可用）；
+> 下表保留评审原文以便追溯。**P0-2 复制路径、P0-3 右键菜单仍然有效**。
+
 | # | 问题 | 位置 | 具体后果 | 建议方向 |
 |---|---|---|---|---|
 | **P0-1** | **筛选 chips 全部触发解析错误** | `queryUtils.ts::applyChip` 生成 `ext:...` / `folder:` → `query.rs::validate_term` 遇 `:` 报错 | 点「文档/图片/视频/音频/压缩包/文件夹」任一 chip → 输入框填入含 `:` 的修饰符 → 引擎返回 `ParseError("修饰符语法（如 size:）尚未支持（计划 M4）")` → 顶部红条报错 + 结果区显示「没有找到…」。**7 个 chip 里 6 个不可用**（只有「全部」可用，它做的是清除修饰符） | 二选一：① M4 实现 `ext:`/`folder:` 修饰符（正解，chip 逻辑已就绪）；② 在 M4 前把 chips 隐藏或禁用并标注「M4 提供」 |
@@ -395,7 +405,7 @@ invoke('range', {id, offset, limit}) → 只取当前屏幕的几十行（含高
 | 里程碑 | 内容 |
 |---|---|
 | **M4** | 查询语法与属性过滤：第 7 节解析器 + `size:` `dm:` `ext:` `path:` `regex:`、OR/NOT/通配符/分组、按列排序、Top-K。**验收：语法测试集 ≥80 条** |
-| **M5** | 模糊匹配 + 拼音（全拼/首字母/双拼）+ 评分排序 + 设置页规则编辑器 + 高亮范围 |
+| **M5** | 模糊匹配 + 拼音（全拼/首字母）+ 评分排序 + 高亮范围 — **2026-11-15 核心完成并实测达标**；双拼、多音字、设置页规则编辑器（§8.3 用户规则）未做 |
 | **M6** | 服务拆分（普通权限 UI + 提权服务）、命名管道、本地 HTTP API（含安全要求）、自动重连 |
 | **M7** | 对话框集成（`SetWinEventHook` + UI Automation）、内容全文搜索、硬链接多路径、filelist 导入、非 NTFS 回退遍历、资源管理器右键菜单 |
 

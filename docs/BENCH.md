@@ -184,3 +184,66 @@
 
 `cargo fmt` / `cargo clippy --workspace --all-targets -D warnings`（双 workspace 含 `app/src-tauri`）/
 `cargo test --workspace`（**179 passed**）/ `npm run build` 全绿。
+
+## M5 · 模糊 + 拼音 + 评分（2026-11-15）
+
+**基准机器**：同 §6（Windows 10 专业工作站版 x64 / Ryzen 5 5600U 6C12T / 15.3 GB）。
+**数据**：`sift_bench::build_index(&SynthConfig::with_count(2_000_000))`，
+固定种子 `0x5349_4654`，2,000,001 条（含虚拟根），其中 `cjk_ids` 591,778 条，
+建索引 1.067 s。**release** 构建，每项跑 3 次取最小值。
+
+**复现**：
+
+```bash
+export TMP=/f/Temp TMPDIR=/f/Temp TEMP=/f/Temp
+cargo run --release -p sift-bench --bin m5probe
+# 或 criterion 组（10 万 / 100 万档，拼音 / 模糊 / 评分排序）：
+cargo bench -p sift-bench --bench search_bench -- m5
+```
+
+### 终态实测（DESIGN §8.1 门槛：200 万条下模糊全表 ≤ 150 ms）
+
+| 场景 | 命中数 | 实测 | 判定 |
+|---|---:|---:|---|
+| T1 子串 `report` | 78,607 | **2.5 ms** | ✅ |
+| T2 拼音 `zgr`（遍历 591,778 CJK 条目，0 命中＝最坏路径） | 0 | **31.8 ms** | ✅ |
+| T3 模糊 `vsc`（T1+T2 稀疏 → 全表并行扫描） | 22 | **23.0 ms** | ✅ |
+| 评分排序 `report`（T1 命中逐条评分 + 全量排序） | 78,607 | **110.3 ms** | ✅ |
+| 对照：`fuzzy`/`pinyin` 关闭时的 `vsc` | 0 | **1.1 ms** | 开关生效，未付全表代价 |
+
+### 三轮优化轨迹（同一脚本、同一数据）
+
+| 轮次 | T2 拼音 | T3 模糊 | 评分排序 | 改动 |
+|---|---:|---:|---:|---|
+| 首测（工作树初态） | 813.1 ms | 927.1 ms | 978.0 ms | — |
+| 第二轮 | 222.6 ms | 326.6 ms | 462.7 ms | 评分零分配、T2 rayon 并行、T3 `matches_folded`、`sub_ranges` 去拷贝 |
+| 第三轮（终态） | **31.8 ms** | **23.0 ms** | **110.3 ms** | T2 加 `quick_may_match` 首字符必要条件剪枝 |
+
+**说明**：T3 的计时包含前置 T2，前两轮的主要耗时其实来自 59 万条串行构造
+拼音 token，而非模糊扫描本身；剪枝后 T3 真实全表成本才显现。剪枝是必要
+条件（单测验证），不改变匹配语义。评分采用零分配 ASCII 不敏感比较，
+与 DESIGN §15「不做完整 Unicode case folding」一致。
+
+### 真实卷实机复核（release · `ff-cli` · C: 卷）
+
+复现：`cargo build --release -p ff-cli` → `./target/release/ff-cli.exe search C: <查询> --max N --sort score`
+
+| 查询 | 条目数 | 建索引 | 搜索 | 结果 |
+|---|---:|---:|---:|---|
+| `wd`（T1 子串） | 817,901 | 5.075 s | 4 ms | `wdmvsc.PNF` / `wdmaudio.PNF` / `wdc.dll` 等，路径与大小正确 |
+| `report --sort score` | 817,901 | 3.961 s | 4 ms | 评分排序返回 `report` 目录，路径正确 |
+| `zgr` | 817,904 | 3.917 s | 9 ms | 5 条均为**字面子串**命中（文件名含 `zgr`），非拼音命中；真实卷无「中国人」类名字 |
+| `文档`（中文子串） | 817,904 | 3.920 s | 2 ms | `新建文本文档.txt` / `复习文档.md` 等 |
+| **`wendang`（T2 拼音全拼）** | 817,903 | 3.934 s | **7 ms** | **命中 `文档模板.md` / `文档.mydocs` / `新建文本文档.txt` 等中文名** —— T2 在真实卷生效；末 2 条长中文书名是 T3 模糊命中（tier 分低于拼音，排在后面） |
+
+**结论**：T1 / T2 / T3 与评分排序在真实 NTFS 卷上均跑通，7 ms 级响应。
+`zgr` 无拼音命中说明精简字典覆盖有限（真实卷缺合适样本），不等于 T2 失效。
+
+**未实测 / 边界**：多音字、双拼（精简字典未覆盖）、生产拼音库替换后的召回率；
+GUI 端到端「按键→首屏 ≤50 ms」仍待实机；Top-K 部分选择未做（见 DECISIONS #71）。
+
+### M5 门禁（2026-11-15）
+
+`cargo fmt --all -- --check`（双 workspace）/ `cargo clippy --workspace --all-targets -D warnings` /
+`cargo clippy --all-targets -D warnings`（`app/src-tauri`）/ `cargo check`（`app/src-tauri`）/
+`cargo test --workspace` **208 passed** / `npm run build`（50 modules）/ release `m5probe` —— 全绿。

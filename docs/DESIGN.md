@@ -472,6 +472,40 @@ pub trait EngineClient: Send + Sync {
 ### M5 模糊 + 拼音 + 评分
 - 第 8 节全部；设置页的规则；高亮范围。
 - **验收**：8.2 中的金标准测试全部通过；模糊匹配全表耗时实测并记录；中文用例（首字母、全拼、混合、多音字）通过。
+- **状态（2026-11-15，main，见 DECISIONS #68–#73 / BENCH M5 节）**：
+  - **T1/T2/T3 分层已接入真实搜索链路**：`ff-core::score::search_ranked`
+    （T1 走 M4 AST 求值，T2 拼音只遍历 `cjk_ids`，T3 模糊在 T1+T2 < 100 且
+    needle ≥ 2 字符时并行全表）由 `InProcessEngine::search` 调用；命中带
+    `tier` + `score`，`SortKey::Score` 按真实评分排序。Overlay 增量条目经
+    `match_overlay_name` 走同一套 T2/T3 判定，避免 M4 那次的增量漏匹配重演。
+  - **评分**：`ScoreConfig` 权重集中一处（§8.2 公式骨架），§8.2 的
+    `prior_folder_bonus` / `rule_bonus` / `frecency_bonus` 按设计留接口、当前为 0。
+  - **高亮**：Base 与 Overlay 共用 `ff-core::highlight::highlight_name`
+    （T1/T2/T3 区间），引擎在构造 `ResultRow` 时把 UTF-8 字节偏移转成前端
+    UTF-16 下标（中文 / emoji 不再错位）。
+  - **设置页接线**：`fuzzy` / `pinyin` 直通 `SearchOptions`，单个
+    「显示系统/隐藏文件」按 §11.3 成对派生 `hide_system` / `hide_hidden`；
+    按 UI_SPEC §4.8.1 摘掉已接线项的「未接线」标注。
+  - **验收实测**（200 万条合成索引，release，`bench/src/bin/m5probe.rs`，
+    固定种子 0x5349_4654）：T1 子串 2.5 ms、T2 拼音 31.8 ms、
+    T3 模糊全表 23.0 ms、评分排序（78,607 命中）110.3 ms —— 均落在
+    §8.1 的 150 ms 门槛内。金标准用例（完全相等 > 前缀 > 词首 > 中间 > 模糊、
+    命中文件名、浅路径优先、`vsc`→Visual Studio Code、`zgr`→中国人、
+    `pysousuo`→拼音搜索Everything）由 `ff-core`/`ff-match`/`ff-engine` 单测覆盖。
+  - **真实卷实机复核**（release `ff-cli`、C: 卷 817,903 条）：`wendang` 7 ms
+    命中「文档模板.md / 新建文本文档.txt」（T2），同批结果含 T3 模糊命中的长
+    中文书名；`wd` / `文档` / `report --sort score` 均 2–4 ms。详见 BENCH M5 节。
+  - **门禁**：fmt / clippy `-D warnings` 双 workspace 绿、`cargo test --workspace`
+    **208 passed**、`npm run build`（50 modules）绿；`app/src-tauri` check 绿。
+  - **未实现 / 已知边界（诚实记录）**：
+    - §8.3 的用户规则（FolderPriority / FileNamePriority / …）、PriorFolders
+      与设置页评分规则编辑器**未实现**，界面仍禁用并标注「M5 预留，未实现」；
+    - 双拼方案、多音字、生产拼音库 `ib-pinyin` 与 `nucleo-matcher` 未引入
+      （用自实现精简字典 + 有序子序列，理由与替换条件见 DECISIONS #70）；
+      因此验收项里的「多音字」**未覆盖**；
+    - §8.2 的 Top-K 部分选择（`select_nth_unstable_by`）未做，当前对全部命中
+      评分后全量排序；78,607 命中实测 110.3 ms，尚未成为瓶颈；
+    - M4 的边界仍在：`attrib:` 索引路径只判 R/H/S/D，通配符 / 正则不高亮。
 
 ### M6 服务与开放接口
 - 第 10、12 节：服务拆分、命名管道、HTTP API（含全部安全要求）。

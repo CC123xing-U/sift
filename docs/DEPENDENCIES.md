@@ -18,3 +18,10 @@
 > 说明：`windows` 会连带拉入 `windows-sys` / `windows-numerics` 等子 crate（均为 MIT OR Apache-2.0）；`ff-core`/`ff-match` 保持 `#![forbid(unsafe_code)]`，仅依赖纯逻辑 crate；`ntfs-reader`/`windows` 经 `#[cfg(windows)]` 隔离，非 Windows 平台下 `ff-ntfs` 仍编译通过但不含实扫逻辑。
 >
 > `tracing` 只作为**库依赖**引入（DESIGN §2.1 已列入准入技术栈）：`ff-ntfs` 不引入订阅者（`tracing-subscriber`），后者归上层 `app` / `ff-service`（M3/M6）负责，避免库替应用决定日志输出方式。
+>
+> **M5（2026-11-15）：本轮零新增依赖。** T2 拼音用 `ff-match/src/pinyin.rs`
+> 内置精简汉字字典，T3 模糊用 `matcher.rs` 的有序子序列匹配，均在现有
+> `memchr` / `rayon` 之上实现，零 `unsafe`、零平台依赖。DESIGN §8.1 点名的
+> `ib-pinyin` / `nucleo-matcher` 是生产库替换选项，引入前须按 §2.1 核对版本
+> 与接口、核对许可证（§15 特别提醒 nucleo 系列条款）、在本表登记，并回归
+> 金标准用例与 BENCH 实测。理由与触发条件见 `docs/DECISIONS.md` #70。
