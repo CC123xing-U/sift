@@ -18,6 +18,12 @@ import Settings, { DEFAULT_SETTINGS, SettingsState } from './components/Settings
 import { applyChip, deriveChip } from './queryUtils';
 
 // 输入防抖窗口：停止输入这么久后才真正发起检索（详见下方 useEffect 注释）。
+//
+// 不要删掉这个防抖。DECISIONS #66 是为修「连续输入卡顿」加的；#82 复核实测
+// （release ff-cli，真实 C: 卷 817,903 条）：单字符 `r` 283 ms、`a` 443 ms、
+// 双字符 `re` 93 ms，三字符起才降到 `rep` 7 ms / `report` 4 ms。单字符命中
+// 数百万条会触发全表评分排序，去掉防抖后每敲一个字都要跑一次，卡顿比修复前更重。
+// DESIGN §13-M3 的 50 ms 验收指「检索触发后的执行段」，不含这 120 ms 停顿窗口。
 const SEARCH_DEBOUNCE_MS = 120;
 
 // P2：status 每秒轮询一次，逐字段浅比较；引擎侧已按盘符排序使数组顺序稳定。

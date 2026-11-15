@@ -384,7 +384,7 @@ pub trait EngineClient: Send + Sync {
 - 快捷键：`↑/↓` 选择；`Enter` 打开；`Ctrl+Enter` 打开所在文件夹并选中；`Ctrl+C` 复制完整路径；`Alt+Enter` 属性（M7）；`Esc` 清空 / 隐藏窗口；`Ctrl+F` 聚焦输入框；`Tab` 在输入框与列表间切换。
 - 匹配高亮：只对可见行，使用 `ResultRow.name_matches`。
 - 图标：按扩展名缓存（`SHGetFileInfo`），异步加载，先显示占位。
-- 输入防抖：**不防抖**，每次按键都发搜索并取消上一次；UI 只渲染最新请求 id 的结果。
+- 输入防抖：**原设计不防抖**（每次按键都发搜索并取消上一次；UI 只渲染最新请求 id 的结果）。M3 后实机发现连续输入卡顿，按 DECISIONS #66 改为 **120 ms 输入停顿防抖**（清空立即执行、组词期间不搜）；该偏离与 §13-M3 的 50 ms 口径关系由 DECISIONS #82 裁定：**50 ms 指检索触发后的执行段，不含输入停顿窗口**。单字符查询实测 283–443 ms（见 BENCH），防抖不得删除。
 
 ### 11.2 唤出方式
 
@@ -444,7 +444,7 @@ pub trait EngineClient: Send + Sync {
 
 ### M3 能用的 UI（提前，开始自用）
 - Tauri 窗口 + 全局热键 + 托盘 + 虚拟滚动列表 + 基本快捷键；`InProcess` 实现的 `EngineClient`。
-- **验收**：每次按键到首屏结果 ≤ 50ms（典型查询）；窗口隐藏 / 唤出稳定；连续快速输入没有结果错乱（请求 id 机制）。
+- **验收**：**检索触发后**到首屏结果 ≤ 50 ms（典型查询 = ≥3 字符子串、命中数 ≤10 万；实测执行段 ~26 ms，引擎 4–7 ms）。**输入停顿窗口（120 ms 防抖）不计入本指标**——这是 DECISIONS #66 加防抖时的原始口径，#82 复核确认；从按键算起的**端到端感知延迟另记**（实测 145–150 ms），不作为本验收项的失败判据。窗口隐藏 / 唤出稳定；连续快速输入没有结果错乱（请求 id 机制）。
 - **状态（2026-10-24，main，见 DECISIONS #62）**：
   - `app/src-tauri`（Tauri v2 独立 crate）已落地：6 个引擎命令（`search`/`range`/`cancel`/`status`/`rescan`/`open`）+ 3 个窗口命令（`show_window`/`hide_window`/`toggle_window`）；`setup` 注入 `Arc<InProcessEngine>`；托盘菜单（显示/隐藏/重建索引/退出）；`Ctrl+Alt+Space` 全局快捷键 → `toggle_window`；失焦自动隐藏；`withGlobalTauri: true` 使前端零 npm 依赖直连 IPC。
   - 前端 `TauriEngine.ts` 实现 `EngineClient`（`window.__TAURI__.core.invoke`），`App.tsx` 按 `isTauri()` 在 Tauri/Mock 间切换；`status()` 全链改 `async`（`types.ts`/`MockEngine.ts`/`App.tsx` 轮询同步改）。
@@ -458,6 +458,11 @@ pub trait EngineClient: Send + Sync {
     （防抖后段 ~26 ms 达标）。该验收项与 `UI_SPEC` §7.4 的 120 ms 防抖
     字面互斥，需按 DECISIONS #80 二选一裁定口径，本轮不改代码。
     托盘 / 全局热键 / 失焦隐藏稳定性仍待实机。
+    **2026-11-15 口径裁定（DECISIONS #82）**：#80 的「二选一」基于一个误读——
+    #66 当初已定义 50 ms 为**引擎检索延迟**，不含输入停顿窗口；按该原始口径
+    执行段 ~26 ms **达标**。端到端 145–150 ms 保留为独立的体验指标（不删除、
+    不掩盖）。单字符查询实测 283–443 ms，证明压低/去掉防抖会让连续输入卡顿
+    复发且更重，故**保留 120 ms 防抖**；「典型查询」明确为 ≥3 字符、命中 ≤10 万。
   - **2026-11-15 P1-8 收尾（DECISIONS #81）**：真机暴露的时间列 `NaN` 与
     目录大小 `0 B` 已修。`app/src-tauri/src/timeconv.rs` 在 `range` / `status`
     序列化前把引擎的 FILETIME 转成 JS epoch 毫秒（必须在 Rust 侧：FILETIME
