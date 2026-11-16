@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 ff-engine = { path = "../ff-engine" }
+ff-http = { path = "../ff-http" }
 ff-ipc = { path = "../ff-ipc" }
 ff-ntfs = { path = "../ff-ntfs" }
 tracing = "0.1"

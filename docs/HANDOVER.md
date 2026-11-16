@@ -6,13 +6,13 @@
 - `e536db0`：搜索/设置 UI 重整、旧轮次窗口动效与 ACL 修复、规范及证据。
 - `b9075e9`：设置轻量上下转场。用户强调风格一致，因此没有照搬 CompressO 的
   Vaul 抽屉、大圆角、拖拽把手或背景缩放；仅借鉴进入/退出节奏。
-- **M6-1/M6-2/M6-3 + 命名管道/服务外壳 + 普通权限 Tauri 接 PipeClient 均已实现，
-  M6 整体仍进行中。** 当前 Tauri 启动时优先探测服务管道（普通权限模式），不可用时
-  回退 InProcess（管理员兜底）；尚未安装 SCM，没有开放 HTTP。
-- 新增 `ff-ipc`（SID ACL 命名管道 server/client）与 `ff-service`（SCM 服务外壳），
-  真实 OS 管道端到端测试通过；Tauri 已接入 PipeClient（含 UI 侧执行打开动作、
-  断线退避重连 + 事件提示）。下一对话从「SCM 安装/启停与跨会话 ACL 真机实测」
-  与「HTTP 鉴权」开始。
+- **M6 已完成（2026-11-16，见 DECISIONS #90 / BENCH「M6 服务化与 HTTP 真机验收」）。**
+  M6-1/M6-2/M6-3 + 命名管道 + `ff-service` + 普通权限 Tauri PipeClient + `ff-http`
+  全部实现；SCM 生命周期、LocalSystem 跨会话 ACL 命名管道、跨进程搜索、Stop 落盘与
+  重启恢复、HTTP 五条安全要求均已真机验收（管理员会话），测试后已卸载服务并清理
+  http.json / 索引 / 探测程序。当前 Tauri 启动优先探测服务管道、不可用回退 InProcess。
+- 新增 crate：`ff-ipc`（SID ACL 命名管道）、`ff-http`（本地 HTTP API，纯 std 手写，
+  默认关闭）、`ff-service`（SCM 外壳）。**不进入 M7，不自动改里程碑范围**。
 
 ## 上一轮局部调整（2026-11-16，已随本轮提交）
 
@@ -111,16 +111,23 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - **已知限制**：重连后服务侧 `EngineSession` 为全新实例，旧搜索的 `request_id` 失效，
   用户需重新搜索（toast 提示已覆盖）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
 
-## 下一步顺序
+## 下一步顺序（M6 已完成，以下为后续可选方向，均未立项）
 
-1. 服务崩溃后完整重连验收；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测（需管理员）。
-2. 默认关闭的 HTTP：127.0.0.1、Bearer token、严格 Host、无宽松 CORS、
-   count/速率限制；错误 token/Host 等必须自动化测试。
-3. HTTP 完整端到端验收后才标 M6 完成。不进入 M7，不自动改里程碑范围。
+1. M7 需单独立项：非 NTFS / 内容搜索、对话框集成、filelist 导入、硬链接多路径、属性窗口。
+2. 设置持久化、Shell 图标、列宽调整、Top-K 部分选择等既有欠账（见「保留约束与欠账」）。
+3. `ff-http` 目前只实现 `GET /search`；如需 `status`/`rescan` 等端点再单独扩展并重跑安全测试。
+4. UI 设置页的 HTTP 开关仍标「M6 提供 / 禁用」（UI_SPEC）；接入开关需先做设置持久化。
+
+（上述均不自动推进；里程碑边界见 DESIGN §13，M6 验收证据见 BENCH / DECISIONS #90。）
 
 ## 验证
 
-- 根 workspace fmt/clippy：通过；test：**229 passed、5 ignored、0 failed**。
+- **M6 完成轮（最终，2026-11-16）**：根 workspace fmt/clippy(-D warnings)/test 全绿，
+  **275 passed、5 ignored、0 failed**（ff-http 新增 23 单测 + 9 真实 TCP 端到端，覆盖
+  错误 token/Host/count/速率、无 CORS、仅回环、会话隔离）；Tauri fmt/clippy(-D warnings)/
+  test/custom-protocol check 全绿；前端 build 50 modules + 29 格式断言通过。真机 SCM +
+  管道 + HTTP 验收回显见 BENCH「M6 服务化与 HTTP 真机验收」。已提交见 `git log`。
+- 根 workspace fmt/clippy：通过；test：**229 passed、5 ignored、0 failed**（此为 M6-1 历史批次）。
   包含从 Tauri 迁来的 7 时间测试与新 11 IPC 测试。
 - Tauri fmt/clippy/test/custom-protocol check：通过；本地测试 0，
   不是丢失覆盖，时间测试在 ff-engine。

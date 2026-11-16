@@ -441,3 +441,56 @@ Tauri fmt/clippy/test（7 passed）通过。设置转场继续沿用 CSS，无�
 
 后续验收：先做多客户端独立取消与结果集，再测 SID ACL 管道、SCM、普通权限 UI、
 HTTP 错误 token/Host/count/速率拒绝、断线重连与服务崩溃恢复。
+
+## M6 服务化与 HTTP 真机验收（#90，2026-11-16）
+
+环境：Windows（desktop-vtciagn，管理员会话，交互用户 SID
+`S-1-5-21-3870080723-253644075-2517012500-500`），`ff-service.exe` debug 构建，
+C: 约剩 1GB、Rust TMP/TEMP/TMPDIR=`F:/Temp`。以下为真实命令回显，非推算。
+
+### SCM 生命周期（管理员）
+- install：`已安装服务 SiftService（LocalSystem，开机自启）`；`sc query` 初始
+  STATE=1 STOPPED，WIN32_EXIT_CODE=1077（未启动过，正常）。
+- start/status：`SiftService: Running`；`sc queryex` STATE=4 RUNNING，
+  `(STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)`，WIN32_EXIT_CODE=0。
+- stop：发出后经历 `StopPending` → `Stopped`（保存 113 万条索引约 10s）；
+  `sc queryex` STATE=1 STOPPED，SERVICE_EXIT_CODE=0（干净退出）。
+- uninstall：`已标记删除服务`；随后 `sc query` 报 1060（服务不存在）。
+- 未安装时 `status` 报「打开服务失败」、`bogus` 报未知命令，均 exit=1。
+
+### 命名管道跨进程 ACL + 会话（LocalSystem 服务 → 普通进程）
+- 服务启动后 `Get-ChildItem \.\pipe\` 见 `sift-S-1-5-21-...-500`，与交互用户 SID
+  一致，证明 `WTSQueryUserToken` 取的是活动控制台用户而非 SYSTEM 自身 SID；ACL 只放行
+  该用户 + SYSTEM（DECISIONS #88）。
+- 一次性 PipeClient 探测连已运行服务：
+  - `STATUS volumes=3 total_entries=1131424 searching=false`
+  - `SEARCH id=1 total=10 elapsed_ms=223 parse_error=None`
+  - `RANGE got 5 rows`，前 3 条为 C:\Windows\WinSxS 下 ntdll.dll / ntdll.dll.mui
+  - `PROBE_OK`。停止服务后的重启再探测：从盘恢复 1131424 条、搜索 189ms 成功。
+- Stop 落盘 `%ProgramData%\Sift\`：2 个 `.ffix`（85723158 + 24414730 字节 ≈105MB）。
+
+### 本地 HTTP API（http.json 启用，端口 19090）
+- 首次以 `{"enabled":true,"port":19090,"rate_per_sec":120}` 启动：
+  `netstat` 见 `TCP 127.0.0.1:19090 LISTENING`（PID=服务进程 11372），仅回环；
+  http.json 自动生成 64 hex token 并写回，重启复用同一 token。
+- `curl` 真机结果：
+  - 无 token → **401**；`Bearer wrong` → **401**；
+  - `Host: evil.example:19090` → **403**；
+  - `count=5000` → **400**；
+  - 合法 `?q=ntdll&count=3` → **200**，JSON `total=14691`、
+    `results[0].mtime=1748579987314`（=2025-05-30，FILETIME 经 timeconv 转 epoch ms），
+    path 为完整 `C:\Windows\WinSxS\...\ntdll.dll`。
+  - 带 `Origin: http://evil.example` 请求，响应头无 `Access-Control-*`（无宽松 CORS）；
+    响应头为 `Content-Type: application/json; charset=utf-8` / `Cache-Control: no-store`
+    / `X-Content-Type-Options: nosniff` / `Connection: close`。
+- 速率：把 rate 改为 3 重启后，并发 8 请求得 `3×200 + 4×429`（1 个连接抖动），
+  固定窗口限制真机生效。
+
+### 门禁
+- 根 workspace：fmt/clippy(-D warnings)/test 全绿，**275 passed、5 ignored、0 failed**
+  （含 ff-http 23 单测 + 9 端到端）。
+- Tauri：fmt/clippy(-D warnings)/test/custom-protocol check 全绿。
+- 前端：`npm run build` 50 modules、`npm run test:format` 29 断言通过。
+- 测试后清理：卸载服务、删除 http.json 与 2 个 .ffix、删除一次性探测 example。
+
+**结论：M6 全部验收项通过，里程碑完成；不进入 M7。**

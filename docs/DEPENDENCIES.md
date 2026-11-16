@@ -52,3 +52,9 @@
 > **UI 重整（#84）：零新增应用/构建依赖。** 复用 React、CSS、既有 SVG 与原生
 > select/details。`test:ui` 使用外部安装的 Playwright/Chromium，通过环境变量定位；
 > 不进入 package.json 依赖或锁文件，不打进安装包，复现见 `BENCH.md`。
+>
+> **M6 本地 HTTP（#90）：零新增依赖。** `ff-http` 用纯 std 手写 HTTP/1.1，刻意不引入
+> DESIGN §2.1 候选的 axum/tokio/hyper（单一只读端点、C: 空间紧张、保持可精确单测）；
+> 配置文件解析复用 ff-http 已有的 `serde_json 1.0.154`（已登记），token 生成用
+> std 时间/原子计数 + xorshift，无 `getrandom`/`rand`。`ff-service` 只新增一个内部
+> crate 依赖。偏离选型理由见 `DECISIONS #90`。

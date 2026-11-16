@@ -69,7 +69,7 @@
 | 序列化 | `rkyv`（优先，可 mmap）或 `bincode`，外加 `zstd` | 先用简单方案跑通，再优化 |
 | 快照切换 | `arc-swap` | 读无锁 |
 | 哈希表 | `rustc-hash`（`FxHashMap`） | |
-| HTTP | `axum`（仅 M6，仅监听 127.0.0.1） | |
+| HTTP | `axum`（仅 M6，仅监听 127.0.0.1）；**实际采用纯 std 手写 HTTP/1.1**，理由见 §13-M6 / DECISIONS #90 | 保持零新增重量级依赖、可精确单测安全规则 |
 | 日志 | `tracing` + `tracing-subscriber` | |
 | 服务 | `windows-service` | 仅 M6 |
 | 测试 / 基准 | 标准 `cargo test` + `criterion` | |
@@ -113,7 +113,8 @@ sift/
 │  ├─ ff-match/    子串 / 模糊 / 拼音 匹配器封装（统一 trait，纯逻辑）
 │  ├─ ff-ntfs/     NTFS 全量扫描 + USN 增量（封装 ntfs-reader / windows），输出 RawEntry / Change
 │  ├─ ff-engine/   把以上粘合：卷管理、Base+Overlay、后台合并、落盘调度、对外 trait 实现
-│  ├─ ff-ipc/      协议类型（serde）· 命名管道 server/client · HTTP server（M6）
+│  ├─ ff-ipc/      命名管道 server/client（SID ACL）· EngineClient over Pipe（M6）
+│  ├─ ff-http/     本地 HTTP API：127.0.0.1 + Bearer/Host/速率安全边界（M6，#90）
 │  ├─ ff-service/  Windows 服务外壳（M6）
 │  └─ ff-cli/      命令行调试工具：scan / search（已实现）；bench / dump 待后续里程碑（见 DECISIONS #40）
 ├─ app/            Tauri v2（src-tauri/ 与 React TS 前端 src/）
@@ -380,6 +381,11 @@ pub trait EngineClient: Send + Sync {
   4. 不设置宽松 CORS；
   5. 限制 `count` 上限（如 1000）与请求速率。
 - 为什么这么严：文件列表本身是敏感信息，任何网页脚本都能请求 localhost。
+- **已落地（2026-11-16，#90）**：`ff-http` 实现上述五条硬性要求，默认关闭，由
+  `ff-service` 读 `%ProgramData%\Sift\http.json`（`enabled:true` 启用，首次生成 token 写回）。
+  纯 std 手写而非 axum，理由见 §13-M6 / DECISIONS #90；mtime 在 Rust 边界复用
+  `ff_engine::timeconv` 转 epoch 毫秒。错误 token/Host/count/速率与无 CORS 均有
+  自动化 + 真机测试，见 `BENCH.md`。
 
 ---
 
@@ -566,14 +572,18 @@ pub trait EngineClient: Send + Sync {
 ### M6 服务与开放接口
 - 第 10、12 节：服务拆分、命名管道、HTTP API（含全部安全要求）。
 - **验收**：UI 以普通权限运行即可搜索；HTTP 用错误 token / 错误 Host 头请求会被拒绝（写测试）；服务崩溃后 UI 能提示并重连。
-- **当前进度（2026-11-16）**：M6-1 共享协议/时间边界、M6-2 每连接会话隔离、
+- **当前进度（2026-11-16）：M6 已完成**。M6-1 共享协议/时间边界、M6-2 每连接会话隔离、
   M6-3 连接循环已落地；`ff-ipc`（SID ACL 命名管道 server/client + 真实 OS 管道验收）与
   `ff-service`（SCM 服务外壳 + 每连接 EngineSession + `%ProgramData%` 索引）已实现。
   桌面 Tauri 已接入 PipeClient（启动时探测服务，可用走管道、否则回退 InProcess；UI 侧
   执行打开动作；断线退避重连 + 状态事件提示，见 DECISIONS #89）。
-  **仍未安装服务、未开放 HTTP**。下一步：SCM 安装/启停与跨会话 ACL 真机实测，再做
-  HTTP 鉴权与端到端验收。**SCM 实际安装/启停、SYSTEM 跨会话 ACL、跨进程重连尚未真机
-  实测；M6 整体尚未完成**。
+  `ff-http`（本地 HTTP API，纯 std 手写，五条安全要求 + 23 单测 + 9 端到端，#90）已实现，
+  由 `ff-service` 按 `%ProgramData%\Sift\http.json` 默认关闭、可选启用。
+  **真机验收已执行**：SCM install/start/status/stop/uninstall 全路径、LocalSystem 服务下
+  `WTSQueryUserToken` 交互 SID 命名管道真实创建、跨进程 PipeClient 对运行中服务的
+  Status/Search/Range、Stop 落盘与重启恢复、HTTP 错误 token/Host/count/速率拒绝与
+  正确请求（含 FILETIME→epoch ms）、无 CORS——详见 `BENCH.md` / DECISIONS #90。测试后
+  已卸载服务并清理索引/配置/探测程序。**不进入 M7，不自动改里程碑范围**。
 
 ### M7 进阶（逐项单独立项）
 对话框集成（`SetWinEventHook` + UI Automation，先在记事本"打开"对话框验证）· 内容搜索 · 硬链接多路径 · filelist 导入 · 非 NTFS 回退遍历 · 属性窗口。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2，不再列在 M7。）

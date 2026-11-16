@@ -1,0 +1,11 @@
+[package]
+name = "ff-http"
+description = "Sift M6 本地 HTTP API：仅 127.0.0.1、Bearer token、严格 Host、无宽松 CORS、count/速率限制（DESIGN §10.2）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ff-engine = { path = "../ff-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -692,3 +692,33 @@
       搜索（toast 已提示）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
     - 验证：workspace + Tauri 的 fmt/clippy(-D warnings)/test 全绿；前端 build + format
       通过；Pipe 路径由 ff-ipc 3 项真实 OS 管道端到端测试覆盖。
+
+90. **M6 本地 HTTP API + 服务真机验收（2026-11-16）**：
+    - 新 crate `ff-http`：纯 std 手写 HTTP/1.1（GET /search），**刻意不用 DESIGN §2.1
+      表里的 axum**。理由：单一只读端点，axum 会拉入 tokio/hyper/tower 全套（C: 仅剩约
+      1GB、构建 TMP 已在 F:/Temp），且项目一贯零新增重量级依赖；手写有界解析（头 16 KiB、
+      查询 16 KiB、5s 连接超时）反而更可控、可把每条安全规则写成纯函数单测。§2.1 是选型
+      候选而非硬约束，此处记录偏离与理由。
+    - 安全（DESIGN §10.2 五条硬性）全部落地：仅 bind 127.0.0.1（端口 0 测试拿临时端口，
+      代码强制 `Ipv4Addr::LOCALHOST`，不接受配 0.0.0.0）；`Authorization: Bearer <token>`
+      恒定时间比较、token 只在头里不进查询串；Host 必须精确 `127.0.0.1:<port>` 或
+      `localhost:<port>`（大小写不敏感），拒绝 IPv6/缺省端口/逗号列表/userinfo/尾点；
+      不输出任何 `Access-Control-*`（即使请求带恶意 Origin），另加 no-store/nosniff；
+      count 上限 1000 + offset 上限 + 固定窗口速率限制（默认 60/s，可配）。
+    - token：`generate_token()` 用时间纳秒 + pid + 静态地址 + 原子计数经 xorshift64* 生成
+      64 hex（256 bit）。`http.json`（`%ProgramData%\Sift\http.json`）默认不存在=关闭；
+      `enabled:true` 时首次启动生成 token 并写回文件，重复启动复用。配置错误只记日志，
+      不影响命名管道服务。mtime 经 `ff_engine::timeconv` 转 epoch 毫秒（复用 P1-8 边界）。
+    - `ff-service`：管道启动后按 http.json 可选启动 HTTP 线程；与管道共享同一
+      `InProcessEngine`（每 HTTP 连接一个 `EngineSession`）；Stop/Shutdown 一起 join。
+    - 验证：ff-http 23 单测 + 9 真实 TCP 端到端（错误 token/Host→401/403、count 超限→400、
+      缺失 q/非 GET→400、速率→429、无 CORS、仅回环、会话隔离）全绿；workspace 275 passed、
+      Tauri 门禁、前端 build(50 modules)+29 格式断言全绿。
+    - **真机验收（管理员，已执行并清理）**：`ff-service install/start/status/stop/uninstall`
+      全路径回显正常；服务以 LocalSystem 运行，管道 `\\.\pipe\sift-<交互用户SID>` 真实创建
+      （`WTSQueryUserToken` 取 SID 正确）；跨进程 PipeClient 连已运行服务 Status(3 卷/1131424
+      条)/Search(ntdll total=10)/Range 全成功；Stop 后索引落盘 `%ProgramData%\Sift\*.ffix`
+      （105MB/2 卷），重启后从盘恢复 113 万条；HTTP 写配置端口 19090 真机 curl：无/错
+      token 401、错 Host 403、count=5000→400、合法→200（FILETIME 正确转 epoch ms
+      1748579987314=2025-05-30）、带恶意 Origin 无 CORS 头、rate=3 并发 8 请求得
+      3×200+4×429。测试后已卸载服务、删除 http.json 与落盘索引、删除探测程序。

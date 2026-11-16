@@ -221,11 +221,18 @@ fn run_service() -> windows_service::Result<()> {
     });
     eprintln!("SiftService listening on {name}");
 
+    // 本地 HTTP API（默认关闭，DESIGN §10.2）：仅当数据目录下 http.json 显式
+    // 启用时才 bind 127.0.0.1:<port>；配置错误只记日志，不影响管道服务。
+    let http_thread = start_http(&engine, &stop);
+
     // 等停止信号；管道 accept 线程靠 stop 旗标 + 一条占位连接退出。
     let _ = stop_rx.recv();
     stop.store(true, Ordering::Release);
     let _ = ff_ipc::connect(&name); // 唤醒阻塞中的 accept
     let _ = server.join();
+    if let Some(t) = http_thread {
+        let _ = t.join();
+    }
 
     let _ = engine.save_all();
     status_handle.set_service_status(ServiceStatus {
@@ -238,6 +245,42 @@ fn run_service() -> windows_service::Result<()> {
         process_id: None,
     })?;
     Ok(())
+}
+
+/// 按 http.json 配置启动本地 HTTP server（默认关闭）。返回线程句柄供停机 join。
+fn start_http(
+    engine: &Arc<InProcessEngine>,
+    stop: &Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let config_path = program_data_sift_dir().join("http.json");
+    let cfg = match ff_http::load_config(&config_path) {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => {
+            eprintln!("SiftService HTTP disabled (no http.json or enabled=false)");
+            return None;
+        }
+        Err(e) => {
+            eprintln!("SiftService HTTP config error, not started: {e}");
+            return None;
+        }
+    };
+    let port = cfg.port;
+    let listener = match ff_http::bind(port) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("SiftService HTTP bind 127.0.0.1:{port} failed: {e}");
+            return None;
+        }
+    };
+    let cfg = Arc::new(cfg);
+    let rate = ff_http::default_rate_limiter(&cfg);
+    let http_engine = engine.clone();
+    let http_stop = stop.clone();
+    let handle = std::thread::spawn(move || {
+        ff_http::serve_forever(listener, cfg, http_engine, &http_stop, rate);
+    });
+    eprintln!("SiftService HTTP listening on 127.0.0.1:{port}");
+    Some(handle)
 }
 
 fn program_data_sift_dir() -> PathBuf {
