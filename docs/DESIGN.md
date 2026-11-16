@@ -233,7 +233,7 @@ M0–M6 只支持本地 NTFS。FAT/exFAT/ReFS/网络路径的目录遍历回退�
 
 ## 6. 持久化（ff-core）
 
-- 文件位置：开发期 `%LOCALAPPDATA%\Sift\`；服务模式 `%ProgramData%\Sift\`。每卷一个 `index-<volume-serial>.bin`。
+- 文件位置：桌面开发版放在运行程序所在磁盘根目录的 `Sift\`（例如 `D:\Sift\`），服务模式 `%ProgramData%\Sift\`。每卷一个 `<volume-serial>.ffix`，同一卷原子覆盖；启动时清理不再存在的卷序列号文件。
 - 布局：`magic("FFIX")` · `format_version(u32)` · 卷元数据（序列号、journal id、next_usn、条目数）· 各列块（每块 `zstd` 压缩）· 末尾整文件校验（`xxh3` 或 `crc32`）。
 - **原子写**：写 `*.tmp` → `flush/sync_all` → `std::fs::rename` 覆盖正式文件（Windows 上 std 的 rename 会替换已存在的目标）。任何时刻崩溃都不会留下半个正式文件。
 - 载入：校验 magic / 版本 / 校验和，失败即视为无索引（触发重建），**不得 panic**。

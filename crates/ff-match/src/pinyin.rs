@@ -165,6 +165,14 @@ impl PinyinMatcher {
         let mut hits = Vec::new();
         let mut ni = 0;
         for (i, &tc) in t.iter().enumerate() {
+            // C3：占位符代表不贡献拼音的字符（数字/符号/未收录汉字）。它必须作为
+            // 屏障阻断子序列——否则 `zr` 会跨过未收录汉字把前后两个字误连命中。
+            // 跨越时重置本段进度，query 必须完整落在单个连续段内。
+            if tc == '\u{ffff}' {
+                ni = 0;
+                hits.clear();
+                continue;
+            }
             if tc == self.query[ni] {
                 hits.push(i);
                 ni += 1;
@@ -322,6 +330,20 @@ mod tests {
         // 大写或非字母查询被过滤：不会把 "ZGR" 当拼音
         let m = PinyinMatcher::new("ZGR");
         assert!(!m.matches("中国人".as_bytes()));
+    }
+
+    #[test]
+    fn placeholder_blocks_cross_character_subsequence() {
+        // C3：未收录汉字产生 \u{ffff} 占位符，必须阻断子序列，不要让 `zr` 跨过它
+        // 把两个不相邻的字误连。「龘」未收录（字典无此项），夹在「中」「人」之间。
+        let m = PinyinMatcher::new("zr");
+        assert!(
+            !m.matches("中龘人".as_bytes()),
+            "zr 不得跨过未收录字把中与人的首字母误连"
+        );
+        // 对照：三个已收录字的首字母子序列仍正常命中。
+        let m2 = PinyinMatcher::new("zr");
+        assert!(m2.matches("中人国".as_bytes()));
     }
 
     #[test]

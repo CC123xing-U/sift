@@ -643,3 +643,9 @@
       Tauri fmt/clippy/test/custom-protocol check 通过（本地测试 0 项，已迁移而非删除）。
     - **仍未实现**：多客户端会话隔离、SID ACL 管道与重连、ff-service/SCM 安装卸载、
       普通权限 UI、HTTP 开关/token/Host/rate-limit 与其验收测试；不标记 M6 完成。
+
+87. **桌面版索引改放运行盘根目录并清理幽灵卷文件**（2026-11-16）：
+    - `%LOCALAPPDATA%` 可能位于空间紧张的 C:，而索引体积随卷规模增长；桌面版改用
+      运行程序所在盘的 `Sift\` 目录，服务模式仍按 DESIGN 使用 `%ProgramData%`。
+    - 启动枚举当前卷后，仅保留有效 serial 对应的 `.ffix`，删除已卸载卷或旧序列号文件；
+      同一卷仍使用固定文件名与原子覆盖，不会因重复索引产生副本。

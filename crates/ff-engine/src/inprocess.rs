@@ -64,6 +64,13 @@ struct StoredResult {
     mopts: MatchOptions,
 }
 
+#[derive(Default)]
+struct SessionState {
+    results: HashMap<RequestId, Arc<StoredResult>>,
+    result_access: HashMap<RequestId, Instant>,
+    cancels: HashMap<RequestId, CancelToken>,
+}
+
 /// 命中来源（Base 条目或 Overlay 增量条目）。
 #[derive(Clone, Copy)]
 enum Hit {
@@ -79,12 +86,9 @@ struct EngineInner {
     volumes: RwLock<HashMap<VolumeId, VolumeData>>,
     /// 扫描器（Windows 下由 `NtfsVolumeScanner` 提供；测试 / 合成数据可留空）。
     scanner: Mutex<Option<Box<dyn VolumeScanner + Send + Sync>>>,
-    /// 结果集：`search` 分配的新 id 覆盖上一次（单客户端语义），旧 id 自然失效。
-    results: Mutex<HashMap<RequestId, Arc<StoredResult>>>,
-    /// 每个结果集的最后访问时间（供 60 秒无访问释放判断，DESIGN §9）。
-    result_access: Mutex<HashMap<RequestId, Instant>>,
-    /// 每个请求的取消令牌（被 `cancel(id)` 触发）。
-    cancels: Mutex<HashMap<RequestId, CancelToken>>,
+    /// 每个客户端会话独立持有结果、TTL 和取消令牌；索引仍由 `volumes` 共享。
+    sessions: Mutex<HashMap<u64, SessionState>>,
+    session_counter: AtomicU64,
     /// 请求计数器（从 1 起，0 视为无效）。
     request_counter: AtomicU64,
     /// 是否正在搜索（`status().searching` 来源）。
@@ -106,9 +110,8 @@ impl EngineInner {
         EngineInner {
             volumes: RwLock::new(HashMap::new()),
             scanner: Mutex::new(scanner),
-            results: Mutex::new(HashMap::new()),
-            result_access: Mutex::new(HashMap::new()),
-            cancels: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::from([(1, SessionState::default())])),
+            session_counter: AtomicU64::new(2),
             request_counter: AtomicU64::new(1),
             searching: AtomicBool::new(false),
             last_saved: Mutex::new(None),
@@ -231,20 +234,21 @@ impl EngineInner {
         }
     }
 
-    fn search_impl(&self, req: SearchRequest) -> Result<SearchSummary> {
+    fn search_impl(&self, session: u64, req: SearchRequest) -> Result<SearchSummary> {
         let start = Instant::now();
         let id = self.request_counter.fetch_add(1, Ordering::SeqCst);
         self.searching.store(true, Ordering::SeqCst);
         // 新搜索覆盖上一次（单客户端语义）
         {
-            let mut results = self.results.lock().unwrap();
-            results.clear();
-            let mut access = self.result_access.lock().unwrap();
-            access.clear();
+            let mut sessions = self.sessions.lock().unwrap();
+            let state = sessions.entry(session).or_default();
+            state.results.clear();
+            state.result_access.clear();
         }
         let token = CancelToken::new();
         {
-            let mut cancels = self.cancels.lock().unwrap();
+            let mut sessions = self.sessions.lock().unwrap();
+            let cancels = &mut sessions.entry(session).or_default().cancels;
             cancels.insert(id, token.clone());
             // P2：清理过期令牌（id 单调递增，只保留最新一个）。
             cancels.retain(|k, _| *k >= id);
@@ -382,8 +386,9 @@ impl EngineInner {
 
         let total = hits.len();
         {
-            let mut results = self.results.lock().unwrap();
-            results.insert(
+            let mut sessions = self.sessions.lock().unwrap();
+            let state = sessions.entry(session).or_default();
+            state.results.insert(
                 id,
                 Arc::new(StoredResult {
                     hits,
@@ -391,8 +396,7 @@ impl EngineInner {
                     mopts,
                 }),
             );
-            let mut access = self.result_access.lock().unwrap();
-            access.insert(id, Instant::now());
+            state.result_access.insert(id, Instant::now());
         }
         self.searching.store(false, Ordering::SeqCst);
         Ok(SearchSummary {
@@ -403,11 +407,20 @@ impl EngineInner {
         })
     }
 
-    fn range_impl(&self, id: RequestId, offset: usize, limit: usize) -> Result<Vec<ResultRow>> {
+    fn range_impl(
+        &self,
+        session: u64,
+        id: RequestId,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ResultRow>> {
         // 先取窗口命中 + 查询（避免同时持有两个锁导致加锁顺序反转死锁）
         let (window, query, mopts) = {
-            let results = self.results.lock().unwrap();
-            let stored = results.get(&id).ok_or(EngineError::NotFound)?;
+            let sessions = self.sessions.lock().unwrap();
+            let stored = sessions
+                .get(&session)
+                .and_then(|s| s.results.get(&id))
+                .ok_or(EngineError::NotFound)?;
             let len = stored.hits.len();
             if offset >= len {
                 return Ok(Vec::new());
@@ -420,10 +433,9 @@ impl EngineInner {
             )
         };
         // 更新访问时间（60 秒无访问释放，DESIGN §9）
-        self.result_access
-            .lock()
-            .unwrap()
-            .insert(id, Instant::now());
+        if let Some(state) = self.sessions.lock().unwrap().get_mut(&session) {
+            state.result_access.insert(id, Instant::now());
+        }
 
         let vols = self.volumes.read().unwrap();
         let mut rows = Vec::with_capacity(window.len());
@@ -433,8 +445,14 @@ impl EngineInner {
         Ok(rows)
     }
 
-    fn cancel_impl(&self, id: RequestId) {
-        if let Some(tok) = self.cancels.lock().unwrap().get(&id) {
+    fn cancel_impl(&self, session: u64, id: RequestId) {
+        if let Some(tok) = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session)
+            .and_then(|s| s.cancels.get(&id))
+        {
             tok.cancel();
         }
     }
@@ -498,16 +516,24 @@ impl EngineInner {
         }
     }
 
-    fn open_impl(&self, id: RequestId, index: usize, action: OpenAction) -> Result<()> {
+    fn open_impl(
+        &self,
+        session: u64,
+        id: RequestId,
+        index: usize,
+        action: OpenAction,
+    ) -> Result<()> {
         let hit = {
-            let results = self.results.lock().unwrap();
-            let stored = results.get(&id).ok_or(EngineError::NotFound)?;
+            let sessions = self.sessions.lock().unwrap();
+            let stored = sessions
+                .get(&session)
+                .and_then(|s| s.results.get(&id))
+                .ok_or(EngineError::NotFound)?;
             stored.hits.get(index).ok_or(EngineError::NotFound)?.clone()
         };
-        self.result_access
-            .lock()
-            .unwrap()
-            .insert(id, Instant::now());
+        if let Some(state) = self.sessions.lock().unwrap().get_mut(&session) {
+            state.result_access.insert(id, Instant::now());
+        }
         let vols = self.volumes.read().unwrap();
         let vd = vols.get(&hit.0).ok_or(EngineError::NotFound)?;
         let full = match &hit.1 {
@@ -592,7 +618,7 @@ impl EngineInner {
                     // 常见路径：增量未达阈值，短暂持写锁应用即可（廉价，不重建索引）。
                     let mut vols = self.volumes.write().unwrap();
                     if let Some(vd) = vols.get_mut(vid) {
-                        vd.overlay.apply(&changes);
+                        vd.overlay.apply(&changes, &vd.index);
                         vd.info.next_usn = new_usn;
                     }
                     return;
@@ -610,7 +636,7 @@ impl EngineInner {
                     (vd.index.clone(), vd.overlay.clone(), vd.info.next_usn)
                 }; // 读锁释放
                 let mut overlay = snap_overlay;
-                overlay.apply(&changes);
+                overlay.apply(&changes, &snap_index);
                 let merged = merge_overlay_into_base(&snap_index, &overlay);
                 let mut vols = self.volumes.write().unwrap();
                 if let Some(vd) = vols.get_mut(vid) {
@@ -669,20 +695,16 @@ impl EngineInner {
     /// 结果集 60 秒无访问即释放（DESIGN §9 / #54）。
     fn reap_stale(&self) {
         let now = Instant::now();
-        let access = self.result_access.lock().unwrap();
-        let mut to_remove = Vec::new();
-        for (id, t) in access.iter() {
-            if now.duration_since(*t) > RESULT_TTL {
-                to_remove.push(*id);
-            }
-        }
-        drop(access);
-        if !to_remove.is_empty() {
-            let mut results = self.results.lock().unwrap();
-            let mut access = self.result_access.lock().unwrap();
-            for id in to_remove {
-                results.remove(&id);
-                access.remove(&id);
+        let mut sessions = self.sessions.lock().unwrap();
+        for state in sessions.values_mut() {
+            let stale: Vec<_> = state
+                .result_access
+                .iter()
+                .filter_map(|(id, t)| (now.duration_since(*t) > RESULT_TTL).then_some(*id))
+                .collect();
+            for id in stale {
+                state.results.remove(&id);
+                state.result_access.remove(&id);
             }
         }
     }
@@ -749,6 +771,7 @@ impl EngineInner {
     }
 
     fn load_all(&self, dir: &Path) -> io::Result<()> {
+        let mut loaded = 0usize;
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -772,9 +795,14 @@ impl EngineInner {
                         scan_progress: Arc::new(AtomicU64::new(u64::MAX)),
                     },
                 );
+                loaded += 1;
             }
         }
-        *self.last_saved.lock().unwrap() = Some(now_filetime());
+        // E5：只在真的载入了索引时才标记"已保存"；全新安装 0 个 .ffix 时保持 None，
+        // 避免状态栏显示误导性的"已保存 HH:MM"。
+        if loaded > 0 {
+            *self.last_saved.lock().unwrap() = Some(now_filetime());
+        }
         Ok(())
     }
 }
@@ -847,6 +875,16 @@ impl InProcessEngine {
         *self.inner.save_dir.lock().unwrap() = Some(dir.to_path_buf());
     }
 
+    /// 为一个独立调用方创建会话。会话只隔离请求结果与取消状态，共享同一份卷索引。
+    pub fn create_session(&self) -> EngineSession {
+        let id = self.inner.session_counter.fetch_add(1, Ordering::SeqCst);
+        self.inner.sessions.lock().unwrap().entry(id).or_default();
+        EngineSession {
+            inner: self.inner.clone(),
+            id,
+        }
+    }
+
     /// 立即落盘所有卷（忽略节流）。
     pub fn save_all(&self) -> io::Result<()> {
         self.inner.save_all()
@@ -871,13 +909,13 @@ impl Drop for InProcessEngine {
 
 impl EngineClient for InProcessEngine {
     fn search(&self, req: SearchRequest) -> Result<SearchSummary> {
-        self.inner.search_impl(req)
+        self.inner.search_impl(1, req)
     }
     fn range(&self, id: RequestId, offset: usize, limit: usize) -> Result<Vec<ResultRow>> {
-        self.inner.range_impl(id, offset, limit)
+        self.inner.range_impl(1, id, offset, limit)
     }
     fn cancel(&self, id: RequestId) {
-        self.inner.cancel_impl(id);
+        self.inner.cancel_impl(1, id);
     }
     fn status(&self) -> EngineStatus {
         self.inner.status_impl()
@@ -886,7 +924,40 @@ impl EngineClient for InProcessEngine {
         self.inner.rescan_impl(volume)
     }
     fn open(&self, id: RequestId, index: usize, action: OpenAction) -> Result<()> {
-        self.inner.open_impl(id, index, action)
+        self.inner.open_impl(1, id, index, action)
+    }
+}
+
+/// 共享索引的独立客户端会话。
+pub struct EngineSession {
+    inner: Arc<EngineInner>,
+    id: u64,
+}
+
+impl EngineClient for EngineSession {
+    fn search(&self, req: SearchRequest) -> Result<SearchSummary> {
+        self.inner.search_impl(self.id, req)
+    }
+    fn range(&self, id: RequestId, offset: usize, limit: usize) -> Result<Vec<ResultRow>> {
+        self.inner.range_impl(self.id, id, offset, limit)
+    }
+    fn cancel(&self, id: RequestId) {
+        self.inner.cancel_impl(self.id, id);
+    }
+    fn status(&self) -> EngineStatus {
+        self.inner.status_impl()
+    }
+    fn rescan(&self, volume: Option<VolumeId>) -> Result<()> {
+        self.inner.rescan_impl(volume)
+    }
+    fn open(&self, id: RequestId, index: usize, action: OpenAction) -> Result<()> {
+        self.inner.open_impl(self.id, id, index, action)
+    }
+}
+
+impl Drop for EngineSession {
+    fn drop(&mut self) {
+        self.inner.sessions.lock().unwrap().remove(&self.id);
     }
 }
 
@@ -1148,9 +1219,16 @@ fn to_utf16_ranges(name: &str, ranges: &[Range<u32>]) -> Vec<Range<u32>> {
         pos += ch.len_utf16() as u32;
     }
     map[name.len()] = pos;
+    // E6：钳制到 [0, name.len()]。即便上游匹配器回归给出越界字节端点，也不 panic；
+    // 非法区间（end <= start）直接丢弃，保持 UTF-16 高亮地基的健壮性。
+    let cap = name.len();
     ranges
         .iter()
-        .map(|r| map[r.start as usize]..map[r.end as usize])
+        .filter_map(|r| {
+            let start = (r.start as usize).min(cap);
+            let end = (r.end as usize).min(cap);
+            (start < end).then_some(map[start]..map[end])
+        })
         .collect()
 }
 
@@ -1973,6 +2051,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn client_sessions_keep_results_and_cancellation_isolated() {
+        let engine = InProcessEngine::empty();
+        engine.add_volume(
+            VolumeId {
+                serial: 1,
+                drive: Some('C'),
+            },
+            sample_index(),
+        );
+        let a = engine.create_session();
+        let b = engine.create_session();
+        let first = a.search(req("txt")).unwrap();
+        let second = b.search(req("readme")).unwrap();
+        assert_eq!(first.total, 2);
+        assert_eq!(second.total, 1);
+        assert_eq!(a.range(first.id, 0, 1).unwrap().len(), 1);
+        assert_eq!(b.range(second.id, 0, 1).unwrap().len(), 1);
+        assert!(
+            a.range(second.id, 0, 1).is_err(),
+            "会话 A 不应读取会话 B 的结果"
+        );
+        let newer = a.search(req("readme")).unwrap();
+        assert!(
+            a.range(first.id, 0, 1).is_err(),
+            "同一会话的新搜索仍应替换旧结果"
+        );
+        assert_eq!(
+            b.range(second.id, 0, 1).unwrap().len(),
+            1,
+            "会话 B 的结果不应被 A 作废"
+        );
+        a.cancel(newer.id);
+        assert!(b.range(second.id, 0, 1).is_ok(), "取消 A 不应影响 B");
+    }
+
     // ───────────────────── M2（②/③/④）新增：Overlay / 重建 / 持久化 ─────────────────────
 
     /// 内存假扫描器：`full_scan` 产出 `full`，`read_changes` 返回 `changes`；
@@ -2040,6 +2154,38 @@ mod tests {
         assert_eq!(rows[0].name, "fresh.txt");
         assert_eq!(rows[0].dir, "C:\\Windows");
         assert_eq!(rows[0].size, Some(77));
+    }
+
+    /// S1/S2 回归：无名字的 USN 增量（内容/元数据变化）不得让 Base 条目从搜索中
+    /// 消失，也不得显示成空名 / "0 B"。应按 frn 从 Base 查回原名并标 STALE_META。
+    #[test]
+    fn overlay_nameless_upsert_preserves_base_name_and_marks_stale() {
+        let e = engine(); // Base 中 readme.txt(frn101, size1024)
+        e.set_scanner(Box::new(FakeScanner {
+            changes: vec![Change::Upsert(RawEntry {
+                frn: 101,
+                parent_frn: 100,
+                name: String::new(), // 写数据事件：USN 不带名字
+                is_dir: false,
+                attrs: 0,
+                size: 0, // USN 不含大小
+                mtime: 999,
+                ctime: 999,
+                atime: 999,
+            })],
+            next_usn: 2,
+            full: vec![],
+            unavailable: false,
+        }));
+        e.poll_once();
+        let sum = e.search(req("readme")).unwrap();
+        assert_eq!(sum.total, 1, "空名增量不得让已存在文件从搜索结果消失");
+        let rows = e.range(sum.id, 0, 10).unwrap();
+        assert_eq!(rows[0].name, "readme.txt", "应保留 Base 原名，而非空串");
+        assert_eq!(
+            rows[0].size, None,
+            "USN 无 size，应标 stale 显示占位而非 0 B"
+        );
     }
 
     #[test]
@@ -2347,6 +2493,11 @@ mod tests {
         assert_eq!(to_utf16_ranges("a😀b", &one(1, 5)), one(1, 3));
         // 空区间 / 空名。
         assert!(to_utf16_ranges("x", &[]).is_empty());
+        // E6：越界端点被钳制，非法区间被丢弃，均不 panic。
+        assert_eq!(to_utf16_ranges("abc", &one(1, 999)), one(1, 3));
+        assert!(to_utf16_ranges("abc", &one(5, 9)).is_empty()); // 全越界
+        assert!(to_utf16_ranges("abc", &one(2, 2)).is_empty()); // end == start
+        assert!(to_utf16_ranges("abc", &one(3, 1)).is_empty()); // end < start
     }
 
     /// P0-1：Scanning 但有旧索引（entry_count>0）的卷仍可搜索；纯 Scanning（无索引）跳过。

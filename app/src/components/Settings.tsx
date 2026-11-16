@@ -354,7 +354,7 @@ export default function Settings({ onBack, closing, onExited, state, patch }: Pr
           </div>
           <div className="set-row">
             <span>索引位置</span>
-            <span className="mono">%LOCALAPPDATA%\Sift\</span>
+            <span className="mono">应用所在磁盘根目录\Sift\</span>
           </div>
           <div className="set-row">
             <span>开源许可</span>

@@ -64,13 +64,13 @@
      不确定进度条需要肉眼可辨的扫描感，1.4s 才合理。这里落地 --dur-progress
      解决 §10 待办 #1 的"需先定 token"，实现侧统一引用，不再硬编码 1.4s。 */
   --dur-progress: 1.4s;
-  --ease-out: cubic-bezier(0.1, 0.9, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   /* 退出曲线（UI_SPEC §2.6 定义，2026-11-15 随窗口动效落地首次引用）。 */
-  --ease-in: cubic-bezier(0.6, 0, 0.9, 0.4);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
   /* 进入曲线带 ~0.4% 轻微过冲：参考 CompressO（Framer Motion spring）与
      ZTools 的移动端手感，只用于窗口唤出与右键菜单出现两处（DECISIONS #83）；
      其余状态过渡仍用 --ease-out，维持 §2.6「动效克制」。 */
-  --ease-spring: cubic-bezier(0.2, 1.08, 0.3, 1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
   /* 窗口唤出/隐藏（UI_SPEC §2.6 dur-window-in/out，2026-11-15 落地）。 */
   --dur-window-in: 140ms;
   --dur-window-out: 90ms;
@@ -140,7 +140,7 @@ body {
   width: min(760px, calc(100vw - 32px));
 }
 html[data-runtime="tauri"] body {
-  background: var(--bg-surface);
+  background: transparent;
   display: block;
   min-height: 0;
 }
@@ -199,7 +199,7 @@ body {
   background: var(--bg-surface);
   color: var(--text-primary);
   border: 1px solid var(--window-border);
-  border-radius: 8px;
+  border-radius: 10px;
   box-shadow: var(--window-shadow);
   overflow: hidden;
   display: flex;
@@ -805,19 +805,32 @@ body {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  animation: settings-in 220ms var(--ease-out) both;
+  animation: settings-in 260ms var(--ease-spring) both;
 }
 .settings-exit {
   pointer-events: none;
-  animation: settings-out 150ms var(--ease-in) both;
+  animation: settings-out 220ms var(--ease-in) both;
 }
 @keyframes settings-in {
-  from { opacity: 0; transform: translateY(24px); }
+  from { opacity: 0; transform: translateY(28px); }
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes settings-out {
   from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(16px); }
+  to { opacity: 0; transform: translateY(28px); }
+}
+.search-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.search-view-enter {
+  animation: search-view-in 260ms var(--ease-spring) both;
+}
+@keyframes search-view-in {
+  from { opacity: 0; transform: translateY(-28px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .settings-head {
   display: flex;

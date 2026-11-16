@@ -9,7 +9,8 @@ use std::io::{self, Read, Write};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::api::{
-    EngineError, EngineStatus, OpenAction, RequestId, ResultRow, SearchRequest, SearchSummary,
+    EngineClient, EngineError, EngineStatus, OpenAction, RequestId, ResultRow, SearchRequest,
+    SearchSummary, VolumeId,
 };
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -166,6 +167,52 @@ pub fn read_response(reader: &mut impl Read) -> io::Result<Option<Response>> {
 
 pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Result<()> {
     write_message(writer, response)
+}
+
+/// 处理一个已建立连接，直到对端干净断开或帧解码失败。
+///
+/// 调用方应为每条连接传入独立的 `EngineSession`。`Open` 只解析并返回结果行，
+/// 不调用 `EngineClient::open`，因此服务进程不会以 SYSTEM 身份执行 UI 动作。
+pub fn serve_connection(
+    client: &dyn EngineClient,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    resolve_volume: impl Fn(&str) -> Option<VolumeId>,
+) -> io::Result<()> {
+    while let Some(request) = read_request(reader)? {
+        let reply = dispatch(client, request.body, &resolve_volume);
+        let response = Message::new(request.request_id, reply);
+        write_response(writer, &response)?;
+    }
+    Ok(())
+}
+
+fn dispatch(
+    client: &dyn EngineClient,
+    command: Command,
+    resolve_volume: &impl Fn(&str) -> Option<VolumeId>,
+) -> Reply {
+    let result = match command {
+        Command::Search(request) => client.search(request).map(Reply::Search),
+        Command::Range { id, offset, limit } => client.range(id, offset, limit).map(Reply::Range),
+        Command::Cancel { id } => {
+            client.cancel(id);
+            Ok(Reply::Cancel)
+        }
+        Command::Status => Ok(Reply::Status(client.status())),
+        Command::Rescan { volume } => {
+            let resolved = match volume {
+                Some(name) => resolve_volume(&name).map(Some).ok_or(EngineError::NotFound),
+                None => Ok(None),
+            };
+            resolved.and_then(|v| client.rescan(v).map(|()| Reply::Rescan))
+        }
+        Command::Open { id, index, action } => client
+            .range(id, index, 1)
+            .and_then(|mut rows| rows.pop().ok_or(EngineError::NotFound))
+            .map(|row| Reply::Open(ResolvedAction { action, row })),
+    };
+    result.unwrap_or_else(|error| Reply::Error(error.into()))
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

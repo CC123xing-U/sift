@@ -21,4 +21,4 @@ pub use api::{
 };
 pub use overlay::{Overlay, OverlayEntry};
 
-pub use inprocess::InProcessEngine;
+pub use inprocess::{EngineSession, InProcessEngine};

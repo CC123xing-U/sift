@@ -65,15 +65,17 @@ export default function App() {
   const [sort, setSort] = useState<SortSpec>({ key: 'score', descending: true });
   const [view, setView] = useState<'search' | 'settings'>('search');
   const [settingsClosing, setSettingsClosing] = useState(false);
+  const [searchEntering, setSearchEntering] = useState(false);
   const closeSettings = () => setSettingsClosing(true);
   const finishSettingsClose = useCallback(() => {
     setView('search');
     setSettingsClosing(false);
+    setSearchEntering(true);
   }, []);
   useEffect(() => {
     if (!settingsClosing) return;
     // Also finish if a hidden WebView suspends CSS animation events.
-    const timer = setTimeout(finishSettingsClose, 180);
+    const timer = setTimeout(finishSettingsClose, 280);
     return () => clearTimeout(timer);
   }, [settingsClosing, finishSettingsClose]);
   // 初始状态：首次轮询会立即填充（见下方 useEffect），此处仅给一个空壳避免首帧 undefined。
@@ -458,7 +460,11 @@ export default function App() {
               patch={(p) => setSettings((s) => ({ ...s, ...p }))}
             />
           ) : (
-            <>
+            <div
+              className={'search-view' + (searchEntering ? ' search-view-enter' : '')}
+              onAnimationEnd={() => setSearchEntering(false)}
+            >
+              <>
               <TopBar
                 input={input}
                 onInput={setInput}
@@ -507,7 +513,8 @@ export default function App() {
                 status={status}
                 toast={toast}
               />
-            </>
+              </>
+            </div>
           )}
         </div>
       )}

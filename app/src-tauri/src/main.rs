@@ -7,6 +7,8 @@
 // 若日后要调试日志，用 dbgview 或改为 cfg_attr 条件编译）。
 #![windows_subsystem = "windows"]
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -215,8 +217,13 @@ fn dbg_log(msg: &str) {
 }
 
 fn rescan_all(app: &tauri::AppHandle) {
+    // S4：托盘回调运行在 UI 线程，同步全量扫描会冻结窗口与托盘；与 `rescan` 命令
+    // 路径保持一致——起线程后立即返回，扫描在后台进行。
     if let Some(state) = app.try_state::<EngineState>() {
-        let _ = state.engine.rescan(None);
+        let engine = state.engine.clone();
+        std::thread::spawn(move || {
+            let _ = engine.rescan(None);
+        });
     }
 }
 
@@ -227,13 +234,28 @@ fn build_engine() -> Arc<InProcessEngine> {
     use ff_ntfs::NtfsVolumeScanner;
     let engine = Arc::new(InProcessEngine::new(Box::new(NtfsVolumeScanner)));
 
-    // P2 修复：接线持久化（DESIGN §6：开发期 %LOCALAPPDATA%\Sift\）。
-    // 先尝试载入已有索引（秒级），再后台全量重扫（保证新鲜度）。
-    let save_dir = std::env::var("LOCALAPPDATA")
-        .map(|base| std::path::PathBuf::from(base).join("Sift"))
-        .unwrap_or_else(|_| std::env::temp_dir().join("Sift"));
+    // 索引放在运行程序所在磁盘根目录的 Sift 文件夹，避免 C: 的
+    // `%LOCALAPPDATA%` 被大索引长期占满；同一 serial 始终覆盖同一文件。
+    let save_dir = index_dir();
     let _ = std::fs::create_dir_all(&save_dir);
     engine.set_save_dir(&save_dir);
+    // S3：卷枚举失败（瞬时 RPC / 权限故障）时绝不能用空集去清理——那会把所有既有
+    // .ffix 误判为幽灵卷删光，毁掉秒级冷启动。失败时跳过清理，保留磁盘上的索引，
+    // 仍尝试 load_all；本轮不扫描（available 为空），下次启动枚举恢复后再正常收敛。
+    let available = match ff_ntfs::win32::enumerate_volumes() {
+        Ok(vols) => {
+            let valid_serials: HashSet<u32> = vols.iter().map(|v| v.serial).collect();
+            prune_stale_indexes(&save_dir, &valid_serials);
+            cleanup_legacy_indexes();
+            vols
+        }
+        Err(e) => {
+            dbg_log(&format!(
+                "engine: enumerate_volumes failed, skip prune: {e}"
+            ));
+            Vec::new()
+        }
+    };
     if let Err(e) = engine.load_all(&save_dir) {
         dbg_log(&format!("engine: load_all failed (will full-scan): {}", e));
     } else {
@@ -246,32 +268,88 @@ fn build_engine() -> Arc<InProcessEngine> {
     // 后台线程逐个卷触发全量扫描，避免阻塞窗口显示（DESIGN §5.2：扫描期间 UI 显示 Scanning）。
     let scan = engine.clone();
     std::thread::spawn(move || {
-        match ff_ntfs::win32::enumerate_volumes() {
-            Ok(vols) => {
-                dbg_log(&format!("engine: {} volume(s) found", vols.len()));
-                let vids: Vec<ff_engine::VolumeId> = vols
-                    .iter()
-                    .map(|vi| ff_engine::VolumeId {
-                        serial: vi.serial,
-                        drive: vi.drive,
-                    })
-                    .collect();
-                // 先把本轮要扫的卷全部置为「待扫描」：否则未轮到的卷仍是 Ready
-                // （索引自磁盘载入），全局进度会把它们算作已完成，每开扫一个新卷
-                // 就被拽回低位（实机：70 多 → 90 多 → 退回 70 多 反复回跳）。
-                scan.mark_pending(&vids);
-                for vid in vids {
-                    dbg_log(&format!("engine: rescan volume {:?}", vid));
-                    if let Err(e) = scan.rescan(Some(vid)) {
-                        dbg_log(&format!("engine: rescan error: {}", e));
-                    }
-                    dbg_log("engine: rescan done");
+        {
+            let vols = available;
+            dbg_log(&format!("engine: {} volume(s) found", vols.len()));
+            let vids: Vec<ff_engine::VolumeId> = vols
+                .iter()
+                .map(|vi| ff_engine::VolumeId {
+                    serial: vi.serial,
+                    drive: vi.drive,
+                })
+                .collect();
+            // 先把本轮要扫的卷全部置为「待扫描」：否则未轮到的卷仍是 Ready
+            // （索引自磁盘载入），全局进度会把它们算作已完成，每开扫一个新卷
+            // 就被拽回低位（实机：70 多 → 90 多 → 退回 70 多 反复回跳）。
+            scan.mark_pending(&vids);
+            for vid in vids {
+                dbg_log(&format!("engine: rescan volume {:?}", vid));
+                if let Err(e) = scan.rescan(Some(vid)) {
+                    dbg_log(&format!("engine: rescan error: {}", e));
                 }
+                dbg_log("engine: rescan done");
             }
-            Err(e) => dbg_log(&format!("engine: enumerate_volumes failed: {}", e)),
         }
     });
     engine
+}
+
+#[cfg(windows)]
+fn index_dir() -> PathBuf {
+    let fallback = || {
+        std::env::var("LOCALAPPDATA")
+            .map(|base| PathBuf::from(base).join("Sift"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("Sift"))
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return fallback();
+    };
+    match exe.components().next() {
+        Some(std::path::Component::Prefix(prefix)) => {
+            PathBuf::from(format!(r"{}\Sift", prefix.as_os_str().to_string_lossy()))
+        }
+        _ => fallback(),
+    }
+}
+
+#[cfg(windows)]
+fn prune_stale_indexes(dir: &Path, valid_serials: &HashSet<u32>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("ffix") {
+            continue;
+        }
+        let Some(serial) = path
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .and_then(|x| x.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !valid_serials.contains(&serial) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn cleanup_legacy_indexes() {
+    let Ok(base) = std::env::var("LOCALAPPDATA") else {
+        return;
+    };
+    let legacy = PathBuf::from(base).join("Sift");
+    let Ok(entries) = std::fs::read_dir(legacy) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) == Some("ffix") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -331,20 +409,29 @@ pub fn run() {
     let focused_once = Arc::new(AtomicBool::new(false));
     let focused_once_evt = focused_once.clone();
 
-    tauri::Builder::default()
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcuts([shortcut])
-                .expect("全局快捷键注册失败")
-                .with_handler(|app, _shortcut, event| {
-                    dbg_log("hotkey event received");
-                    if event.state() == ShortcutState::Pressed {
-                        dbg_log("hotkey pressed -> toggle_window");
-                        toggle_window(app.clone());
-                    }
-                })
-                .build(),
-        )
+    // L2：全局快捷键可能被其他程序占用，注册失败不应让整个应用启动即崩。
+    // 注册成功才装插件；失败仅记日志并继续（托盘、失焦隐藏、窗口命令仍可用）。
+    let mut builder = tauri::Builder::default();
+    match tauri_plugin_global_shortcut::Builder::new().with_shortcuts([shortcut]) {
+        Ok(shortcut_builder) => {
+            builder = builder.plugin(
+                shortcut_builder
+                    .with_handler(|app, _shortcut, event| {
+                        dbg_log("hotkey event received");
+                        if event.state() == ShortcutState::Pressed {
+                            dbg_log("hotkey pressed -> toggle_window");
+                            toggle_window(app.clone());
+                        }
+                    })
+                    .build(),
+            );
+        }
+        Err(e) => dbg_log(&format!(
+            "global shortcut register failed, continue without it: {e}"
+        )),
+    }
+
+    builder
         .setup(move |app| {
             dbg_log("setup: begin");
             app.manage(EngineState { engine });

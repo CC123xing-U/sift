@@ -220,3 +220,18 @@ fn pipe_preserves_filetime_and_utf16_highlight_ranges_exactly() {
     assert_eq!(rows[0].mtime, Some(134_116_992_000_000_001));
     assert_eq!(rows[0].name_matches[0], 2..8);
 }
+
+#[test]
+fn connection_loop_correlates_requests_and_returns_status() {
+    use ff_engine::ipc::serve_connection;
+    use ff_engine::InProcessEngine;
+
+    let engine = InProcessEngine::empty();
+    let mut input = Vec::new();
+    write_request(&mut input, &Message::new(77, Command::Status)).unwrap();
+    let mut output = Vec::new();
+    serve_connection(&engine, &mut Cursor::new(input), &mut output, |_| None).unwrap();
+    let response = read_response(&mut Cursor::new(output)).unwrap().unwrap();
+    assert_eq!(response.request_id, 77);
+    assert!(matches!(response.body, Reply::Status(_)));
+}

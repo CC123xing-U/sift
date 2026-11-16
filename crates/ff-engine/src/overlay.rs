@@ -4,8 +4,7 @@
 //! 的字段，而 ff-core 是零平台依赖的纯逻辑 crate，不依赖 ff-ntfs（DESIGN §0.5）。
 //! 搜索时 Base（VolumeIndex）+ Overlay 合并；Overlay 条目的父链解析先查 Overlay 再查 Base。
 
-use std::collections::HashSet;
-
+use ff_core::VolumeIndex;
 use ff_ntfs::{Change, RawEntry};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -74,13 +73,28 @@ pub struct Overlay {
 
 impl Overlay {
     /// 应用一批 [`Change`]（DESIGN §5.3：按 frn 合并；Upsert 覆盖、Remove 置删）。
-    pub fn apply(&mut self, changes: &[Change]) {
+    ///
+    /// `base` 为当前卷的 Base 索引：USN 中不改名的内容/元数据变化记录不带名字，
+    /// `read_changes` 转换出的 `RawEntry.name` 此时为空串（S1）。这里按 frn 从 Base
+    /// 查回原名再插入 Overlay——否则空名条目会遮蔽 Base 命中，让文件从搜索结果中
+    /// 消失，并在合并时被固化进 Base、落盘损坏（DESIGN §5.3「name 为 None 时保留
+    /// 原条目名字」）。查不到（真正的新文件在后续记录会更名）时保留空串。
+    pub fn apply(&mut self, changes: &[Change], base: &VolumeIndex) {
         for c in changes {
             match c {
                 Change::Upsert(e) => {
                     self.deleted.remove(&e.frn);
-                    self.added_or_changed
-                        .insert(e.frn, OverlayEntry::from_raw(e.clone()));
+                    let mut oe = OverlayEntry::from_raw(e.clone());
+                    if oe.name.is_empty() {
+                        // 空名 = 内容/元数据变化记录：size 恒为 0、时间不可靠（契约
+                        // usn.rs::record_to_change），标 STALE_META 让 UI 显示占位而非
+                        // 误导性的 "0 B"（S2）。有名的新建/改名记录不在此列。
+                        oe.stale_meta = true;
+                        if let Some(name) = base.frn_to_id(e.frn).and_then(|id| base.name_str(id)) {
+                            oe.name = name.to_string();
+                        }
+                    }
+                    self.added_or_changed.insert(e.frn, oe);
                 }
                 Change::Remove { frn } => {
                     self.added_or_changed.remove(frn);
@@ -99,6 +113,3 @@ impl Overlay {
         self.added_or_changed.len() + self.deleted.len()
     }
 }
-
-/// 供测试 / 集合运算用的便捷别名。
-pub type OverlaySet = HashSet<u64>;
