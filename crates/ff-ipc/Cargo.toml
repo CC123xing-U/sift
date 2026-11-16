@@ -1,0 +1,24 @@
+[package]
+name = "ff-ipc"
+description = "Sift M6 命名管道传输：SID ACL 安全描述符、server/client、EngineClient over Pipe"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ff-engine = { path = "../ff-engine" }
+
+[dev-dependencies]
+ff-core = { path = "../ff-core" }
+
+[target."cfg(windows)".dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_RemoteDesktop",
+]

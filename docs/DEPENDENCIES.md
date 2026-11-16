@@ -15,6 +15,8 @@
 | time | 0.3.55 | MIT OR Apache-2.0 | `ntfs-reader` 的 `OffsetDateTime` → FILETIME 转换（§4.1/§5.1 时间单位） | ff-ntfs | 2026-10-24 |
 | tracing | 0.1.44 | MIT | USN 跳过的 V3/未知版本记录与解析中断的日志（§5.3；§2.1 准入） | ff-ntfs | 2026-10-24 |
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | M6 长度前缀 JSON 协议编解码（§10.1），从已有锁定版本复用 | ff-engine（新增直接依赖，Tauri 已有） | 2026-11-15 |
+| windows-service | 0.8.1 | MIT OR Apache-2.0 | M6 Windows 服务外壳 / SCM 安装卸载（§2.1 技术栈已列、§12）。依赖 windows-sys 0.61（本地已有 0.61.2，无冲突），MSRV 1.71 | ff-service | 2026-11-16 |
+| windows（新增 feature） | 0.62.2 | MIT OR Apache-2.0 | M6 命名管道：`Win32_System_Pipes` / `Win32_Security` / `Win32_Security_Authorization`（SID+SDDL ACL）、`Win32_Storage_FileSystem`（ReadFile/WriteFile） | ff-ipc | 2026-11-16 |
 
 > 说明：`windows` 会连带拉入 `windows-sys` / `windows-numerics` 等子 crate（均为 MIT OR Apache-2.0）；`ff-core`/`ff-match` 保持 `#![forbid(unsafe_code)]`，仅依赖纯逻辑 crate；`ntfs-reader`/`windows` 经 `#[cfg(windows)]` 隔离，非 Windows 平台下 `ff-ntfs` 仍编译通过但不含实扫逻辑。
 >

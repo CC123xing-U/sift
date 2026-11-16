@@ -1,0 +1,15 @@
+[package]
+name = "ff-service"
+description = "Sift M6 Windows 服务外壳：持有引擎/索引、命名管道服务端、SCM 生命周期"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ff-engine = { path = "../ff-engine" }
+ff-ipc = { path = "../ff-ipc" }
+ff-ntfs = { path = "../ff-ntfs" }
+tracing = "0.1"
+
+[target."cfg(windows)".dependencies.windows-service]
+version = "0.8.1"

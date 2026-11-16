@@ -12,6 +12,8 @@ members = [
     "crates/ff-match",
     "crates/ff-ntfs",
     "crates/ff-engine",
+    "crates/ff-ipc",
+    "crates/ff-service",
     "crates/ff-cli",
     "bench",
     "tests",

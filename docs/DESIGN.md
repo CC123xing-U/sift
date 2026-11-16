@@ -361,7 +361,7 @@ pub trait EngineClient: Send + Sync {
 - 协议：4 字节小端长度前缀 + JSON（`serde_json`）；消息类型对应 `EngineClient` 的方法；每个请求带 `request_id`，响应带相同 id。
 - 服务重启或管道断开时，UI 自动重连并重新订阅状态。
 
-**M6-1 共享协议已落地（2026-11-15，#86；尚未接入 OS 管道）**：
+**M6-1 共享协议已落地（2026-11-15，#86）；OS 管道已于 2026-11-16 通过 `ff-ipc` 接入（#88）**：
 `ff-engine::ipc` 定义版本化 `Message { protocol_version, request_id, body }`，
 消息帧上限 1 MiB、查询上限 16 KiB、单次 range 上限 1000；版本不匹配、
 非法窗口、溢出、截断与非法 JSON 显式报错，干净 EOF 单独表示。编码先在有界
@@ -566,10 +566,12 @@ pub trait EngineClient: Send + Sync {
 ### M6 服务与开放接口
 - 第 10、12 节：服务拆分、命名管道、HTTP API（含全部安全要求）。
 - **验收**：UI 以普通权限运行即可搜索；HTTP 用错误 token / 错误 Host 头请求会被拒绝（写测试）；服务崩溃后 UI 能提示并重连。
-- **当前进度（2026-11-15）**：用户已确认进入 M6。M6-1 已完成共享协议/帧编码与
-  时间边界抽取、测试；尚未切换当前 InProcess 应用。下一步先隔离客户端搜索会话
-  （目前新搜索清空全局结果，直接接 UI+HTTP 会互相作废），再实现 SID ACL 管道、
-  服务生命周期、普通权限 UI、HTTP 鉴权及端到端验收。**M6 整体尚未完成**。
+- **当前进度（2026-11-16）**：M6-1 共享协议/时间边界、M6-2 每连接会话隔离、
+  M6-3 连接循环已落地；本轮新增 `ff-ipc`（SID ACL 命名管道 server/client + 真实 OS
+  管道验收）与 `ff-service`（SCM 服务外壳 + 每连接 EngineSession + `%ProgramData%` 索引）。
+  当前桌面应用仍为 InProcess 引擎，**未切换到 Pipe、未安装服务、未开放 HTTP**。
+  下一步：普通权限 Tauri 接 `PipeClient`（含服务崩溃提示/重连），再做 HTTP 鉴权与端到端
+  验收。**SCM 实际安装/启停、SYSTEM 跨会话 ACL、跨进程重连尚未真机实测；M6 整体尚未完成**。
 
 ### M7 进阶（逐项单独立项）
 对话框集成（`SetWinEventHook` + UI Automation，先在记事本"打开"对话框验证）· 内容搜索 · 硬链接多路径 · filelist 导入 · 非 NTFS 回退遍历 · 属性窗口。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2，不再列在 M7。）

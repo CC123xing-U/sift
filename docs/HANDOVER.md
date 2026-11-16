@@ -6,10 +6,10 @@
 - `e536db0`：搜索/设置 UI 重整、旧轮次窗口动效与 ACL 修复、规范及证据。
 - `b9075e9`：设置轻量上下转场。用户强调风格一致，因此没有照搬 CompressO 的
   Vaul 抽屉、大圆角、拖拽把手或背景缩放；仅借鉴进入/退出节奏。
-- **M6-1 已实现共享协议和时间边界，M6 整体仍进行中。** 当前应用仍为
-  InProcess 引擎，没有切换服务，没有安装 SCM，没有开放 HTTP。
-- 本轮先完成索引位置与 UI 过渡的局部调整，随后完成 M6 的第 1 项客户端会话隔离；
-  下一对话从命名管道/服务模块开始。
+- **M6-1/M6-2/M6-3 + 命名管道与服务外壳已实现，M6 整体仍进行中。** 当前应用仍为
+  InProcess 引擎，没有切换到 Pipe 客户端，没有安装 SCM，没有开放 HTTP。
+- 新增 `ff-ipc`（SID ACL 命名管道 server/client）与 `ff-service`（SCM 服务外壳），
+  真实 OS 管道端到端测试通过；下一对话从「普通权限 Tauri 接 PipeClient + 重连」开始。
 
 ## 上一轮局部调整（2026-11-16，已随本轮提交）
 
@@ -78,16 +78,28 @@ C6 glob `?` 按字节 §8.1），仅修 M0–M5 已完成阶段的确认错误�
 断言通过；CLI 真实扫描 C: 盘 846090 条、搜索 `ntdll` 命中并输出正常。
 L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定，未擅改。
 
+## M6 第 1 项：命名管道 + 服务外壳（2026-11-16，已实现）
+
+- `crates/ff-ipc`（新）：SID/SDDL ACL、HANDLE→Read/Write、server accept 循环（每连接
+  `EngineSession` + 独立线程）、`PipeClient`（`EngineClient over Pipe`）。协议编解码仍只在
+  `ff-engine::ipc`。管道名 `\\.\pipe\sift-<用户 SID>`，SDDL 只放行登录用户 + SYSTEM。
+- `crates/ff-service`（新）：windows-service 服务外壳；`install/uninstall/start/stop/status`
+  SCM 命令；服务以 LocalSystem 运行，用 `WTSQueryUserToken` 取活动控制台用户 SID 建管道；
+  索引放 `%ProgramData%\Sift`；Stop/Shutdown 时保存索引并上报状态。
+- 新依赖：`windows-service 0.8.1` + windows 新增 pipes/security/remotedesktop features，
+  已登记 DEPENDENCIES.md（DESIGN §88）。
+- **未实测**：SCM 实际安装/启停（需管理员）、SYSTEM 跨会话 ACL、服务崩溃重连；
+  这些要在真机以普通权限 UI + 已安装服务验收，当前只做了进程内真实 OS 管道往返。
+
 ## 下一步顺序
 
-1. **Windows OS 命名管道与 `ff-service`**：接入已完成的 `ff_engine::ipc::serve_connection`，
-   每条连接创建 `EngineSession`；实现 SID ACL、Pipe 客户端、断线提示/重连；管道超时、帧错误和权限用
-   Windows 实测，不把纯内存编解码当作 OS 管道验收。
-2. SCM 安装/卸载与启动停止、普通权限 Tauri；打开文件仍由 UI 用户执行。
+1. **普通权限 Tauri 接 `PipeClient`**：UI 启动时判断是否已安装/运行服务，连
+   `\\.\pipe\sift-<SID>`；打开文件/剪贴板仍由 UI 用 `PipeClient::last_open()` 的结果以自身
+   身份执行。实现服务崩溃提示与自动重连（当前连接只在启动时建立，断开后无重连）。
+2. 服务崩溃后完整重连验收；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测（需管理员）。
 3. 默认关闭的 HTTP：127.0.0.1、Bearer token、严格 Host、无宽松 CORS、
    count/速率限制；错误 token/Host 等必须自动化测试。
-4. 普通权限搜索、服务崩溃后提示与重连、HTTP 完整端到端验收后才标 M6 完成。
-   不进入 M7，不自动改里程碑范围。
+4. HTTP 完整端到端验收后才标 M6 完成。不进入 M7，不自动改里程碑范围。
 
 ## 验证
 
@@ -105,6 +117,9 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
   11 项 IPC 合约测试与会话隔离回归；未开始 OS 管道或服务验收。
 - 本轮连接循环验证：`cargo test -p ff-engine` 通过，**54 项测试通过、0 失败**；
   其中 IPC 合约测试 12 项。仍未开始 Windows OS 管道/ACL 实测。
+- 命名管道/服务验证（#88）：workspace fmt/clippy(-D warnings)/test 全绿；新增 4 项
+  SID/SDDL 单测 + 3 项真实 OS 管道端到端测试（往返、多客户端会话隔离、卷 ID 解析）通过；
+  `ff-service status/bogus` SCM 命令路径实机冒烟通过。SCM 实际安装/启停与跨会话 ACL 未实测。
 - **新 UI/转场尚未真实 WebView2 复验**。旧 #83 真机日志与截图只代表旧轮次。
   125% 缩放、IME、热键/失焦稳定性与原生窄窗口仍需覆盖。
 - 浏览器预览 `http://127.0.0.1:5177/` 为 MockEngine，不是真实文件结果。
@@ -119,5 +134,6 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - 窗口 CSS 不加常驻 will-change；避免多余大括号吞掉 topbar/flex 布局。
   Tauri 新增 core/event API 时检查 capabilities（#79/#83）。
 - C: 空间约 1GB，Rust 构建设置 TMP/TEMP/TMPDIR 为 `F:/Temp`。
-- 本轮已提交（M6-1/M6-2/M6-3 + 索引目录 + 8 项确认错误修复），未推送；
+- M6-1/M6-2/M6-3 + 索引目录 + 8 项确认错误修复已提交（`91559ba`）；本轮命名管道与
+  `ff-service`（ff-ipc/ff-service 新 crate + 文档）尚在工作树，未提交；
   已提交历史与当前状态以 `git log`、`git status` 为准。

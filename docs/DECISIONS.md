@@ -649,3 +649,28 @@
       运行程序所在盘的 `Sift\` 目录，服务模式仍按 DESIGN 使用 `%ProgramData%`。
     - 启动枚举当前卷后，仅保留有效 serial 对应的 `.ffix`，删除已卸载卷或旧序列号文件；
       同一卷仍使用固定文件名与原子覆盖，不会因重复索引产生副本。
+
+88. **M6 第 1 项：Windows OS 命名管道与 ff-service 落地**（2026-11-16）：
+    - 新增两个 workspace crate：`ff-ipc`（管道传输，仅 Windows 编译）与 `ff-service`
+      （Windows 服务外壳）。协议类型/编解码仍只在 `ff-engine::ipc`，管道层不重复实现。
+    - SID/ACL：管道名 `\.\pipe\sift-<用户 SID>`；SDDL `D:P(A;;GA;;;<用户SID>)(A;;GA;;;SY)`
+      仅放行登录用户与 SYSTEM、禁止继承。服务以 LocalSystem 运行时用
+      `WTSGetActiveConsoleSessionId` + `WTSQueryUserToken` 取活动控制台用户的 SID
+      （不能用服务自身的 SYSTEM SID，否则 UI 被 ACL 挡住）；无交互会话时回退并拒绝启动管道。
+    - 传输：`PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT` + 有界实例；`HANDLE` 封装成
+      `Read/Write` 复用 `serve_connection`；每连接 `create_session()` + 独立线程，
+      支持多客户端并发、坏帧只丢该连接。刻意不调用 `DisconnectNamedPipe`：每个 accept
+      关闭的是独立句柄实例，让内核回收更安全。
+    - `EngineClient over Pipe`（`PipeClient`）经管道调 Search/Range/Cancel/Status/Rescan/Open；
+      `Open` 只解析出 `ResolvedAction` 存到 `last_open()` 供 UI 以自身身份执行（DESIGN §12），
+      服务绝不代替用户打开文件/写剪贴板。
+    - `ff-service` 支持 `install/uninstall/start/stop/status` SCM 命令（需管理员）；
+      服务模式索引放 `%ProgramData%\Sift`；control handler 收 Stop/Shutdown 置停止旗标、
+      占位连接唤醒 accept、保存索引后上报 Stopped。
+    - 新依赖 `windows-service 0.8.1`（MIT/Apache-2.0，§2.1 清单内）与 windows 新增
+      `Win32_System_Pipes`/`Win32_Security*`/`Win32_System_RemoteDesktop` features，
+      已登记 DEPENDENCIES.md；windows-sys 0.61 与本地已有版本一致，无冲突。
+    - 验证：workspace fmt/clippy(-D warnings)/test 全绿；新增 4 项 SID/SDDL 单测 +
+      3 项真实 OS 管道端到端测试（往返、多客户端会话隔离、卷 ID 解析）通过；
+      `ff-service status/bogus` 命令路径实机冒烟通过。**未实测**：SCM 实际安装/启停
+      （需管理员、会改系统服务）、SYSTEM 权限下跨会话 ACL、服务崩溃重连、HTTP（未开始）。
