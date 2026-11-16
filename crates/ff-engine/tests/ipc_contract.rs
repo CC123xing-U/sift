@@ -60,6 +60,11 @@ fn all_commands_roundtrip_without_executing_actions() {
             index: 0,
             action: OpenAction::OpenFolder,
         },
+        Command::Open {
+            id: 5,
+            index: 0,
+            action: OpenAction::Properties,
+        },
     ] {
         let request = Message::new(1, command);
         let mut bytes = Vec::new();

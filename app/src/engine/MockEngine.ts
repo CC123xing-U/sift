@@ -193,7 +193,8 @@ export class MockEngine implements EngineClient {
         /* 非安全上下文或拒绝授权时静默忽略 */
       }
     }
-    // open / open_folder：浏览器原型无真实文件系统，留待 M3 接 Tauri。
+    // open / open_folder / properties：浏览器原型无真实文件系统与系统对话框，
+    // 由 Tauri 引擎接真实行为；这里静默 no-op（复制类动作已在上方处理）。
   }
 }
 

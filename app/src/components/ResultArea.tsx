@@ -59,11 +59,12 @@ type Panel = 'list' | 'scanning' | 'emptyQuery' | 'noResult' | 'searchingEmpty' 
 const MENU_ITEMS: { action: OpenAction; label: string; hint: string }[] = [
   { action: 'open', label: I18N.ctxOpen, hint: 'Enter' },
   { action: 'open_folder', label: I18N.ctxOpenFolder, hint: 'Ctrl+Enter' },
+  { action: 'properties', label: I18N.ctxProperties, hint: 'Alt+Enter' },
   { action: 'copy_path', label: I18N.ctxCopyPath, hint: 'Ctrl+C' },
   { action: 'copy_name', label: I18N.ctxCopyName, hint: '' },
 ];
 const MENU_W = 216;
-const MENU_H = 160;
+const MENU_H = 190;
 
 const PAGE = 15;
 // 滚动停止后才发 range 请求（UI_SPEC §6.5 / §10 待办 #2）。
@@ -420,7 +421,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
         >
           {MENU_ITEMS.map((it, k) => (
             <React.Fragment key={it.action}>
-              {k === 2 && <div className="ctxsep" role="separator" />}
+              {k === 3 && <div className="ctxsep" role="separator" />}
               <button
                 type="button"
                 role="menuitem"

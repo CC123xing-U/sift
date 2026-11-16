@@ -23,7 +23,8 @@ pub fn full_path(row: &ResultRow) -> String {
 /// 在 **UI 进程**以当前用户身份执行一个已解析的打开动作。
 ///
 /// - `CopyPath` / `CopyName`：写系统剪贴板；
-/// - `Open` / `OpenFolder`：`ShellExecuteW`（Windows）/ no-op（非 Windows，见 inprocess）。
+/// - `Open` / `OpenFolder`：`ShellExecuteW`（Windows）/ no-op（非 Windows，见 inprocess）；
+/// - `Properties`：系统文件属性对话框（`ShellExecuteW` 的 `properties` verb，M7）。
 ///
 /// 失败返回 `Err`，由前端 `onOpenError` 显示提示（P1-9）。
 pub fn execute_open(action: OpenAction, row: &ResultRow) -> Result<()> {
@@ -33,6 +34,7 @@ pub fn execute_open(action: OpenAction, row: &ResultRow) -> Result<()> {
         OpenAction::CopyName => super::inprocess::clipboard_set_text(&row.name),
         OpenAction::Open => super::inprocess::shell_open(&full, false),
         OpenAction::OpenFolder => super::inprocess::shell_open(&full, true),
+        OpenAction::Properties => super::inprocess::shell_properties(&full),
     }
 }
 
@@ -73,5 +75,16 @@ mod tests {
     #[test]
     fn execute_open_checked_rejects_empty_name() {
         assert!(execute_open_checked(OpenAction::Open, &row("", "")).is_err());
+        assert!(execute_open_checked(OpenAction::Properties, &row("", "")).is_err());
+    }
+
+    /// OpenAction 的 serde snake_case 名称是跨 IPC / Tauri 的线格式契约，
+    /// 属性动作必须是 `properties`（前端 `OpenAction` 联合类型依赖此拼写）。
+    #[test]
+    fn properties_action_wire_name_is_stable() {
+        let json = serde_json::to_string(&OpenAction::Properties).unwrap();
+        assert_eq!(json, "\"properties\"");
+        let back: OpenAction = serde_json::from_str("\"properties\"").unwrap();
+        assert_eq!(back, OpenAction::Properties);
     }
 }

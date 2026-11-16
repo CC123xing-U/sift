@@ -722,3 +722,29 @@
       token 401、错 Host 403、count=5000→400、合法→200（FILETIME 正确转 epoch ms
       1748579987314=2025-05-30）、带恶意 Origin 无 CORS 头、rate=3 并发 8 请求得
       3×200+4×429。测试后已卸载服务、删除 http.json 与落盘索引、删除探测程序。
+
+## #91（2026-11-16）：M7 第 1 项 —— 属性窗口（Alt+Enter）
+
+- **决定**：M7 从「属性窗口」单项开工；结果行 `Alt+Enter`（或右键菜单新增第 3 项「属性」）
+  调用 **Windows 系统文件属性对话框**，不自绘属性面板。UI_SPEC §325 的详情面板
+  （P2、本版省略）仍不启用，属性查看由系统对话框承担。
+- **链路**：复用现有 Open 动作同构路径，新增 `OpenAction::Properties`：
+  - `ff-engine/api.rs` 加枚举变体（serde snake_case 线格式 `"properties"`，
+    前端 `types.ts` 联合类型同步）；
+  - `inprocess.rs::open_impl` 加分支；服务模式经 `ResolvedAction` 回传，仍由 UI 进程
+    调用 `execute_open_checked` 执行（DESIGN §12，SYSTEM 不代人执行）；
+  - Tauri `open` 命令签名不变（serde 直接反序列化 `OpenAction`），前端 App.tsx 处理
+    `Alt+Enter`、ResultArea 右键菜单加项（第 2/3 项间分隔线顺延到第 3/4 项）。
+- **FFI 关键（真机踩坑）**：简单版 `ShellExecuteW("properties", path)` 在本机对
+  `C:\Windows\notepad.exe` 实测返回 **31**（`SE_ERR_NOASSOC` 量级），会被 shell_open
+  沿用的 `>32` 成功判定误报失败。改用 `ShellExecuteExW` + `SEE_MASK_INVOKEIDLIST`
+  （微软推荐的唯一可靠方式）：让 shell 从 item 的 PIDL 调用 `properties` verb，
+  对话框才真正弹出，返回 BOOL 作成功判据。自绘 `#[repr(C)] SHELLEXECUTEINFOW`
+  结构体，零新增依赖。`&` / `%` / 空格不经 `cmd`（沿用 P0-2 防注入口径）。
+- **验证**：新增 `properties_action_wire_name_is_stable`（线格式锁定）+ IPC 契约 roundtrip
+  加 Properties；workspace fmt/clippy(-D warnings)/test 全绿（ff-engine 47 + IPC 12）；
+  Tauri 门禁全绿；前端 build 50 modules + 29 格式断言通过。**真机**：一次性 example 以
+  当前用户身份调 `execute_open_checked(Properties)` → `PROPERTIES_OK`（对话框弹出，
+  随后关闭）；测试后删除探测程序，无残留窗口。
+- **M7 剩余 5 项**（对话框集成 / 内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）
+  仍逐项单独立项，不自动推进。

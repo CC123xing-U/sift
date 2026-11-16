@@ -391,6 +391,12 @@ export default function App() {
       e.preventDefault();
       return;
     }
+    // M7：Alt+Enter 打开系统文件属性对话框（DESIGN §11.1）。
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && e.key === 'Enter') {
+      resultRef.current?.open('properties');
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter') {
       // P1-4：若还有未触发的防抖，先立即 flush 出搜索；若搜索仍在进行
       // （requested），忽略本次打开，避免打开「输入框已是新查询、结果还是旧」

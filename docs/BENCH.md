@@ -494,3 +494,26 @@ C: 约剩 1GB、Rust TMP/TEMP/TMPDIR=`F:/Temp`。以下为真实命令回显，�
 - 测试后清理：卸载服务、删除 http.json 与 2 个 .ffix、删除一次性探测 example。
 
 **结论：M6 全部验收项通过，里程碑完成；不进入 M7。**
+
+## M7 第 1 项：属性窗口 Alt+Enter（#91，2026-11-16）
+
+环境：Windows（desktop-vtciagn，管理员会话），workspace debug 构建，TMP=`F:/Temp`。
+
+### FFI 选型踩坑（真机回显）
+- 初版用简单版 `ShellExecuteW("properties", path)` 调 `C:\Windows\notepad.exe`，
+  返回 **31**（`SE_ERR_NOASSOC` 量级），被现有 `>32` 成功判定误报失败：
+  `PROPERTIES_ERR: Internal("打开属性失败（ShellExecuteW 返回 31）：C:\Windows\notepad.exe")`。
+- 改用 `ShellExecuteExW` + `SEE_MASK_INVOKEIDLIST`（微软推荐方式）后：
+  `PROPERTIES_OK: properties verb 被系统接受（ret>32）`，系统文件属性对话框真实弹出，
+  随后关闭，无残留窗口。探测用一次性 example，验证后已删除。
+
+### 门禁
+- workspace fmt/clippy(-D warnings)/test 全绿：ff-engine 47（新增线格式测试
+  `properties_action_wire_name_is_stable`）+ IPC 契约 12（Properties roundtrip），
+  其余无回归。
+- Tauri fmt/clippy(-D warnings)/test/custom-protocol 全绿；
+  前端 build 50 modules + test:format 29 断言通过。
+- 全链路：`OpenAction::Properties`（serde `"properties"`）→ IPC ResolvedAction →
+  UI 进程 `execute_open_checked` → `ShellExecuteExW`；服务模式仍不代人执行（DESIGN §12）。
+
+**结论：M7 第 1 项「属性窗口」完成；M7 其余 5 项未立项。**

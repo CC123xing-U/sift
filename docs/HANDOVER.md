@@ -1,4 +1,4 @@
-# Sift 交接（2026-11-16，M6 已开始）
+# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1 项完成）
 
 ## 当前状态
 
@@ -12,7 +12,13 @@
   重启恢复、HTTP 五条安全要求均已真机验收（管理员会话），测试后已卸载服务并清理
   http.json / 索引 / 探测程序。当前 Tauri 启动优先探测服务管道、不可用回退 InProcess。
 - 新增 crate：`ff-ipc`（SID ACL 命名管道）、`ff-http`（本地 HTTP API，纯 std 手写，
-  默认关闭）、`ff-service`（SCM 外壳）。**不进入 M7，不自动改里程碑范围**。
+  默认关闭）、`ff-service`（SCM 外壳）。
+- **M7 第 1 项「属性窗口」已完成（DECISIONS #91）**：`Alt+Enter` / 右键菜单「属性」
+  经 `OpenAction::Properties` 全链路调 Windows 系统文件属性对话框。真机踩坑：简单版
+  `ShellExecuteW("properties")` 返回 31 被误判失败，改用 `ShellExecuteExW` +
+  `SEE_MASK_INVOKEIDLIST` 后对话框真实弹出并验证成功。详见 BENCH「M7 第 1 项」。
+- **M7 剩余 5 项（对话框集成 / 内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）
+  未立项，逐项单独立项，不自动推进**。
 
 ## 上一轮局部调整（2026-11-16，已随本轮提交）
 
@@ -111,17 +117,23 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - **已知限制**：重连后服务侧 `EngineSession` 为全新实例，旧搜索的 `request_id` 失效，
   用户需重新搜索（toast 提示已覆盖）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
 
-## 下一步顺序（M6 已完成，以下为后续可选方向，均未立项）
+## 下一步顺序（M0–M6 完成，M7 第 1 项完成；以下均未立项）
 
-1. M7 需单独立项：非 NTFS / 内容搜索、对话框集成、filelist 导入、硬链接多路径、属性窗口。
+1. M7 剩余 5 项逐项单独立项：对话框集成（`SetWinEventHook` + UI Automation）、内容搜索、
+   硬链接多路径、filelist 导入、非 NTFS 回退遍历。属性窗口已于第 1 项完成（#91）。
 2. 设置持久化、Shell 图标、列宽调整、Top-K 部分选择等既有欠账（见「保留约束与欠账」）。
 3. `ff-http` 目前只实现 `GET /search`；如需 `status`/`rescan` 等端点再单独扩展并重跑安全测试。
 4. UI 设置页的 HTTP 开关仍标「M6 提供 / 禁用」（UI_SPEC）；接入开关需先做设置持久化。
 
-（上述均不自动推进；里程碑边界见 DESIGN §13，M6 验收证据见 BENCH / DECISIONS #90。）
+（上述均不自动推进；里程碑边界见 DESIGN §13，M6 证据见 BENCH / #90，M7 属性窗口见 BENCH / #91。）
 
 ## 验证
 
+- **M7 第 1 项「属性窗口」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test 全绿
+  （ff-engine 47 + IPC 契约 12，新增 Properties 线格式与 roundtrip）；Tauri 门禁全绿；
+  前端 build 50 modules + 29 格式断言通过。真机 `ShellExecuteExW` + `INVOKEIDLIST`
+  对 `C:\Windows\notepad.exe` 弹出系统属性对话框并验证成功（简单版 `ShellExecuteW`
+  返回 31 的踩坑与修正见 BENCH / #91）；探测 example 已删、无残留窗口。
 - **M6 完成轮（最终，2026-11-16）**：根 workspace fmt/clippy(-D warnings)/test 全绿，
   **275 passed、5 ignored、0 failed**（ff-http 新增 23 单测 + 9 真实 TCP 端到端，覆盖
   错误 token/Host/count/速率、无 CORS、仅回环、会话隔离）；Tauri fmt/clippy(-D warnings)/

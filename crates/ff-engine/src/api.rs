@@ -164,6 +164,9 @@ pub enum OpenAction {
     CopyPath,
     /// 复制文件名（不含目录）；供右键菜单使用。
     CopyName,
+    /// 打开系统文件属性对话框（M7；Windows `ShellExecuteW` 的 `properties` verb）。
+    /// 由 UI 进程以当前用户身份执行，服务模式同 Open（DESIGN §12）。
+    Properties,
 }
 
 /// 引擎错误。

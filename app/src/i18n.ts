@@ -33,6 +33,7 @@ export const I18N = {
   ctxOpenFolder: '打开所在文件夹',
   ctxCopyPath: '复制完整路径',
   ctxCopyName: '复制文件名',
+  ctxProperties: '属性',
   ctxMenuLabel: '结果操作菜单',
   ctxHint: '右键查看更多操作',
   copiedPath: '已复制完整路径',

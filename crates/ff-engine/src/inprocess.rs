@@ -551,6 +551,7 @@ impl EngineInner {
             OpenAction::CopyName => clipboard_set_text(file_name_from_full(&full)),
             OpenAction::Open => shell_open(&full, false),
             OpenAction::OpenFolder => shell_open(&full, true),
+            OpenAction::Properties => shell_properties(&full),
         }
     }
 
@@ -1469,6 +1470,92 @@ pub(crate) fn shell_open(path: &str, folder: bool) -> Result<()> {
             "打开失败（ShellExecuteW 返回 {ret}）：{path}"
         )))
     }
+}
+
+/// `SHELLEXECUTEINFOW`（Win32，`repr(C)` 字段顺序/对齐与 SDK 一致）。
+/// 只需声明到 `hProcess`；`hIcon`/`hMonitor` 是 union，两者都是指针大小。
+#[cfg(windows)]
+#[repr(C)]
+struct ShellExecuteInfoW {
+    cb_size: u32,
+    f_mask: u32,
+    hwnd: *mut std::ffi::c_void,
+    lp_verb: *const u16,
+    lp_file: *const u16,
+    lp_parameters: *const u16,
+    lp_directory: *const u16,
+    n_show: i32,
+    h_inst_app: *mut std::ffi::c_void,
+    lp_id_list: *mut std::ffi::c_void,
+    lp_class: *const u16,
+    h_key_class: *mut std::ffi::c_void,
+    dw_hot_key: u32,
+    h_icon_or_monitor: *mut std::ffi::c_void,
+    h_process: *mut std::ffi::c_void,
+}
+
+/// 打开 Windows 系统文件属性对话框（M7，DESIGN §11.1 `Alt+Enter`）。
+///
+/// 用 `ShellExecuteExW` + `SEE_MASK_INVOKEIDLIST`（微软文档推荐的唯一可靠方式）：
+/// - 简单版 `ShellExecuteW("properties", ...)` 在本机实测返回 31（`SE_ERR_NOASSOC`
+///   量级）被 `>32` 判定误报失败，故不用；`INVOKEIDLIST` 让 shell 从 PIDL 调用
+///   `properties` verb，对话框才会真正弹出；
+/// - 不经 `cmd`，路径含 `&` / `%` / 空格不被解释（防注入）；
+/// - 由 UI 进程以当前用户身份执行（DESIGN §12），服务模式走 `ResolvedAction` 回传后
+///   由 `ff_engine::execute_open_checked` 调用本函数。
+#[cfg(windows)]
+pub(crate) fn shell_properties(path: &str) -> Result<()> {
+    use std::ptr::{null, null_mut};
+
+    const SEE_MASK_INVOKEIDLIST: u32 = 0x0000_000c;
+    const SW_SHOWNORMAL: i32 = 1;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+    }
+
+    let file_w = path
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect::<Vec<u16>>();
+    let verb_w = "properties"
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect::<Vec<u16>>();
+    let mut info = ShellExecuteInfoW {
+        cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+        f_mask: SEE_MASK_INVOKEIDLIST,
+        hwnd: null_mut(),
+        lp_verb: verb_w.as_ptr(),
+        lp_file: file_w.as_ptr(),
+        lp_parameters: null::<u16>(),
+        lp_directory: null::<u16>(),
+        n_show: SW_SHOWNORMAL,
+        h_inst_app: null_mut(),
+        lp_id_list: null_mut(),
+        lp_class: null::<u16>(),
+        h_key_class: null_mut(),
+        dw_hot_key: 0,
+        h_icon_or_monitor: null_mut(),
+        h_process: null_mut(),
+    };
+    // SAFETY：info 与宽串指针在调用期间有效；ShellExecuteExW 同步读取 info 并弹出
+    // 属性对话框（由 shell 进程持有），不读取调用方栈上宽串的长期所有权。
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(EngineError::Internal(format!(
+            "打开属性失败（ShellExecuteExW 失败）：{path}"
+        )))
+    }
+}
+
+/// 非 Windows：属性对话框由 UI 层处理；保持跨平台可编译，不实际启动进程。
+#[cfg(not(windows))]
+pub(crate) fn shell_properties(_path: &str) -> Result<()> {
+    Ok(())
 }
 
 /// 非 Windows：真实打开由 UI 层处理；本实现保持跨平台可编译，不实际启动进程。
