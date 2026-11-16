@@ -676,6 +676,12 @@ body {
   text-overflow: ellipsis;
 }
 .status-left { min-width: 0; flex: 1; }
+/* M7 内容搜索统计（DECISIONS #95）：常态信息，弱化显示，完整文本走 title。 */
+.status-note {
+  margin-left: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
 .status-toast {
   position: absolute;
   bottom: 40px;

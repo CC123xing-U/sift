@@ -37,11 +37,36 @@ export interface ParseError {
   span: { start: number; end: number };
 }
 
+/**
+ * `content:` 内容搜索统计（M7，DECISIONS #95）。
+ *
+ * 引擎只在查询含 `content:` 时返回；UI 用它说明「读了多少文件、跳过了多少」，
+ * 避免把「结果少」误读成「没有匹配」。
+ */
+export interface ContentReport {
+  /** 生效的 content 条件数（多个 = AND）。 */
+  terms: number;
+  /** 名字条件给出的候选文件数。 */
+  candidates: number;
+  scanned: number;
+  matched: number;
+  /** 超过单文件上限（32 MiB）跳过。 */
+  skipped_large: number;
+  /** 含 NUL 判定二进制跳过。 */
+  skipped_binary: number;
+  unreadable: number;
+  skipped_dir: number;
+  /** 候选超过上限（5000），结果不完整。 */
+  truncated: boolean;
+}
+
 export interface SearchSummary {
   id: number;
   total: number;
   elapsed_ms: number;
   parse_error: ParseError | null;
+  /** 无 `content:` 条件时为 null。 */
+  content?: ContentReport | null;
 }
 
 /** 名字内命中区间：[start, end) 字符索引，供前端 <mark> 高亮。 */

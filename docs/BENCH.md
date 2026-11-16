@@ -599,7 +599,7 @@ filelist 导入）未立项。**
   卷 D: 10 条（其中按路径补齐的目录 5）
 索引就绪: 10 条 / 构建 0.001 s
 查询 "import": 命中 1 条 / 搜索耗时 2 ms
-     0  [F]         0 B  D:\Sift\crates\ff-core\src	import.rs
+     0  [F]         0 B  D:\Sift\crates\ff-core\src\timport.rs
 ```
 `ff-cli import <同文件>`（不给查询，默认 `*`）：`命中 10 条`，前 4 条为
 `[D] D:\ .` / `[D] D:\ Sift` / `[F] D:\Sift README.md` / `[D] D:\Sift docs`，
@@ -611,7 +611,7 @@ filelist 导入）未立项。**
 解析 F:/Temp/import_demo.csv：格式 CSV / 有效行 2 / 跳过 0
   卷 D: 5 条（其中按路径补齐的目录 2）
 查询 "weird": 命中 1 条 / 搜索耗时 1 ms
-     0  [F]         7 B  D:\Sift\docs	we,ird name.txt
+     0  [F]         7 B  D:\Sift\docs\twe,ird name.txt
 ```
 `we,ird name.txt` 未被逗号拆列（双引号处理正确）；`Size=7` 生效；
 `Date Modified 2026-11-16 22:03:01` 解析为 FILETIME（`120.6 KB` 那条）。
@@ -628,3 +628,80 @@ filelist 导入）未立项。**
 - 无新增依赖：`Cargo.toml` / `Cargo.lock` 未变（纯 std + 现有 `IndexBuilder`）。
 
 **结论：M7 第 4 项「filelist 导入」完成；M7 剩余 2 项（内容搜索 / 硬链接多路径）未立项。**
+
+## M7 第 5 项：内容搜索 content:（#95，2026-11-16）
+
+环境：Windows（desktop-vtciagn，管理员会话），`ff-cli`（release，除非注明），
+卷 `D:` NTFS 268,669 条。内容搜索要读真实文件，因此全部用**磁盘上真存在的文件**验收。
+
+### 小样本（`import` 建的 10 条索引，debug 构建）
+临时目录 `D:\Sift\target\verify-content\docs`：`report.txt`（含 `SECRET-7788`）、
+`public.txt`（不含）、`invoice.md`（含）、`blob.bin`（`\x00\x01SECRET-7788`，二进制）、
+`huge.txt`（34 MiB，needle 在开头）。
+
+| 查询 | 候选 | 扫描 | 命中 | 跳过 | 耗时 |
+|---|---|---|---|---|---|
+| `*.txt content:SECRET-7788` | 2 | 2 | 1 | — | 2 ms |
+| `* content:SECRET-7788` | 4 | 3 | 2 | 1 个二进制 | 3 ms |
+| `case: *.txt content:secret-7788` | 2 | 2 | 0 | — | 2 ms |
+| `huge content:SECRET-7788` | 1 | 0 | 0 | 1 个过大 | 2 ms |
+| `* content:SECRET-7788`（含 huge） | 5 | 3 | 2 | 1 过大 + 1 二进制 | 3 ms |
+
+命令行原样：
+```
+查询 "*.txt content:SECRET-7788": 命中 1 条 / 搜索耗时 2 ms
+内容搜索：候选 2 个 / 扫描 2 个，命中 1
+     0  [F]         0 B  D:\Sift\target\verify-content\docs   report.txt
+
+查询 "huge content:SECRET-7788": 命中 0 条 / 搜索耗时 2 ms
+内容搜索：候选 1 个 / 扫描 0 个，命中 0；跳过 1 个过大
+```
+34 MiB 文件**一律跳过**（按 `File::metadata().len()` 判），即使 needle 在开头——
+初版「读到 32 MiB 为止」会让「needle 在开头的大文件命中、在尾部的 miss」，
+同一类文件两种结论，已改掉（DECISIONS #95）。
+
+### 语法约束（解析期，带位置）
+```
+查询 "content:SECRET-7788" → 失败: 查询语法错误: content: 需要同时给出文件名或路径条件
+（会读文件内容，例如 *.txt content:foo） (位置 8..19)
+```
+
+### 真卷 `D:`（268,669 条，release 构建）
+| 查询 | 候选 | 扫描 | 命中 | 跳过二进制 | 搜索耗时 |
+|---|---|---|---|---|---|
+| `*.log content:error` | 138 | 80 | 27 | 58 | 101 ms |
+| `*.log size:<1mb content:error` | 136 | 79 | 27 | 57 | 102 ms |
+| `*.log content:zzz-not-there-9988` | 138 | 80 | 0 | 58 | 92 ms |
+
+- 建索引 1.8–2.2 s（MFT 全扫），内容过滤本身 ~100 ms；对照 M5 的纯名字查询（2–4 ms）
+  高两个数量级——这正是「必须由名字条件先压候选」的原因。
+- `size:<1mb` 把候选从 138 压到 136（2 个超 1 MB 的 log 在打开前就被排除），
+  说明属性过滤与内容过滤串联正确。
+- 58 个二进制 `.log` 被跳过：Chrome / Electron 的 `debug.log` 里有 NUL 段。
+- 兜底解码：候选 138 里 80 可读 + 58 二进制 = 138，无遗漏候选。
+
+### 门禁
+- workspace fmt / clippy `-D warnings` / test 全绿：**323 passed、0 failed**
+  （ff-core +11：`Matcher` 跨块边界 / 大小写两种 / 二进制 / CJK / 保序与跳过统计 /
+  候选截断 / 读取量预算 / 体积预判与取消 / 流式上限 / 报告文案；query +2：短语与裸写、
+  三种拒绝；ff-engine +4：真文件过滤 / 二进制与目录跳过 / 无 content 时无统计 /
+  大小写与短语）。
+- Tauri fmt / clippy / test 绿；前端 `npm run build` 50 modules + `test:format`
+  **32 断言**绿（29 + 3 条 `I18N.contentNote` 文案断言）。
+- 零新增依赖：`Cargo.toml` / `Cargo.lock` 未变。
+
+### GUI 真机（`npm run tauri dev`，debug 构建，1280×720 @2x）
+
+全盘索引（C/D/E/F）下输入 `*.log content:error` 回车：
+
+- 搜索中：列表区空态 + spinner「搜索中…」，窗口可交互（**修复前**同步命令占住
+  IPC 线程，Windows 把标题改成「Sift（未响应）」，见 DECISIONS #95）。
+- 完成后状态栏：`找到 190 个结果 · 4519 ms` + 次要色
+  `内容搜索：扫描 490 个文件 · 跳过 120 个二进制`（+ `候选或读取量达上限` 在长文案里
+  被 CSS 省略，`title` 有全文）；右侧 `索引就绪`。
+- 列表首行 `F:\openlex-check.log` 9 KB / `F:\openlex-build.log` 8 KB …，
+  命中文件确实是含 `error` 字样的日志（人工抽查内容一致）。
+- 4.5 s 是 **debug** 构建 + 490 个真实日志文件（含 120 个二进制跳过）+ 冷缓存
+  的代价；同量级查询在 release 的 CLI 上是百毫秒级（上表 101 ms / 候选 138）。
+
+**结论：M7 第 5 项「内容搜索」完成；M7 剩余 1 项（硬链接多路径）未立项。**

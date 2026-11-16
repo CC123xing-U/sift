@@ -30,6 +30,11 @@ search 选项:
 
 查询语法（M1 子集）: 空格分隔的词取 AND；"..." 为短语（可含空格）；均按名字子串匹配。
 
+内容搜索（M7）: 文件名条件 + `content:<词>` 或 `content:"<短语>"`，例如
+  ff-cli search C: "<某个文件名条件> content:季度报告"
+  只对候选文件读内容（单文件上限 32 MiB、一次最多 5000 个候选），
+  二进制（含 NUL）与超大文件会跳过并在统计里报告。
+
 卷的写法: C:  |  \\.\C:  |  \\?\Volume{...}
 默认子串: ntdll（搜索不区分大小写）
 "#;
@@ -368,6 +373,11 @@ fn run_search_windows(args: &SearchArgs) -> Result<(), String> {
         "查询 {:?}: 命中 {} 条 / 搜索耗时 {} ms",
         args.query, summary.total, summary.elapsed_ms
     );
+    // M7 内容搜索：把「读了多少文件 / 跳过了多少」如实打出来，避免用户
+    // 把「结果少」误认为「没有匹配」。
+    if let Some(rep) = &summary.content {
+        println!("{rep}");
+    }
     if summary.total == 0 {
         return Ok(());
     }
@@ -483,6 +493,9 @@ fn run_import(args: &[String]) -> Result<(), String> {
         "查询 {:?}: 命中 {} 条 / 搜索耗时 {} ms",
         parsed.query, summary.total, summary.elapsed_ms
     );
+    if let Some(rep) = &summary.content {
+        println!("{rep}");
+    }
     if summary.total == 0 {
         return Ok(());
     }

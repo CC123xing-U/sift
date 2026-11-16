@@ -290,6 +290,7 @@ impl EngineInner {
                     total: 0,
                     elapsed_ms: start.elapsed().as_millis() as u32,
                     parse_error: Some(e),
+                    content: None,
                 });
             }
         };
@@ -314,6 +315,8 @@ impl EngineInner {
         let hide_hidden = req.opts.hide_hidden;
         // 三元组：所属卷 + 命中来源 + M5 评分（SortKey::Score 的排序键）。
         let mut hits: Vec<(VolumeId, Hit, f64)> = Vec::new();
+        // M7：`content:` 的统计（无内容条件时为 None）。
+        let mut content_report: Option<ff_core::ContentReport> = None;
         {
             let vols = self.volumes.read().unwrap();
             for (vid, vd) in vols.iter() {
@@ -400,6 +403,27 @@ impl EngineInner {
                     }
                 }
             }
+            // M7 内容搜索（DECISIONS #95）：`content:` 不进 AST，名字条件先出
+            // 候选集，这里在候选上串行读文件过滤。放在排序前、截断前：
+            // 先过滤再 sort，保序且不会让 max_hits 把本该命中的行截掉。
+            if !query.content.is_empty() {
+                let idx: Vec<EntryId> = (0..hits.len() as EntryId).collect();
+                let filter = ff_core::ContentFilter::new(&query.content, &FsContentSource);
+                let (keep, rep) = filter.filter(
+                    &idx,
+                    |i| content_path(&vols, &hits, i),
+                    |i| content_size(&vols, &hits, i),
+                    &token,
+                );
+                let mut kept = Vec::with_capacity(keep.len());
+                for i in keep {
+                    if let Some(h) = hits.get(i as usize) {
+                        kept.push(h.clone());
+                    }
+                }
+                hits = kept;
+                content_report = Some(rep);
+            }
             // 排序（M5：Score 用真实评分，其他列用真值；见 `sort_hits`）
             sort_hits(&mut hits, &vols, &req.sort);
         }
@@ -430,6 +454,7 @@ impl EngineInner {
             total,
             elapsed_ms: start.elapsed().as_millis() as u32,
             parse_error: None,
+            content: content_report,
         })
     }
 
@@ -1371,6 +1396,84 @@ fn overlay_full_path(index: &VolumeIndex, overlay: &Overlay, oe: &OverlayEntry) 
     format!("{}{}", prefix, names.join("\\"))
 }
 
+/// `std::fs` 版内容源（M7 / DECISIONS #95）：打开 → 分块读 → 折叠比对。
+///
+/// 无状态，可被任意线程复用；失败一律降级为 [`ff_core::ContentScan`] 里的
+/// `Unreadable`（权限 / 占用 / 路径失效），不向调用方抛错——内容搜索里
+/// 「某个文件读不了」是常态，不该让整次搜索失败。
+struct FsContentSource;
+
+impl ff_core::ContentSource for FsContentSource {
+    fn scan(&self, path: &str, spec: &ff_core::ContentSpec) -> ff_core::ContentScan {
+        let mut f = match std::fs::File::open(io_path(path)) {
+            Ok(f) => f,
+            Err(_) => return ff_core::ContentScan::Unreadable,
+        };
+        // 先按真实大小判限（索引里的 size 可能过期，import 的条目干脆是 0）。
+        // 一致地「超限一律跳过」而不是「读到 32 MiB 为止」：否则 needle 恰好在
+        // 开头的大文件会命中、在尾部的不会命中，同一类文件两种结论。
+        if let Ok(md) = f.metadata() {
+            if md.len() > ff_core::MAX_FILE_BYTES {
+                return ff_core::ContentScan::TooLarge;
+            }
+        }
+        ff_core::content::scan_stream(&mut f, spec, ff_core::MAX_FILE_BYTES)
+    }
+}
+
+/// 给 IO 路径加 `\\?\` 前缀，绕开 `MAX_PATH`(260)（与 `ff-ntfs::walk` 同口径）。
+fn io_path(logical: &str) -> String {
+    if logical.starts_with(r"\\?\") {
+        logical.to_string()
+    } else if let Some(rest) = logical.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{rest}")
+    } else {
+        format!(r"\\?\{logical}")
+    }
+}
+
+/// 命中条目的完整路径（目录 / 无路径 → `None`，内容搜索只对文件生效）。
+fn content_path(
+    vols: &HashMap<VolumeId, VolumeData>,
+    hits: &[(VolumeId, Hit, f64)],
+    i: EntryId,
+) -> Option<String> {
+    let (vid, hit, _) = hits.get(i as usize)?;
+    let vd = vols.get(vid)?;
+    match hit {
+        Hit::Base(eid) => {
+            let f = vd.index.flags.get(*eid as usize).copied().unwrap_or(0);
+            if f & flags::IS_DIR != 0 {
+                None
+            } else {
+                vd.index.path_string(*eid)
+            }
+        }
+        Hit::Overlay(frn) => {
+            let oe = vd.overlay.added_or_changed.get(frn)?;
+            if oe.is_dir {
+                None
+            } else {
+                Some(overlay_full_path(&vd.index, &vd.overlay, oe))
+            }
+        }
+    }
+}
+
+/// 命中条目的字节数（用于读文件前的大小预判）。
+fn content_size(
+    vols: &HashMap<VolumeId, VolumeData>,
+    hits: &[(VolumeId, Hit, f64)],
+    i: EntryId,
+) -> Option<u64> {
+    let (vid, hit, _) = hits.get(i as usize)?;
+    let vd = vols.get(vid)?;
+    match hit {
+        Hit::Base(eid) => vd.index.size.get(*eid as usize).copied(),
+        Hit::Overlay(frn) => vd.overlay.added_or_changed.get(frn).map(|oe| oe.size),
+    }
+}
+
 /// 卷路径前缀（`C:\` / GUID 路径 / 退化 `\`）。
 fn drive_prefix(index: &VolumeIndex) -> String {
     if let Some(c) = index.volume.drive {
@@ -1883,6 +1986,129 @@ mod tests {
         let sum = e.search(r).unwrap();
         let rows = e.range(sum.id, 0, 20).unwrap();
         assert_eq!(rows[0].name, "report-final.txt");
+    }
+
+    // ───────────────── M7：内容搜索 content:（DECISIONS #95） ─────────────────
+
+    /// 临时目录（Drop 时删；只用于内容搜索的真文件验收）。
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(tag: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!(
+            "sift-content-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).expect("建临时目录");
+        TempDir(dir)
+    }
+
+    /// 以临时目录为「卷根」的引擎：`guid_path` 直接指绝对路径，
+    /// `path_string` 拼出来的路径就是真实可打开的文件路径。
+    fn content_engine(root: &Path) -> InProcessEngine {
+        let info = VolumeInfo {
+            drive: None,
+            guid_path: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut b = IndexBuilder::new(info);
+        b.push(dir(5, 0, ".", 0, 1));
+        b.push(dir(100, 5, "docs", 0, 1));
+        b.push(file(101, 100, "alpha.txt", 26, 200));
+        b.push(file(102, 100, "beta.txt", 12, 200));
+        b.push(file(103, 100, "blob.bin", 14, 200));
+        // 索引里有、磁盘上没有 → Unreadable
+        b.push(file(104, 100, "ghost.txt", 10, 200));
+        let e = InProcessEngine::empty();
+        e.add_volume(
+            VolumeId {
+                serial: 7,
+                drive: None,
+            },
+            b.finish(),
+        );
+        e
+    }
+
+    fn write_content_fixtures(tmp: &TempDir) {
+        let docs = tmp.0.join("docs");
+        std::fs::write(docs.join("alpha.txt"), "2024 逾期未付款项 SECRET-TOKEN").unwrap();
+        std::fs::write(docs.join("beta.txt"), "无关内容").unwrap();
+        std::fs::write(docs.join("blob.bin"), b"\x00\x01SECRET-TOKEN").unwrap();
+    }
+
+    #[test]
+    fn content_search_filters_by_file_body() {
+        let tmp = temp_dir("body");
+        write_content_fixtures(&tmp);
+        let e = content_engine(&tmp.0);
+
+        let sum = e.search(req("*.txt content:SECRET-TOKEN")).unwrap();
+        assert!(sum.parse_error.is_none());
+        assert_eq!(sum.total, 1);
+        let rows = e.range(sum.id, 0, 10).unwrap();
+        assert_eq!(rows[0].name, "alpha.txt");
+        let rep = sum.content.expect("内容条件应有统计");
+        assert_eq!(rep.terms, 1);
+        assert_eq!(rep.candidates, 3, "三份 .txt 进候选");
+        assert_eq!(rep.scanned, 2, "alpha / beta 被真读");
+        assert_eq!(rep.matched, 1);
+        assert_eq!(rep.unreadable, 1, "ghost.txt 打不开");
+        assert!(!rep.truncated);
+    }
+
+    #[test]
+    fn content_search_skips_binary_and_dirs() {
+        let tmp = temp_dir("bin");
+        write_content_fixtures(&tmp);
+        let e = content_engine(&tmp.0);
+        // 通配所有条目：目录被跳过、含 NUL 的文件判为二进制
+        let sum = e.search(req("* content:SECRET-TOKEN")).unwrap();
+        assert_eq!(sum.total, 1);
+        let rep = sum.content.expect("内容条件应有统计");
+        assert!(rep.skipped_binary >= 1, "blob.bin 应判二进制");
+        assert!(rep.skipped_dir >= 1, "卷根 / docs 应跳过");
+        assert!(rep.incomplete());
+    }
+
+    #[test]
+    fn content_search_absent_without_content_term() {
+        let tmp = temp_dir("none");
+        write_content_fixtures(&tmp);
+        let e = content_engine(&tmp.0);
+        let sum = e.search(req("*.txt")).unwrap();
+        assert!(sum.content.is_none(), "无 content 条件不应有统计");
+        assert_eq!(sum.total, 3);
+    }
+
+    #[test]
+    fn content_search_case_sensitivity_and_phrase() {
+        let tmp = temp_dir("case");
+        std::fs::write(tmp.0.join("docs").join("alpha.txt"), "Hello World").unwrap();
+        std::fs::write(tmp.0.join("docs").join("beta.txt"), "hello world").unwrap();
+        let e = content_engine(&tmp.0);
+        // 默认不区分大小写 → alpha / beta 都命中（ghost.txt 打不开，不计命中）
+        assert_eq!(e.search(req("*.txt content:hello")).unwrap().total, 2);
+        // case: 前置 → 只命中全小写的 beta
+        let sum = e.search(req("case: *.txt content:hello")).unwrap();
+        assert_eq!(sum.total, 1);
+        let rows = e.range(sum.id, 0, 10).unwrap();
+        assert_eq!(rows[0].name, "beta.txt");
+        // 短语形式（含空格）
+        assert_eq!(
+            e.search(req(r#"*.txt content:"Hello World""#))
+                .unwrap()
+                .total,
+            2
+        );
     }
 
     #[test]

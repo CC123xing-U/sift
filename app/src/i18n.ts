@@ -19,6 +19,24 @@ export const I18N = {
   parseError: (pos: number) => `第 ${pos + 1} 位：语法错误，请检查查询`,
   // 引擎带回具体原因时优先展示原因（如"修饰符语法尚未支持"），而不是泛泛的"语法错误"。
   parseErrorWith: (pos: number, message: string) => `第 ${pos + 1} 位：${message}`,
+  // M7 内容搜索（DECISIONS #95）：说清「读了多少、跳过了多少」，
+  // 用户才不会把 content: 的少结果当成「没有匹配」。
+  contentNote: (r: {
+    scanned: number;
+    skipped_large: number;
+    skipped_binary: number;
+    unreadable: number;
+    truncated: boolean;
+  }) => {
+    const parts = [`内容搜索：扫描 ${r.scanned} 个文件`];
+    const skipped: string[] = [];
+    if (r.skipped_large > 0) skipped.push(`${r.skipped_large} 个过大`);
+    if (r.skipped_binary > 0) skipped.push(`${r.skipped_binary} 个二进制`);
+    if (r.unreadable > 0) skipped.push(`${r.unreadable} 个读取失败`);
+    if (skipped.length > 0) parts.push(`跳过 ${skipped.join('、')}`);
+    if (r.truncated) parts.push('候选或读取量达上限，结果可能不完整');
+    return parts.join(' · ');
+  },
   indexError: (err: string) => `索引出错：${err}`,
   // P1-3：仍有可搜卷时，只提示具体失败的那一卷（而非占满全局错误面板）。
   volumeError: (vol: string, msg: string) => `${vol} 索引失败：${msg}`,

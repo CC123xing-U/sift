@@ -64,6 +64,9 @@ export default function StatusBar({ summary, requested, query, status, toast, hi
   // 渲染与播报分离：可见节点被 aria-hidden，播报节点只念"找到 N 个结果"（不含耗时）。
   const announce =
     !requested && summary && query.trim() !== '' ? I18N.foundA11y(summary.total) : '';
+  // M7：内容搜索统计（只有查询含 content: 时引擎才回传）。
+  const contentNote =
+    !requested && summary?.content ? I18N.contentNote(summary.content) : '';
 
   return (
     <div className="statusbar">
@@ -71,6 +74,11 @@ export default function StatusBar({ summary, requested, query, status, toast, hi
         <span className="mono" aria-hidden="true">
           {left}
         </span>
+        {contentNote && (
+          <span className="status-note" title={contentNote}>
+            {contentNote}
+          </span>
+        )}
         <span className="sr-only" aria-live="polite">
           {announce}
         </span>

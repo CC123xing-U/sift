@@ -275,11 +275,23 @@ M0–M6 只支持本地 NTFS。**M7 第 3 项已落地目录遍历回退**（DEC
 | 阶段 | 内容 |
 |---|---|
 | M4 必做 | `case:` `nocase:` `file:` `folder:` `ext:a;b` `path:` `regex:` `wholeword:`（`ww:`）`startwith:` `endwith:` `size:` `dm:` `dc:` `da:` `parent:` `infolder:` `depth:` `attrib:` |
-| M7 再说 | `content:` 族、`dupe:`、`runcount:`、`len:` 等 |
+| M7 已做 | `content:`（第 5 项，DECISIONS #95） |
+| M7 再说 | `dupe:`、`runcount:`、`len:` 等 |
 
 - `size:`：比较符 `> >= < <= =`，范围 `a..b`，单位 `b kb mb gb tb pb`（1024 进制），例：`size:>10mb`、`size:1kb..1mb`。
 - 日期：`dm:today`、`dm:yesterday`、`dm:2024-01-01`、`dm:2024-01-01..2024-06-30`、`dm:last7days`；统一按本地时区解释。
 - `regex:` 使用 `regex` crate（先用 `regex` 默认，不引入 `fancy-regex`），按条目名（或带 `path:` 时按路径）匹配。
+- `content:`（**M7 第 5 项已实现**，DECISIONS #95）：`content:<词>` 或
+  `content:"<短语>"`，对**文件原始字节**做简单小写折叠后的子串匹配（不做编码嗅探，
+  UTF-16 / GBK 文本按原始字节比对）；多个 `content:` 之间是 AND。
+  - **必须有名字级条件**（`*.txt content:foo`），否则等于读整卷；
+    `!content:` 与 `a|b content:x` 也在解析期拒绝并给出位置。
+  - 硬上限：单文件 32 MiB、一次最多 5000 个候选、读取总量 256 MiB；超限**跳过并统计**，
+    随 `SearchSummary.content` 回传 UI（「跳过 N 个过大 / 二进制 / 读取失败」）。
+  - 二进制（块内含 NUL）跳过；目录条目不参与；命中即停（不读完整个文件）。
+  - 实现分层：`ff-core/src/content.rs`（`Matcher` / `ContentFilter` / `ContentSource`
+    trait，纯逻辑 + 可单测）与 `ff-engine` 里的 `FsContentSource`（`std::fs`）。
+    候选过滤**串行**执行（磁盘 IO 并行是负优化），每个候选之间检查取消令牌。
 
 ### 7.3 解析与求值
 
@@ -603,8 +615,8 @@ pub trait EngineClient: Send + Sync {
   已卸载服务并清理索引/配置/探测程序。**不进入 M7，不自动改里程碑范围**。
 
 ### M7 进阶（逐项单独立项）
-内容搜索 · 硬链接多路径。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2；**属性窗口** M7 第 1 项完成，见 #91；**对话框集成** M7 第 2 项完成，见 #92；**非 NTFS 回退遍历** M7 第 3 项完成，见 #93 与 §5.4；**filelist 导入** M7 第 4 项完成，见 #94，均不再列在 M7 待办。）
-- **当前进度（2026-11-16）**：M7 逐项立项，第 1 项「属性窗口」（#91）、第 2 项「对话框集成」（#92）、第 3 项「非 NTFS 回退遍历」（#93）、第 4 项「filelist 导入」（#94）完成。第 3 项用 `AutoVolumeScanner` 按文件系统分派，非 NTFS 卷走 `std::fs::read_dir` 手写目录遍历（零新增依赖）、无增量则由引擎 30s 定期重走；真机用挂载的 exFAT VHD 验收。第 4 项在 `ff-core/src/import.rs` 解析纯路径列表 / Everything 风格 CSV，按盘符分卷、补齐中间目录，入口为 `ff-cli import`（UI 入口与持久化留在打磨阶段）。其余 2 项仍未开始，不自动推进。
+硬链接多路径。（原定义含「内容搜索 · 硬链接多路径」两项，内容搜索已作为第 5 项完成，见 #95 与 §7.2。**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2；**属性窗口** M7 第 1 项完成，见 #91；**对话框集成** M7 第 2 项完成，见 #92；**非 NTFS 回退遍历** M7 第 3 项完成，见 #93 与 §5.4；**filelist 导入** M7 第 4 项完成，见 #94；**内容搜索** M7 第 5 项完成，见 #95 与 §7.2，均不再列在 M7 待办。）
+- **当前进度（2026-11-16）**：M7 逐项立项，第 1 项「属性窗口」（#91）、第 2 项「对话框集成」（#92）、第 3 项「非 NTFS 回退遍历」（#93）、第 4 项「filelist 导入」（#94）、第 5 项「内容搜索」（#95）完成。第 3 项用 `AutoVolumeScanner` 按文件系统分派，非 NTFS 卷走 `std::fs::read_dir` 手写目录遍历（零新增依赖）、无增量则由引擎 30s 定期重走；真机用挂载的 exFAT VHD 验收。第 4 项在 `ff-core/src/import.rs` 解析纯路径列表 / Everything 风格 CSV，按盘符分卷、补齐中间目录，入口为 `ff-cli import`（UI 入口与持久化留在打磨阶段）。第 5 项在 `ff-core/src/content.rs` + `ff-engine` 的 `FsContentSource` 落地 `content:`：解析期拒绝「无名字条件 / 取反 / OR 分组」三种昂贵写法，单文件 32 MiB、一次 5000 候选的硬上限，跳过项统计随 `SearchSummary.content` 回传；真机在 268,669 条的真实卷上 `*.log content:error` 候选 138 / 扫 80 / 命中 27 / 101 ms（release）。**剩余 1 项「硬链接多路径」仍未开始**，不自动推进。
 
 ---
 

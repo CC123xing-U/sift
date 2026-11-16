@@ -72,4 +72,51 @@ eq(
 eq(f.formatTime(0).length > 0, true, 'epoch 0 仍可显示');
 eq(f.formatHHMM(0), f.formatHHMM(0), 'epoch 0 幂等');
 
+// ── M7 第 5 项：内容搜索状态栏文案（DECISIONS #95）─────────────────────
+// i18n.ts 无依赖，同样用 transpileModule 转成 ESM 后直接断言。
+const i18nSrc = fs.readFileSync(path.join(root, 'src/i18n.ts'), 'utf8');
+const { outputText: i18nOut } = ts.transpileModule(i18nSrc, {
+  compilerOptions: {
+    module: ts.ModuleKind.ESNext,
+    target: ts.ScriptTarget.ES2022,
+  },
+});
+const { I18N } = await import(
+  'data:text/javascript;base64,' + Buffer.from(i18nOut).toString('base64')
+);
+
+eq(
+  I18N.contentNote({
+    scanned: 12,
+    skipped_large: 0,
+    skipped_binary: 0,
+    unreadable: 0,
+    truncated: false,
+  }),
+  '内容搜索：扫描 12 个文件',
+  'contentNote 仅有扫描数',
+);
+eq(
+  I18N.contentNote({
+    scanned: 8,
+    skipped_large: 2,
+    skipped_binary: 1,
+    unreadable: 3,
+    truncated: false,
+  }),
+  '内容搜索：扫描 8 个文件 · 跳过 2 个过大、1 个二进制、3 个读取失败',
+  'contentNote 三类跳过都列出',
+);
+eq(
+  I18N.contentNote({
+    scanned: 0,
+    skipped_large: 0,
+    skipped_binary: 0,
+    unreadable: 0,
+    truncated: true,
+  }),
+  '内容搜索：扫描 0 个文件 · 候选或读取量达上限，结果可能不完整',
+  'contentNote 截断提示',
+);
+
 console.log(`format.ts: ${n} assertions passed`);

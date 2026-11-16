@@ -849,3 +849,73 @@
   （原 292 + 14）。真机：`ff-cli import` 跑通纯路径与 CSV 两条路径，非 UTF-8 与
   缺路径列均给出可操作错误（见 BENCH）。
 - **M7 剩余 2 项**（内容搜索 / 硬链接多路径）仍单独立项。
+
+## #95（2026-11-16）：M7 第 5 项 —— 内容搜索 `content:`
+
+- **决定**：M7 第 5 项做「内容搜索」。`content:` **不进 AST**，作为 `Query.content:
+  Vec<ContentSpec>` 挂在查询上，语义等价于「root AND 所有 content 条件」。理由：内容
+  匹配要读磁盘，成本比名字匹配高两三个数量级；塞进 AST 会让 `VolumeIndex::search` /
+  `matches_facts` 这类「逐条就地判定」的路径误以为自己能判，最终在某条全表循环里打开
+  几十万个文件。挂在查询外，引擎只有一条明确的接入点（拿到候选集后串行过滤）。
+- **解析期就拒绝三种昂贵写法**（`ff-core/src/query.rs::validate_content`，都带 byte span）：
+  ① 没有名字级条件（`content:foo` 单独用）——那等于读整卷；
+  ② 取反（`!content:foo`）——判定「不包含」必须读完全部文件；
+  ③ OR 分组（`a|b content:c`）——某个分支若只有 content，同样退化成全表读文件。
+  错误文案直接告诉用户怎么改写（"需要同时给出文件名或路径条件，例如 *.txt content:foo"）。
+- **硬上限**（`ff-core/src/content.rs` 常量，写死在代码里而不是设置项）：单文件
+  `MAX_FILE_BYTES = 32 MiB`、一次搜索 `MAX_CANDIDATES = 5000` 与
+  `MAX_TOTAL_BYTES = 256 MiB`。总数预算是真机逼出来的：5000 个 30 MiB 的候选会读
+  150 GB，用户只会看到「未响应」；256 MiB 在 SSD 上约 0.3 s、机械盘也在数秒内。
+  超限**跳过而不是报错**，
+  统计进 `ContentReport`，UI 显示「跳过 N 个过大」+「候选过多已截断」——用户看到的是
+  「结果可能不完整」，而不是「什么都没找到」。
+- **超限一律跳过的语义**（真机踩坑）：初版 `scan_stream` 是「读到 32 MiB 就放弃」，
+  于是 needle 恰好在文件开头的大文件会命中、在尾部的不会命中——同一类文件两种结论。
+  改为 `FsContentSource` 先取 `File::metadata().len()` 判限，一致地跳过；
+  `scan_stream` 的 limit 只作兜底（索引里的 size 可能过期）。
+- **二进制判定**：块内出现 NUL 即判二进制并停止扫描（不计命中）。不做编码嗅探、不做
+  UTF-16 转码：`content:` 匹配的是**文件原始字节的简单小写折叠**，与名字匹配同一套
+  `simple_lowercase`，中文（UTF-8）与 ASCII 都按字节子串比对。
+- **跨块边界**：`Matcher` 每次保留末尾 `needle.len()-1` 字节与下一块拼接，64 KiB 分块
+  切开的 needle 仍能命中（单测覆盖）。
+- **IO 与匹配分离**：`ContentSource` trait 在 `ff-core`（跨平台 + 可单测），
+  `FsContentSource` 在 `ff-engine`（`std::fs`，路径加 `\\?\` 前缀绕 `MAX_PATH`）。
+  `ff-core` 的 10 项单测用内存假源，不需要真文件；引擎的 4 项用 `temp_dir()` 里的**真文件**
+  验收（含真二进制、真打不开的 ghost 条目）。
+- **串行而不是并行**：内容扫描是磁盘 IO，并行打开上千文件在机械盘上是负优化，且会让
+  取消变慢。每个候选之间检查一次 `CancelToken`，按键取消依然即时。
+- **契约变更**：`SearchSummary` 增 `content: Option<ContentReport>`，带
+  `#[serde(default)]`，旧客户端 / 旧 IPC 报文解析不受影响；`OpenAction` 之后第二处
+  契约扩展，按 DESIGN §9 的流程在此登记。TS 侧 `types.ts` 同步加 `ContentReport`。
+- **验证**：ff-core 12 项（边界跨块、大小写两种、二进制、CJK、保序与跳过统计、候选截断、
+  体积预判与取消、流式上限、报告文案、解析期三种拒绝 + 短语形式）；引擎 4 项（真文件
+  过滤、二进制与目录跳过、无 content 时无统计、大小写与短语）。workspace
+  **323 passed / 0 failed**（原 306 + 17）；clippy `-D warnings` 全绿；Tauri
+  fmt/clippy/test 绿；前端 build 50 modules + 29 格式断言绿。
+- **真机**（管理员会话，`ff-cli`，按 BENCH 记录）：
+  - `import` 小样本：`*.txt content:SECRET-7788` → 候选 2 / 扫 2 / 命中 1；
+    `* content:SECRET-7788` → 扫 3 / 命中 2 / 跳过 1 个二进制；
+    `case: *.txt content:secret-7788` → 0 命中（大小写敏感生效）；
+    34 MiB 的 `huge.txt` → 跳过 1 个过大、0 命中；
+    `content:SECRET-7788`（无名字条件）→ 语法错误并带位置 `8..19`。
+  - 真卷 `D:`（268,669 条，release）：`*.log content:error` → 候选 138 / 扫 80 /
+    命中 27 / 跳过 58 个二进制 / 101 ms；`*.log size:<1mb content:error` → 候选 136
+    （size 预过滤掉 2 个超 1 MB 的 log）；`*.log content:zzz-not-there-9988` →
+    扫 80 / 0 命中（不是"没搜"而是"都读过没有"）。
+- **UI 阻塞（GUI 真机抓到，必修）**：Tauri 的 `search` 命令原本是同步 `fn`，
+  P0-4 的注释写着「搜索是毫秒级，不会冻结 UI」。内容搜索打破了这个假设——真机
+  对全盘索引执行 `*.log content:error` 时窗口被 Windows 标成「Sift（未响应）」，
+  因为同步命令占住了 Tauri 的 IPC 处理线程。修复：`search` 改
+  `async fn` + `tauri::async_runtime::spawn_blocking`，引擎调用仍跑在阻塞线程池，
+  WebView 的 IPC 与渲染不被占住（真机复测：搜索期间 spinner 正常转、结果到达后
+  正常渲染，仍是 4.5 s（debug 构建）但界面全程可交互）。**这条是"阶段完成不等于
+  打磨到位"的实例**：引擎侧测试全绿也发现不了，只有真窗口能暴露。
+- **GUI 真机**（`npm run tauri dev`，debug 构建，1280×720 @2x）：
+  `*.log content:error` → 搜索中 spinner 正常、结束后状态栏
+  `找到 190 个结果 · 4519 ms` + 次要色 `内容搜索：扫描 490 个文件 · 跳过 120 个二进制`
+  （右侧 `索引就绪`），结果列表第一行 `F:\openlex-check.log` 9 KB。
+  状态栏次要文字过长时被 CSS 省略，完整文案在 `title` 里（UI_SPEC §4 状态表）。
+- **仍不做的**：全文索引（那是另一套倒排结构，不在 M7 范围）；正则内容匹配
+  （`regex:` 只作用于名字，内容侧保持字节子串，避免用户写出跨文件的回溯灾难）；
+  编码嗅探（UTF-16 / GBK 文本按原始字节匹配，命中率交给用户的关键词）。
+- **M7 剩余 1 项**（硬链接多路径）仍单独立项。

@@ -129,6 +129,13 @@ pub struct SearchSummary {
     pub total: usize,
     pub elapsed_ms: u32,
     pub parse_error: Option<ParseError>,
+    /// `content:` 内容搜索的统计（M7 / DECISIONS #95）。
+    ///
+    /// `None` = 本次查询没有内容条件；`Some` 时 UI 应把跳过数与截断状态
+    /// 显示出来（`skipped_large` / `skipped_binary` / `truncated` 非零即
+    /// 「结果可能不完整」）。默认 `None` 保证旧客户端 / 旧索引文件不受影响。
+    #[serde(default)]
+    pub content: Option<ff_core::ContentReport>,
 }
 
 /// 结果行（DESIGN §9）。只包含取数窗口内的行；昂贵信息（高亮等）只在 `range` 中计算。

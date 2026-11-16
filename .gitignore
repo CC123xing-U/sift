@@ -3,5 +3,7 @@
 node_modules/
 app/dist/
 *.tmp
+# 索引落盘文件（运行盘根目录 Sift\ 下；开发时 D:\Sift 恰好是仓库根，别入库）
+*.ffix
 # 本地分析副本 / 改动前备份（不入库，仅用于还原）
 .work/

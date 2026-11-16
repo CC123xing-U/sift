@@ -14,6 +14,7 @@
 
 pub mod cancel;
 pub mod case;
+pub mod content;
 pub mod entry;
 pub mod eval;
 pub mod highlight;
@@ -26,6 +27,10 @@ pub mod search;
 
 pub use cancel::CancelToken;
 pub use case::simple_lowercase;
+pub use content::{
+    scan_stream, ContentFilter, ContentReport, ContentScan, ContentSource, ContentSpec, Matcher,
+    MAX_CANDIDATES, MAX_FILE_BYTES,
+};
 pub use entry::{attrs, flags, EntryId, EntryInput, IndexBuilder, VolumeIndex, VolumeInfo, NONE};
 pub use ff_match::Tier;
 pub use highlight::highlight_name;

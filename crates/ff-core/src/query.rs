@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use regex::Regex;
 
 use crate::case::simple_lowercase;
+use crate::content::ContentSpec;
 use crate::ParseError;
 
 /// Unix 纪元（1970-01-01）到 FILETIME 纪元（1601-01-01）的秒数差。
@@ -311,12 +312,25 @@ pub struct Query {
     pub context: EvalContext,
     /// `regex:` 编译产物（下标见 [`NameTerm::regex_idx`]）。
     pub regexes: Vec<Regex>,
+    /// `content:` 条件（M7，DECISIONS #95）。
+    ///
+    /// **不在 AST 里**：内容匹配需要读磁盘，成本与名字匹配差三个数量级，
+    /// 塞进 AST 会让「全表扫描」路径（`VolumeIndex::search` / `matches_facts`）
+    /// 误以为能就地判定。这里作为 `root` 之上的附加 AND 条件，由引擎在拿到
+    /// 候选集后串行过滤（[`crate::content::ContentFilter`]）。
+    /// 语义约束见 [`parse`]：必须同时有名字条件，且不支持 `!` / `|`。
+    pub content: Vec<ContentSpec>,
 }
 
 impl Query {
     /// 是否空查询（无任何有效贡献）。
     pub fn is_empty(&self) -> bool {
-        matches!(self.root, Expr::Empty)
+        matches!(self.root, Expr::Empty) && self.content.is_empty()
+    }
+
+    /// 是否需要读文件内容（引擎据此决定是否走内容过滤，避免无谓开销）。
+    pub fn has_content(&self) -> bool {
+        !self.content.is_empty()
     }
 
     /// 求值是否需要「完整路径 / 父名 / 深度」上下文（P1-2 优化）。
@@ -354,6 +368,7 @@ impl Default for Query {
             case_sensitive: false,
             context: EvalContext::default(),
             regexes: Vec::new(),
+            content: Vec::new(),
         }
     }
 }
@@ -422,6 +437,7 @@ fn is_modifier(ident: &str) -> bool {
             | "infolder"
             | "depth"
             | "attrib"
+            | "content"
     )
 }
 
@@ -432,6 +448,8 @@ struct Parser<'a> {
     case_sensitive: bool,
     terms: Vec<Term>,
     regexes: Vec<Regex>,
+    /// `content:` 条件（M7）。不进 AST，见 [`Query::content`]。
+    contents: Vec<ContentSpec>,
     /// NOT 嵌套深度：>0 时不收集高亮 term（NOT 内的词不该被高亮）。
     not_depth: usize,
 }
@@ -570,23 +588,31 @@ impl Parser<'_> {
     }
 
     fn parse_phrase(&mut self) -> Result<Expr, ParseError> {
-        let start = self.pos + 1;
-        let mut j = start;
-        while j < self.bytes.len() && self.bytes[j] != b'"' {
-            j += 1;
-        }
-        let next = if j < self.bytes.len() { j + 1 } else { j };
-        let text = self.input[start..j].to_string();
-        self.pos = next;
+        let (text, span) = self.scan_quoted();
         if text.is_empty() {
             return Ok(Expr::Empty); // `""` 无贡献
         }
         Ok(self.name(NameTerm {
             text,
-            span: start..j,
+            span,
             kind: NameKind::Phrase,
             regex_idx: None,
         }))
+    }
+
+    /// 读 `"..."` 的内容（**不**登记高亮 term），`pos` 停在收尾引号之后。
+    ///
+    /// 未闭合时读到串尾返回（用户正在打字，§7.3 容错）。调用方负责把
+    /// [`Self::pos`] 推到位——[`parse_phrase`] 与 `content:"..."` 都要用。
+    fn scan_quoted(&mut self) -> (String, Range<usize>) {
+        let start = (self.pos + 1).min(self.input.len());
+        let mut j = start;
+        while j < self.bytes.len() && self.bytes[j] != b'"' {
+            j += 1;
+        }
+        let text = self.input[start..j].to_string();
+        self.pos = if j < self.bytes.len() { j + 1 } else { j };
+        (text, start..j)
     }
 
     /// 修饰符值的结束位置：**不**在 `>` `<` 处截断（它们是数值比较符）。
@@ -777,6 +803,32 @@ impl Parser<'_> {
                     Expr::Pred(Predicate::Attrib(mask))
                 })
             }
+            // M7 内容搜索（DECISIONS #95）：值可为裸词（到空白为止）或
+            // `content:"带空格的短语"`。该项**不进 AST**，收进 `self.contents`，
+            // 由引擎在候选集上读文件过滤；这里返回 `Expr::Empty` 表示
+            // 「对 AST 无贡献」，不影响 AND 里其它条件的求值。
+            "content" => {
+                let (text, tspan) = if v.is_empty() && self.peek() == Some(b'"') {
+                    self.scan_quoted()
+                } else {
+                    (v.to_string(), vspan.clone())
+                };
+                if text.is_empty() {
+                    return Ok(Expr::Empty); // `content:` 裸写：用户还在打字，容错
+                }
+                if self.not_depth > 0 {
+                    return Err(err(
+                        "content: 不支持取反（判定「不包含」需要读完整卷的文件）",
+                        span,
+                    ));
+                }
+                self.contents.push(ContentSpec {
+                    needle: text,
+                    span: tspan,
+                    case_sensitive: self.case_sensitive,
+                });
+                Ok(Expr::Empty)
+            }
             _ => unreachable!("is_modifier 已过滤"),
         }
     }
@@ -958,17 +1010,64 @@ pub fn parse(input: &str) -> Result<Query, ParseError> {
         case_sensitive: false,
         terms: Vec::new(),
         regexes: Vec::new(),
+        contents: Vec::new(),
         not_depth: 0,
     };
     let root = p.parse_or()?;
     p.skip_ws();
+    validate_content(&root, &p.contents)?;
     Ok(Query {
         root,
         terms: p.terms,
         case_sensitive: p.case_sensitive,
         context: EvalContext::default(),
         regexes: p.regexes,
+        content: p.contents,
     })
+}
+
+/// `content:` 的语义约束（DECISIONS #95）。
+///
+/// 内容匹配的代价是「一次读文件」，所以必须保证：
+/// 1. 有名字级条件先把候选集压下来（否则等于读整卷）；
+/// 2. 只在前向 AND 语义下使用——`|` 的某个分支若只有 `content:`，
+///    同样会退化成全表读文件；`!content:` 需要读完全部文件才能判定，
+///    两者都在解析期直接拒绝并给出位置，让用户改写查询。
+fn validate_content(root: &Expr, contents: &[ContentSpec]) -> Result<(), ParseError> {
+    let Some(first) = contents.first() else {
+        return Ok(());
+    };
+    if expr_has_or(root) {
+        return Err(err(
+            "content: 只能与其它条件用 AND 组合（不支持 | 分组）",
+            first.span.clone(),
+        ));
+    }
+    if !expr_has_name(root) {
+        return Err(err(
+            "content: 需要同时给出文件名或路径条件（会读文件内容，例如 *.txt content:foo）",
+            first.span.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn expr_has_or(e: &Expr) -> bool {
+    match e {
+        Expr::Or(_) => true,
+        Expr::Not(i) => expr_has_or(i),
+        Expr::And(v) => v.iter().any(expr_has_or),
+        _ => false,
+    }
+}
+
+fn expr_has_name(e: &Expr) -> bool {
+    match e {
+        Expr::Name(_) => true,
+        Expr::Not(i) => expr_has_name(i),
+        Expr::And(v) | Expr::Or(v) => v.iter().any(expr_has_name),
+        _ => false,
+    }
 }
 
 // ───────────────────────── 单元测试（语法层） ─────────────────────────
@@ -1129,5 +1228,41 @@ mod tests {
         // 东八区：本地 2024-01-01 00:00 = UTC 2023-12-31 16:00
         let ft8 = filetime_from_civil(2024, 1, 1, 480);
         assert_eq!(ft - ft8, 480 * 60 * FILETIME_PER_SEC);
+    }
+
+    #[test]
+    fn content_parses_bare_and_phrase() {
+        let c = q("*.txt content:hello");
+        assert_eq!(c.content.len(), 1);
+        assert_eq!(c.content[0].needle, "hello");
+        assert!(!c.content[0].case_sensitive);
+        assert!(!c.is_empty());
+        // 短语形式（bare_span 在引号处截断，由 content 分支补扫）
+        let c2 = q(r#"*.txt content:"hello world""#);
+        assert_eq!(c2.content[0].needle, "hello world");
+        // 多个 content = AND
+        let c3 = q("*.log content:error content:timeout");
+        assert_eq!(c3.content.len(), 2);
+        // `case:` 写在前面才作用于后面的 content（解析期取值）
+        let c4 = q("case: *.txt content:Hello");
+        assert!(c4.content[0].case_sensitive);
+        // 裸写 / 空短语容错，无贡献
+        assert!(q("*.txt content:").content.is_empty());
+        assert!(q(r#"*.txt content:"""#).content.is_empty());
+    }
+
+    #[test]
+    fn content_rejects_expensive_shapes() {
+        // 没有名字条件 → 等于读整卷
+        let e = parse("content:foo").unwrap_err();
+        assert!(e.message.contains("文件名"), "{}", e.message);
+        // 取反
+        let e = parse("!content:foo bar").unwrap_err();
+        assert!(e.message.contains("取反"), "{}", e.message);
+        // OR 分组
+        let e = parse("a|b content:c").unwrap_err();
+        assert!(e.message.contains("AND"), "{}", e.message);
+        // 位置信息可用
+        assert!(e.span.end <= "a|b content:c".len());
     }
 }

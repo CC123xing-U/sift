@@ -182,10 +182,22 @@ struct EngineState {
 // 不会冻结 UI；真正会卡住主线程的是「重建索引」（全量扫描）与「Overlay 合并
 // 持写锁」。因此 `rescan` 改为起线程后立即返回（下方），其余命令保持同步。
 // 引擎侧的合并已在读锁下构建（见 InProcessEngine），进一步避免主线程阻塞。
+//
+// **M7 第 5 项修正（DECISIONS #95）**：`content:` 内容搜索要读磁盘文件，
+// 实测单个查询可达数百毫秒到数秒（远超「毫秒级」假设）。同步命令会占住
+// Tauri 的 IPC 处理线程，Windows 直接把窗口标成「未响应」——真机验收抓到。
+// 因此 `search` 改为 async + `spawn_blocking`：引擎调用仍在阻塞线程池里跑，
+// WebView 的 IPC 与渲染不被占住，用户还能按键触发取消。
 
 #[tauri::command]
-fn search(state: tauri::State<EngineState>, req: SearchRequest) -> Result<SearchSummary, String> {
-    state.backend.search(req).map_err(|e| e.to_string())
+async fn search(
+    state: tauri::State<'_, EngineState>,
+    req: SearchRequest,
+) -> Result<SearchSummary, String> {
+    let backend = Arc::clone(&state.backend);
+    tauri::async_runtime::spawn_blocking(move || backend.search(req).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("搜索任务异常终止：{e}"))?
 }
 
 #[tauri::command]

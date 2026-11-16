@@ -83,7 +83,7 @@ export class MockEngine implements EngineClient {
         span: pq.error.span,
       };
       return new Promise((res) =>
-        setTimeout(() => res({ id, total: 0, elapsed_ms: 1, parse_error: pe }), 10),
+        setTimeout(() => res({ id, total: 0, elapsed_ms: 1, parse_error: pe, content: null }), 10),
       );
     }
 
@@ -130,7 +130,13 @@ export class MockEngine implements EngineClient {
     return new Promise((res) =>
       setTimeout(() => {
         this.statusState.searching = false;
-        res({ id, total: indices.length, elapsed_ms: elapsed + delay, parse_error: null });
+        res({
+          id,
+          total: indices.length,
+          elapsed_ms: elapsed + delay,
+          parse_error: null,
+          content: null,
+        });
       }, delay),
     );
   }
