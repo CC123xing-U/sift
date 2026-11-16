@@ -73,3 +73,8 @@
 > 新文件系统分派（`auto.rs`）只调既有的 `windows 0.62`（`GetVolumeInformationW`），
 > 未新增 feature。**`Cargo.toml` / `Cargo.lock` 的依赖集合本轮未变**（可用
 > `git diff Cargo.lock` 复核：无新增 package）。
+
+> **M7 filelist 导入（#94）：零新增依赖。** 解析（纯路径 / CSV）与索引构建全部用
+> `std` + 既有 `ff_core::IndexBuilder`，`ff-core` 的 `Cargo.toml` 未变，
+> `Cargo.lock` 无新增 package；时间字符串 → FILETIME 用自带的 `days_from_civil`
+> 算术（不引入 `chrono` / `time` 解析器）。

@@ -586,3 +586,45 @@ C: 约剩 1GB、Rust TMP/TEMP/TMPDIR=`F:/Temp`。以下为真实命令回显，�
 
 **结论：M7 第 3 项「非 NTFS 回退遍历」完成；M7 剩余 3 项（内容搜索 / 硬链接多路径 /
 filelist 导入）未立项。**
+
+## M7 第 4 项：filelist 导入（#94，2026-11-16）
+
+环境：Windows（desktop-vtciagn，管理员会话），`ff-cli` debug 构建，TMP=`F:/Temp`。
+导入不触碰真实卷，故无需造测试盘。
+
+### 纯路径列表（4 行 → 10 条）
+`ff-cli import F:/Temp/import_demo.txt import`：
+```
+解析 F:/Temp/import_demo.txt：格式 纯路径列表 / 有效行 4 / 跳过 0
+  卷 D: 10 条（其中按路径补齐的目录 5）
+索引就绪: 10 条 / 构建 0.001 s
+查询 "import": 命中 1 条 / 搜索耗时 2 ms
+     0  [F]         0 B  D:\Sift\crates\ff-core\src	import.rs
+```
+`ff-cli import <同文件>`（不给查询，默认 `*`）：`命中 10 条`，前 4 条为
+`[D] D:\ .` / `[D] D:\ Sift` / `[F] D:\Sift README.md` / `[D] D:\Sift docs`，
+说明中间目录 `D:\Sift`、`D:\Sift\docs` 等 5 个被正确补齐、路径与真实文件系统一致。
+
+### CSV（表头 + 引号内逗号 + 时间/大小）
+`ff-cli import F:/Temp/import_demo.csv weird`：
+```
+解析 F:/Temp/import_demo.csv：格式 CSV / 有效行 2 / 跳过 0
+  卷 D: 5 条（其中按路径补齐的目录 2）
+查询 "weird": 命中 1 条 / 搜索耗时 1 ms
+     0  [F]         7 B  D:\Sift\docs	we,ird name.txt
+```
+`we,ird name.txt` 未被逗号拆列（双引号处理正确）；`Size=7` 生效；
+`Date Modified 2026-11-16 22:03:01` 解析为 FILETIME（`120.6 KB` 那条）。
+
+### 错误路径（都必须给出可操作提示）
+- 非 UTF-8 文件：`失败: F:/Temp/bad.bin 不是 UTF-8 文本；Excel 导出的 CSV 请另存为
+  「CSV UTF-8（逗号分隔）」`。
+- 只有文件名列的 CSV：`跳过: a.txt：不是绝对路径（需以盘符开头，如 D:\）` +
+  `失败: 导入中止：CSV 没有可解析的数据行；若文件只有文件名列，请补上 Path / Full Path / 路径 列`。
+
+### 门禁
+- workspace fmt/clippy(-D warnings)/test 全绿：**306 passed、0 failed**
+  （ff-core 新增 14 项 import 单测，其余无回归）。
+- 无新增依赖：`Cargo.toml` / `Cargo.lock` 未变（纯 std + 现有 `IndexBuilder`）。
+
+**结论：M7 第 4 项「filelist 导入」完成；M7 剩余 2 项（内容搜索 / 硬链接多路径）未立项。**

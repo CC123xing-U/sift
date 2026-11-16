@@ -17,6 +17,7 @@ pub mod case;
 pub mod entry;
 pub mod eval;
 pub mod highlight;
+pub mod import;
 pub mod path;
 pub mod persist;
 pub mod query;

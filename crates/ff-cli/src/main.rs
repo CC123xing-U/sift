@@ -14,7 +14,13 @@ const USAGE: &str = r#"ff-cli —— Sift 命令行调试工具
 用法:
   ff-cli scan <卷> [子串]           全量扫描 NTFS 卷（M0），再计时朴素子串搜索
   ff-cli search <卷> <查询> [选项]  经 InProcess 引擎建索引并搜索（M1）
+  ff-cli import <列表> [查询] [选项] 导入 filelist（纯路径列表 / CSV）后搜索（M7）
   ff-cli help                      显示本帮助
+
+import 说明:
+  列表每行一个绝对路径（# 开头为注释），或 Everything 风格的 CSV（首行为表头，
+  列名大小写不敏感、列序任意，必须有 Path / Full Path / Folder / 路径 列）。
+  导入的卷按盘符分卷、自动补齐中间目录，路径与真实文件系统一致。
 
 search 选项:
   --max <N>        最多输出 N 条（默认全部）
@@ -34,6 +40,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("scan") => run_scan(&args[1..]),
         Some("search") => run_search(&args[1..]),
+        Some("import") => run_import(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -382,8 +389,190 @@ fn run_search_windows(args: &SearchArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// `import` 子命令：把 filelist（纯路径列表 / Everything 风格 CSV）建成索引并搜索（M7）。
+///
+/// 全程纯逻辑：不枚举卷、不读文件系统，导入的索引与真实卷索引数据结构完全一致，
+/// 因此非 Windows 平台同样可用（也便于 CI 单测）。
+fn run_import(args: &[String]) -> Result<(), String> {
+    use std::time::Instant;
+
+    use ff_core::import::{build_indexes, parse_list, ListFormat};
+    use ff_engine::api::{EngineClient, SearchOptions, SearchRequest};
+    use ff_engine::inprocess::InProcessEngine;
+    use ff_ntfs::VolumeId;
+
+    let parsed = parse_import_args(args)?;
+    let bytes =
+        std::fs::read(&parsed.file).map_err(|e| format!("读取 {} 失败: {e}", parsed.file))?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        format!(
+            "{} 不是 UTF-8 文本；Excel 导出的 CSV 请另存为「CSV UTF-8（逗号分隔）」",
+            parsed.file
+        )
+    })?;
+
+    let started = Instant::now();
+    let outcome = parse_list(&text);
+    let format_name = match outcome.report.format {
+        ListFormat::Paths => "纯路径列表",
+        ListFormat::Csv => "CSV",
+        ListFormat::Unknown => "未知",
+    };
+    println!(
+        "解析 {}：格式 {} / 有效行 {} / 跳过 {}",
+        parsed.file, format_name, outcome.report.accepted, outcome.report.skipped
+    );
+    for reason in &outcome.skip_reasons {
+        println!("  跳过: {reason}");
+    }
+    if let Some(fatal) = &outcome.fatal {
+        return Err(format!("导入中止：{fatal}"));
+    }
+    if !outcome.is_usable() {
+        return Err("导入中止：没有可用条目".to_string());
+    }
+
+    let label = std::path::Path::new(&parsed.file)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("filelist")
+        .to_string();
+    let volumes = build_indexes(&outcome.entries, &label);
+    let engine = InProcessEngine::empty();
+    let mut total_entries = 0usize;
+    for v in volumes {
+        total_entries += v.entries;
+        let drive = v
+            .info
+            .drive
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| format!("serial {:#010X}", v.info.serial));
+        println!(
+            "  卷 {drive}: {} 条（其中按路径补齐的目录 {}）",
+            v.entries, v.synthesized_dirs
+        );
+        engine.add_volume(
+            VolumeId {
+                serial: v.info.serial,
+                drive: v.info.drive,
+            },
+            v.index,
+        );
+    }
+    println!(
+        "索引就绪: {} 条 / 构建 {:.3} s",
+        total_entries,
+        started.elapsed().as_secs_f64()
+    );
+
+    let summary = engine
+        .search(SearchRequest {
+            query: parsed.query.clone(),
+            sort: parsed.sort,
+            max_hits: parsed.max_hits,
+            opts: SearchOptions {
+                case_sensitive: parsed.case_sensitive,
+                ..Default::default()
+            },
+        })
+        .map_err(|e| e.to_string())?;
+    if let Some(e) = summary.parse_error {
+        return Err(format!("查询语法错误: {e}"));
+    }
+    println!(
+        "查询 {:?}: 命中 {} 条 / 搜索耗时 {} ms",
+        parsed.query, summary.total, summary.elapsed_ms
+    );
+    if summary.total == 0 {
+        return Ok(());
+    }
+    let limit = parsed.max_hits.unwrap_or(summary.total).min(summary.total);
+    let rows = engine
+        .range(summary.id, 0, limit)
+        .map_err(|e| e.to_string())?;
+    for (n, row) in rows.iter().enumerate() {
+        println!(
+            "{:>6}  [{}]  {:>10}  {}\t{}",
+            n,
+            if row.is_dir { "D" } else { "F" },
+            row.size.map_or_else(|| "-".to_string(), human_size),
+            row.dir,
+            row.name
+        );
+    }
+    Ok(())
+}
+
+/// `import` 的参数：列表文件 + 可选查询 + 与 `search` 相同的选项。
+struct ImportArgs {
+    file: String,
+    query: String,
+    max_hits: Option<usize>,
+    sort: SortSpec,
+    case_sensitive: bool,
+}
+
+/// 解析 `import` 参数：`ff-cli import <列表> [查询...] [--max N] [--sort K] [--asc] [--case]`。
+fn parse_import_args(args: &[String]) -> Result<ImportArgs, String> {
+    let mut positional: Vec<String> = Vec::new();
+    let mut max_hits = None;
+    let mut key = SortKey::Score;
+    let mut ascending = false;
+    let mut case_sensitive = false;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--max" => {
+                let raw = args.get(i + 1).ok_or("--max 需要一个非负整数参数")?;
+                max_hits = Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| format!("--max 需要非负整数，收到 {raw:?}"))?,
+                );
+                i += 2;
+            }
+            "--sort" => {
+                let raw = args.get(i + 1).ok_or("--sort 需要一个排序键")?;
+                key = parse_sort_key(raw)?;
+                i += 2;
+            }
+            "--asc" => {
+                ascending = true;
+                i += 1;
+            }
+            "--case" => {
+                case_sensitive = true;
+                i += 1;
+            }
+            other if other.starts_with("--") => return Err(format!("未知选项 {other:?}")),
+            other => {
+                positional.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    let mut iter = positional.into_iter();
+    let file = iter.next().ok_or("缺少 <列表> 参数")?;
+    let terms: Vec<String> = iter.collect();
+    Ok(ImportArgs {
+        file,
+        // 不给查询时列出全部（"*" 与搜索侧的通配口径一致）。
+        query: if terms.is_empty() {
+            "*".to_string()
+        } else {
+            terms.join(" ")
+        },
+        max_hits,
+        sort: SortSpec {
+            key,
+            descending: !ascending,
+        },
+        case_sensitive,
+    })
+}
+
 /// 字节数 → 人类可读字符串（1024 进制）。
-#[cfg(windows)]
 fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;

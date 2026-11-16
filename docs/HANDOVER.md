@@ -1,4 +1,4 @@
-# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1/2/3 项完成）
+# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1/2/3/4 项完成）
 
 ## 当前状态
 
@@ -28,7 +28,12 @@
   每 30s 全量重走。真机用挂载的 exFAT VHD 验收：9 条索引、CJK 名与嵌套路径正确、
   新建文件 30s 内可见（`FOUND after 30.0s`）。网络盘（`DRIVE_REMOTE`）仍不支持
   （遍历无超时/取消），已记入 DESIGN §5.4 与本文件欠账。
-- **M7 剩余 3 项（内容搜索 / 硬链接多路径 / filelist 导入）
+- **M7 第 4 项「filelist 导入」已完成（DECISIONS #94）**：`ff-core/src/import.rs`
+  解析纯路径列表与 Everything 风格 CSV（列名大小写不敏感、列序任意、支持引号内逗号），
+  按盘符分卷、自动补齐中间目录，`serial` 最高位置 1 与真实卷隔开；入口为
+  `ff-cli import <列表> [查询]`。真机 4 行列表 → 10 条（补齐 5 个目录），
+  CSV 的 `we,ird name.txt` 未被逗号拆列。**UI 入口与导入结果持久化未做**（打磨阶段）。
+- **M7 剩余 2 项（内容搜索 / 硬链接多路径）
   未立项，逐项单独立项，不自动推进**。
 
 ## 上一轮局部调整（2026-11-16，已随本轮提交）
@@ -128,25 +133,31 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - **已知限制**：重连后服务侧 `EngineSession` 为全新实例，旧搜索的 `request_id` 失效，
   用户需重新搜索（toast 提示已覆盖）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
 
-## 下一步顺序（M0–M6 完成，M7 第 1/2/3 项完成；以下均未立项）
+## 下一步顺序（M0–M6 完成，M7 第 1/2/3/4 项完成；以下均未立项）
 
-1. M7 剩余 3 项逐项单独立项：内容搜索、硬链接多路径、filelist 导入。
-   属性窗口（#91）、对话框集成（#92）、非 NTFS 回退遍历（#93）已分别于第 1/2/3 项完成。
+1. M7 剩余 2 项逐项单独立项：内容搜索（要改 `ff-core` 索引格式 + 读文件内容）、
+   硬链接多路径（同文件多路径合一，DESIGN 原文只写「评估」）。
+   属性窗口（#91）、对话框集成（#92）、非 NTFS 回退遍历（#93）、filelist 导入（#94）
+   已分别于第 1/2/3/4 项完成。
 2. 设置持久化、Shell 图标、列宽调整、Top-K 部分选择等既有欠账（见「保留约束与欠账」）。
 3. `ff-http` 目前只实现 `GET /search`；如需 `status`/`rescan` 等端点再单独扩展并重跑安全测试。
 4. UI 设置页的 HTTP 开关仍标「M6 提供 / 禁用」（UI_SPEC）；接入开关需先做设置持久化。
 
-（上述均不自动推进；里程碑边界见 DESIGN §13，M6 证据见 BENCH / #90，M7 第 1/2/3 项见 BENCH / #91 / #92 / #93。）
+（上述均不自动推进；里程碑边界见 DESIGN §13，M6 证据见 BENCH / #90，M7 第 1–4 项见 BENCH / #91 / #92 / #93 / #94。）
 
 ## 验证
 
+- **M7 第 4 项「filelist 导入」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test
+  全绿（**306 passed、0 failed**：ff-core 新增 14 项 import 单测）；无新增依赖
+  （`Cargo.lock` 未变）。真机 `ff-cli import` 纯路径 4 行 → 10 条（补齐 5 个目录、路径
+  与真实文件系统一致）；CSV 引号内逗号未拆列、Size/时间生效；非 UTF-8 与缺路径列
+  均给出可操作错误（见 BENCH / #94）。
 - **M7 第 3 项「非 NTFS 回退遍历」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test
   全绿（**292 passed、0 failed**：ff-ntfs 37 含新增 7 项遍历单测，ff-engine 49 含新增 2 项）；
   Tauri 门禁全绿（顺带修掉上一轮遗留的 `cargo fmt` 差异）；前端 build 50 modules + 29 断言。
   真机 exFAT VHD（`diskpart` 现建现删）：`ff-cli search G: quarterly` 输出
   `文件系统 exFAT（目录遍历回退（无增量））` / `1 卷 / 9 条 / 0.003 s` /
   `G:\docs\reports\2026\quarterly-summary.txt`；CJK 与目录查询命中正确；
-eports6\quarterly-summary.txt`；CJK 与目录查询命中正确；
   新建文件 `FOUND after 30.0s`（见 BENCH / #93）；VHD 与探测 example 已清理。
 - **M7 第 2 项「对话框集成」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test 全绿
   （**281 passed、0 failed**，ff-dialog 新增 5 项分类单测）；Tauri 门禁全绿；前端 build
