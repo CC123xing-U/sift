@@ -111,7 +111,8 @@ sift/
 ├─ crates/
 │  ├─ ff-core/     索引数据结构 · 查询解析 · 求值 · 评分 · 持久化格式（纯逻辑，无 Windows 依赖）
 │  ├─ ff-match/    子串 / 模糊 / 拼音 匹配器封装（统一 trait，纯逻辑）
-│  ├─ ff-ntfs/     NTFS 全量扫描 + USN 增量（封装 ntfs-reader / windows），输出 RawEntry / Change
+│  ├─ ff-ntfs/     NTFS 全量扫描 + USN 增量（封装 ntfs-reader / windows），输出 RawEntry / Change；
+│  │               walk.rs 非 NTFS 目录遍历回退 + auto.rs 按文件系统分派（M7，#93）
 │  ├─ ff-engine/   把以上粘合：卷管理、Base+Overlay、后台合并、落盘调度、对外 trait 实现
 │  ├─ ff-ipc/      命名管道 server/client（SID ACL）· EngineClient over Pipe（M6）
 │  ├─ ff-http/     本地 HTTP API：127.0.0.1 + Bearer/Host/速率安全边界（M6，#90）
@@ -226,9 +227,25 @@ pub trait VolumeScanner {
   - 卷序列号变化。
 - 单独的监听线程每卷一个，批量读取（缓冲区 64 KB 起），事件批量提交到 Overlay（每批一次加锁 / 一次 swap Overlay，而不是每条一次）。
 
-### 5.4 非 NTFS / 网络盘（延后）
+### 5.4 非 NTFS / 网络盘
 
-M0–M6 只支持本地 NTFS。FAT/exFAT/ReFS/网络路径的目录遍历回退（`walkdir` 或 `ignore`）放 M7，并注意：不跟随符号链接 / 目录联接（junction）以避免环。
+M0–M6 只支持本地 NTFS。**M7 第 3 项已落地目录遍历回退**（DECISIONS #93）：
+
+- **分派**：`AutoVolumeScanner` 按 `GetVolumeInformationW` 的文件系统名分派——
+  `NTFS` 走 `NtfsVolumeScanner`（MFT + USN），其余（exFAT / FAT32 / ReFS 等）走
+  `DirWalkScanner`；名称查不到时先试 NTFS，拿到 `ScanError::NotNtfs` 再回退
+  （`verify_ntfs` 在喂任何条目之前执行，不会产生重复条目）。
+- **实现**：`std::fs::read_dir` 手写递归（**不引入 `walkdir` / `ignore`**，DECISIONS #93）。
+  不跟随符号链接 / 目录联接（junction）——链接自身进索引但不递归，避免绕环（`C:\link → C:\`）。
+- **键**：没有 FRN，用「逻辑路径小写后的 FNV-1a 64」当 `frn`，父目录键当 `parent_frn`；
+  同一路径每次扫描得到同一个键，索引持久化 / Overlay 语义与 NTFS 卷一致。根条目（`parent_frn = 0`，
+  名字 `.`）必须产出，否则 `VolumeIndex::root_id()` 会把某个顶层目录误认成根、丢掉它自己的名字。
+- **排除集**共用**：回收站 / 系统卷信息目录走同一份 `EXCLUDED_DIR_NAMES`（§5.2），避免两套口径漂移。
+- **无增量**：`read_changes` 显式返回 `Unsupported`，`supports_incremental` 返回 `false`；
+  引擎据此按 `WALK_REBUILD_INTERVAL = 30s` 定期全量重走（而不是每 100ms 空读一次日志）。
+- **卷范围**：`enumerate_volumes` 纳入 `DRIVE_REMOVABLE`（U 盘 / 存储卡）。**网络盘
+  （`DRIVE_REMOTE`）仍未支持**：遍历没有超时与取消，SMB 卡住会长期占住 scanner 锁、
+  拖死其它卷的增量轮询——留到能中断的遍历做出来再开。
 
 ---
 
@@ -586,8 +603,8 @@ pub trait EngineClient: Send + Sync {
   已卸载服务并清理索引/配置/探测程序。**不进入 M7，不自动改里程碑范围**。
 
 ### M7 进阶（逐项单独立项）
-内容搜索 · 硬链接多路径 · filelist 导入 · 非 NTFS 回退遍历。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2；**属性窗口** M7 第 1 项完成，见 #91；**对话框集成** M7 第 2 项完成，见 #92，均不再列在 M7 待办。）
-- **当前进度（2026-11-16）**：M7 逐项立项，第 1 项「属性窗口」（#91）、第 2 项「对话框集成」（#92）完成并提交。对话框集成用 `SetWinEventHook` 检测 + UIA ValuePattern 回填（不注入），`Alt+D` / 右键「填入打开对话框」把结果路径写回文件对话框，真机验证通过。其余 4 项仍未开始，不自动推进。
+内容搜索 · 硬链接多路径 · filelist 导入。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2；**属性窗口** M7 第 1 项完成，见 #91；**对话框集成** M7 第 2 项完成，见 #92；**非 NTFS 回退遍历** M7 第 3 项完成，见 #93 与 §5.4，均不再列在 M7 待办。）
+- **当前进度（2026-11-16）**：M7 逐项立项，第 1 项「属性窗口」（#91）、第 2 项「对话框集成」（#92）、第 3 项「非 NTFS 回退遍历」（#93）完成并提交。第 3 项用 `AutoVolumeScanner` 按文件系统分派，非 NTFS 卷走 `std::fs::read_dir` 手写目录遍历（零新增依赖）、无增量则由引擎 30s 定期重走；真机用挂载的 exFAT VHD 验收（9 条索引 / 路径正确 / 新文件 30s 内可见）。其余 3 项仍未开始，不自动推进。
 
 ---
 

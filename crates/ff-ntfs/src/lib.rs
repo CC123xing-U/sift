@@ -150,6 +150,33 @@ pub trait VolumeScanner {
         from_usn: i64,
         journal_id: u64,
     ) -> Result<(Vec<Change>, i64)>;
+
+    /// 该卷是否具备 USN 增量通道（DESIGN §5.3）。
+    ///
+    /// 默认 `true`（NTFS 实现与测试假实现都走 USN）；目录遍历回退
+    /// （[`walk::DirWalkScanner`]，DESIGN §5.4）没有增量来源，返回 `false`。
+    /// 引擎据此把该卷改为**按间隔全量重走**，而不是每 100ms 空读一次
+    /// `read_changes`（见 `ff_engine` 的 `poll_volume`）。
+    ///
+    /// 新增带默认实现的方法是**向后兼容**的：既有实现（含各测试里的假扫描器）
+    /// 无需改动，冻结契约里的既有方法签名一个字节未动。
+    fn supports_incremental(&self, _vol: &VolumeId) -> bool {
+        true
+    }
+}
+
+/// 建索引阶段的最小排除集（DESIGN §5.2）：只按**目录名**匹配、大小写不敏感。
+///
+/// 回收站与系统卷信息目录的内容不应进索引。NTFS 的 MFT 扫描与目录遍历回退
+/// 两条路径共用本集合，避免两套口径漂移。
+pub(crate) const EXCLUDED_DIR_NAMES: &[&str] = &["$recycle.bin", "system volume information"];
+
+/// 目录名是否命中排除集（DESIGN §5.2）。只对**目录**生效：
+/// 避免误伤取了同名目录名的普通文件（回收站 / 卷信息目录只有目录形态）。
+pub(crate) fn is_excluded_dir_name(name: &str) -> bool {
+    EXCLUDED_DIR_NAMES
+        .iter()
+        .any(|d| name.eq_ignore_ascii_case(d))
 }
 
 // —— Track A（M0）实现模块 ————————————————————————————————————
@@ -162,16 +189,27 @@ pub trait VolumeScanner {
 /// 已覆盖单元测试，不依赖 Windows（可在任意平台跑）。
 pub mod usn;
 
+/// 非 NTFS 卷的目录遍历回退（DESIGN §5.4）：纯 `std` 手写，零新增依赖，
+/// 可在任意平台编译与单测（Windows 上额外填充 `FileAttribute` 位）。
+pub mod walk;
+
 /// `NtfsVolumeScanner`：`VolumeScanner` 的 NTFS 实现（`full_scan` + `read_changes`）。
 #[cfg(windows)]
 pub mod scanner;
+
+/// `AutoVolumeScanner`：按文件系统类型在 NTFS 扫描与目录遍历之间分派（M7 §5.4）。
+#[cfg(windows)]
+pub mod auto;
 
 /// Win32 封装（卷枚举 / USN Journal / 进程内存），DESIGN §0.5 平台隔离。
 #[cfg(windows)]
 pub mod win32;
 
 #[cfg(windows)]
+pub use auto::AutoVolumeScanner;
+#[cfg(windows)]
 pub use scanner::{device_path_for, NtfsVolumeScanner};
+pub use walk::DirWalkScanner;
 #[cfg(windows)]
 pub use win32::{
     enumerate_volumes, has_mount_points, peak_working_set_bytes, query_usn_journal,

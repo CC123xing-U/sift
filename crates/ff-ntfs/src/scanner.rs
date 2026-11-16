@@ -19,20 +19,13 @@ use crate::{usn, win32, Change, RawEntry, Result, ScanError, ScanMeta, VolumeId,
 /// FILETIME 纪元差：1601-01-01 → 1970-01-01，单位 100ns。
 const EPOCH_DIFFERENCE_TICKS: i128 = 116_444_736_000_000_000;
 
-/// 建索引阶段的最小排除集（DESIGN §5.2：排除规则在建索引时应用）。
+/// 目录名是否命中排除集（DESIGN §5.2：排除规则在建索引时应用）。
 ///
-/// 只按**目录名**匹配、大小写不敏感：这些目录里的内容不应进索引（回收站、系统还原/卷信息）。
-/// 元数据文件（`$MFT` / `$Bitmap` 等）按 §5.2 保留（Everything 也能搜到），不在本集合内。
-const EXCLUDED_DIR_NAMES: &[&str] = &["$recycle.bin", "system volume information"];
-
-/// 目录名是否命中排除集（DESIGN §5.2）。
-///
-/// 只对**目录**生效：避免误伤取了同名目录名的普通文件（回收站/卷信息目录只有目录形态）。
+/// 只对**目录**生效：避免误伤取了同名目录名的普通文件（回收站 / 卷信息目录只有目录形态）。
+/// 排除集本身定义在 `lib.rs`，与目录遍历回退（[`crate::walk`]）共用同一份口径；
+/// 元数据文件（`$MFT` / `$Bitmap` 等）按 §5.2 保留（Everything 也能搜到），不在排除集内。
 fn is_excluded(name: &str, is_dir: bool) -> bool {
-    is_dir
-        && EXCLUDED_DIR_NAMES
-            .iter()
-            .any(|d| name.eq_ignore_ascii_case(d))
+    is_dir && crate::is_excluded_dir_name(name)
 }
 
 /// 条目是否应被排除：自身命中 [`is_excluded`]，或其父目录已被排除（**子树连带**）。

@@ -302,15 +302,13 @@ fn run_search_windows(args: &SearchArgs) -> Result<(), String> {
 
     use ff_engine::api::{EngineClient, SearchOptions, SearchRequest};
     use ff_engine::inprocess::InProcessEngine;
-    use ff_ntfs::{enumerate_volumes, NtfsVolumeScanner, VolumeId};
+    use ff_ntfs::{enumerate_volumes, AutoVolumeScanner, VolumeId};
 
-    let volumes: Vec<ff_ntfs::VolumeInfo> = enumerate_volumes()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|v| v.fs_name.eq_ignore_ascii_case("NTFS"))
-        .collect();
+    // M7（DESIGN §5.4）：不再预过滤 NTFS——非 NTFS 卷（exFAT / FAT32）由
+    // `AutoVolumeScanner` 自动改走目录遍历回退，CLI 因此也能查 U 盘上的文件。
+    let volumes: Vec<ff_ntfs::VolumeInfo> = enumerate_volumes().map_err(|e| e.to_string())?;
     if volumes.is_empty() {
-        return Err("未枚举到可用的 NTFS 卷".to_string());
+        return Err("未枚举到可用的卷".to_string());
     }
     let info = find_volume(&volumes, &args.volume)
         .ok_or_else(|| format!("未找到卷 {}；请使用上面列出的盘符或 GUID 路径", args.volume))?;
@@ -318,11 +316,23 @@ fn run_search_windows(args: &SearchArgs) -> Result<(), String> {
         serial: info.serial,
         drive: info.drive,
     };
+    println!(
+        "目标卷 {} 文件系统 {}（{}）",
+        info.drive
+            .map(|c| format!("{c}:"))
+            .unwrap_or_else(|| info.guid_path.clone()),
+        info.fs_name,
+        if info.fs_name.eq_ignore_ascii_case("NTFS") {
+            "MFT + USN 增量"
+        } else {
+            "目录遍历回退（无增量）"
+        }
+    );
 
-    // 建索引：`rescan(Some(卷))` 经扫描器全量扫 MFT 并流式建成 SoA 索引。
+    // 建索引：`rescan(Some(卷))` 经扫描器全量建索引（NTFS 走 MFT，其它走目录遍历）。
     println!("正在扫描并建立索引: {id}");
     let build_start = Instant::now();
-    let engine = InProcessEngine::new(Box::new(NtfsVolumeScanner));
+    let engine = InProcessEngine::new(Box::new(AutoVolumeScanner));
     engine.rescan(Some(id.clone())).map_err(|e| e.to_string())?;
     let status = engine.status();
     println!(

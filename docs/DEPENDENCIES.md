@@ -66,3 +66,10 @@
 > 事件监听（SetWinEventHook）用裸 user32 extern，无 winapi 等额外依赖；UIA COM 经
 > windows crate 自动生成的绑定调用，未手写 vtable。偏离"零依赖"传统的原因（Vista+
 > IFileDialog 文件名框必须走 UIA ValuePattern）见 `DECISIONS #92`。
+
+> **M7 非 NTFS 回退遍历（#93）：零新增依赖。** DESIGN §5.4 原本写「`walkdir` 或
+> `ignore`」，实际用 `std::fs::read_dir` 手写递归（`crates/ff-ntfs/src/walk.rs`），
+> 不引入任何新 crate：需要的能力只有「递归 + 不跟随重解析点 + 复用排除集」，标准库够用。
+> 新文件系统分派（`auto.rs`）只调既有的 `windows 0.62`（`GetVolumeInformationW`），
+> 未新增 feature。**`Cargo.toml` / `Cargo.lock` 的依赖集合本轮未变**（可用
+> `git diff Cargo.lock` 复核：无新增 package）。

@@ -780,3 +780,42 @@
   `fill_active_dialog(D:\Sift\README.md)` 后经 UIA 读回 `READBACK=D:\Sift\README.md`
   `MATCH=true`。探测 example 验证后已删除，无残留窗口。
 - **M7 剩余 4 项**（内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）仍单独立项。
+
+## #93（2026-11-16）：M7 第 3 项 —— 非 NTFS 回退遍历（目录遍历 + 定期重走）
+
+- **决定**：M7 第 3 项做「非 NTFS 回退遍历」。`enumerate_volumes` 纳入 `DRIVE_REMOVABLE`
+  （U 盘 / 存储卡），新增 `AutoVolumeScanner` 按 `GetVolumeInformationW` 的文件系统名分派：
+  `NTFS` → `NtfsVolumeScanner`（MFT + USN），其余 → `DirWalkScanner`（目录遍历）。
+  名称查不到（无盘符 / 瞬时失败）时先让 NTFS 试，只有拿到 `ScanError::NotNtfs` 才回退。
+- **不引入 `walkdir` / `ignore`**（DESIGN §5.4 原写这两个）：回退遍历需要的只是
+  「递归 + 跳过重解析点 + 复用排除集」三件事，`std::fs::read_dir` 三十行就能写完；
+  引入新 crate 会多一条供应链与许可证审查面，收益不足。**零新增依赖**，
+  `ff-ntfs` 只多两个源文件（`walk.rs` / `auto.rs`）。
+- **键**：非 NTFS 没有 FRN，用「逻辑路径小写后的 FNV-1a 64」当 `frn`、父目录键当
+  `parent_frn`；`0` 被 `path_key` 排除（保留给「根之父」）。同一路径每次扫描得到同一个键，
+  索引落盘 / Overlay 语义与 NTFS 卷一致；同一卷只会有一种键，两种键不会互相干扰。
+- **根条目必须产出**（真机踩坑）：`VolumeIndex::root_id()` 取「第一个 `parent_frn == 0`
+  的条目」当根。初版遍历不产根条目，结果某个顶层目录被当成根、它自己的路径丢掉名字
+  （打开时会打开到卷根）。改为首条产出 `frn = path_key("G:\\")`、`parent_frn = 0`、
+  `name = "."` 的合成根条目（与 `ff-core` 测试夹具里 NTFS 根条目 `dir(5, 0, ".", …)` 同形）。
+- **无增量的处理**：`read_changes` 显式 `Unsupported`，`supports_incremental` 返回
+  `false`。`VolumeScanner` 新增的是**带默认实现**的方法（默认 `true`），冻结契约里既有
+  方法签名一个字节未动，既有实现（含各测试假扫描器）无需改动。引擎侧 `VolumeData`
+  新增 `incremental` / `last_full`，`poll_volume` 对无增量卷改为
+  `WALK_REBUILD_INTERVAL = 30s` 全量重走——否则 100ms 轮询每轮都是白读一次错误。
+- **仍不支持网络盘（`DRIVE_REMOTE`）**：遍历没有超时 / 取消，SMB 卡住会长期占住
+  scanner 锁、拖死其它卷的增量轮询。这一条写进 §5.4 与 HANDOVER 欠账，不假装已支持。
+- **验证**：ff-ntfs 新增 7 项单测（路径键稳定性/大小写折叠、FILETIME 纪元换算、排序与
+  parent 链、排除集与子树、不递归符号链接、深度上限边界、无盘符卷拒绝 + 增量声明）；
+  引擎新增 2 项（遍历卷可搜且不被当 USN 卷轮询、30s 间隔边界）。workspace
+  **292 passed / 0 failed**（原 281 + 11）；Tauri fmt/clippy(-D warnings)/test 绿；
+  前端 build 50 modules + 29 格式断言绿。
+- **真机**（管理员会话，`diskpart` 建 96MB VHD → `format fs=exfat` → 挂 `G:`）：
+  - `fsutil fsinfo volumeinfo G:` 报 `File System Name : exFAT`；
+  - `ff-cli search G: quarterly` → `目标卷 G: 文件系统 exFAT（目录遍历回退（无增量））`、
+    `索引就绪: 1 卷 / 9 条 / 0.003 s`、命中 `G:\docs\reports\2026\quarterly-summary.txt`
+    4.0 KB；CJK 查询 `测试文件` 命中 `G:\media\音乐\测试文件.wav`；`*` 全量 9 条含根条目 `.`；
+  - 定期重走（一次性 example，验证后已删）：首扫后创建 `G:\fresh_marker.txt` →
+    `FOUND after 30.0s`，`*` 可见条目 10 条；
+  - 清理：`diskpart detach vdisk` + 删除 VHD，无残留卷。
+- **M7 剩余 3 项**（内容搜索 / 硬链接多路径 / filelist 导入）仍单独立项。

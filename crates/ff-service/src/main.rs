@@ -23,7 +23,7 @@ use ff_ipc::{
     current_user_sid, interactive_user_sid, pipe_acl_sddl, pipe_name, resolve_volume_id,
     serve_forever, PipeListener,
 };
-use ff_ntfs::NtfsVolumeScanner;
+use ff_ntfs::AutoVolumeScanner;
 use windows_service::{
     define_windows_service,
     service::{
@@ -179,7 +179,8 @@ fn run_service() -> windows_service::Result<()> {
     })?;
 
     // 引擎 + 索引（服务模式：%ProgramData%\Sift，DESIGN §6）。
-    let engine = Arc::new(InProcessEngine::new(Box::new(NtfsVolumeScanner)));
+    // 扫描器按卷的文件系统自动分派：NTFS 走 MFT + USN，其它走目录遍历回退（M7 §5.4）。
+    let engine = Arc::new(InProcessEngine::new(Box::new(AutoVolumeScanner)));
     let save_dir = program_data_sift_dir();
     let _ = std::fs::create_dir_all(&save_dir);
     engine.set_save_dir(&save_dir);

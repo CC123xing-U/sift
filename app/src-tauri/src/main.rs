@@ -312,7 +312,9 @@ fn fill_active_dialog(
         .backend
         .range(id, index, 1)
         .map_err(|e| e.to_string())?;
-    let row = rows.first().ok_or_else(|| "结果行不存在或已过期".to_string())?;
+    let row = rows
+        .first()
+        .ok_or_else(|| "结果行不存在或已过期".to_string())?;
     let path = ff_engine::full_path(row);
     ff_dialog::fill_active_dialog(&path).map_err(|e| e.to_string())
 }
@@ -455,8 +457,10 @@ fn rescan_all(app: &tauri::AppHandle) {
 
 #[cfg(windows)]
 fn build_engine() -> Arc<InProcessEngine> {
-    use ff_ntfs::NtfsVolumeScanner;
-    let engine = Arc::new(InProcessEngine::new(Box::new(NtfsVolumeScanner)));
+    use ff_ntfs::AutoVolumeScanner;
+    // M7（DESIGN §5.4）：按卷的文件系统自动分派——NTFS 走 MFT + USN，
+    // exFAT / FAT32 等走目录遍历回退（无增量，引擎按 30s 定期重走）。
+    let engine = Arc::new(InProcessEngine::new(Box::new(AutoVolumeScanner)));
 
     // 索引放在运行程序所在磁盘根目录的 Sift 文件夹，避免 C: 的
     // `%LOCALAPPDATA%` 被大索引长期占满；同一 serial 始终覆盖同一文件。

@@ -42,6 +42,17 @@ use crate::overlay::{Overlay, OverlayEntry};
 const MERGE_THRESHOLD: usize = 50_000;
 /// 结果集无访问释放时限（DESIGN §9：60 秒）。
 const RESULT_TTL: Duration = Duration::from_secs(60);
+/// 无增量通道的卷（目录遍历回退，DESIGN §5.4）的全量重走间隔。
+///
+/// 这类卷没有 USN，`read_changes` 只会返回 `Unsupported`；若仍按 100ms 轮询，
+/// 每轮都是白读一次错误。改为每 `30s` 全量重走一遍：U 盘 / 存储卡上的增删
+/// 在 30 秒内可见，且不会像「每次轮询都重扫」那样把 scanner 锁占死。
+const WALK_REBUILD_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 无增量卷是否到了该重走的时刻（单独提出来便于边界单测，不必真等 30 秒）。
+fn walk_due(since_full: Duration) -> bool {
+    since_full >= WALK_REBUILD_INTERVAL
+}
 
 /// 单卷运行时数据（M2：新增 `overlay` 增量层；P1：新增 `message` / `scan_progress`）。
 struct VolumeData {
@@ -54,6 +65,11 @@ struct VolumeData {
     /// 扫描进度（千分比 0–1000；`u64::MAX` = 非扫描态/不确定）。
     /// 用 Arc<AtomicU64> 使 sink 闭包（无 volumes 锁）能原子更新，status_impl 无锁读取。
     scan_progress: Arc<AtomicU64>,
+    /// 本卷是否有 USN 增量通道（扫描成功时由 `scanner.supports_incremental` 决定）。
+    /// `false` 的卷（非 NTFS 目录遍历）走 [`WALK_REBUILD_INTERVAL`] 定期重走。
+    incremental: bool,
+    /// 最近一次全量扫描**完成**的时刻（定期重走的计时起点）。
+    last_full: Instant,
 }
 
 /// 一次搜索的持久结果：命中列表（全局有序，每条带所属卷 + 命中来源）+ 原查询 +
@@ -137,6 +153,10 @@ impl EngineInner {
                 state: VolumeState::Ready,
                 message: None,
                 scan_progress: Arc::new(AtomicU64::new(u64::MAX)),
+                // 直接注入的索引（测试 / 合成数据）默认按「有增量」处理，
+                // 与真实 NTFS 卷一致；测试若要覆盖无增量分支可用 `set_incremental`。
+                incremental: true,
+                last_full: Instant::now(),
             },
         );
     }
@@ -192,6 +212,10 @@ impl EngineInner {
             Ok(meta) => {
                 progress_arc.store(u64::MAX, Ordering::Relaxed);
                 let index = builder.finish();
+                // 本卷有没有 USN 增量由扫描器说了算（目录遍历回退 = false）。
+                // 在拿 `volumes` 写锁之前问：`AutoVolumeScanner` 的判定要走一次
+                // `GetVolumeInformationW`，不能持锁做 IO（DESIGN §0.6 / 锁序）。
+                let incremental = scanner.supports_incremental(vol);
                 let mut vols = self.volumes.write().unwrap();
                 let vd = vols
                     .get_mut(vol)
@@ -217,6 +241,8 @@ impl EngineInner {
                 vd.overlay = Overlay::default();
                 vd.state = VolumeState::Ready;
                 vd.message = None;
+                vd.incremental = incremental;
+                vd.last_full = Instant::now();
                 // P0-5：索引已变，标记需落盘。
                 self.dirty.store(true, Ordering::SeqCst);
                 Ok(())
@@ -574,8 +600,8 @@ impl EngineInner {
     ///   2. `scanner` 锁 → `read_changes` → 释放
     ///   3. `volumes.write()` 应用结果
     fn poll_volume(&self, vid: &VolumeId) {
-        // Phase 1: 快照轮询参数，释放 volumes 读锁。
-        let (from_usn, journal_id) = {
+        // Phase 0：快照轮询参数与「是否有增量通道」，释放 volumes 读锁。
+        let (from_usn, journal_id, incremental, since_full) = {
             let vols = self.volumes.read().unwrap();
             let vd = match vols.get(vid) {
                 Some(v) => v,
@@ -584,8 +610,22 @@ impl EngineInner {
             if vd.state != VolumeState::Ready {
                 return;
             }
-            (vd.info.next_usn, vd.info.journal_id)
+            (
+                vd.info.next_usn,
+                vd.info.journal_id,
+                vd.incremental,
+                vd.last_full.elapsed(),
+            )
         }; // volumes.read() 已释放
+
+        // 无增量通道的卷（目录遍历回退，DESIGN §5.4）：没有 USN 可读，
+        // 按 WALK_REBUILD_INTERVAL 全量重走一遍来反映增删，别每 100ms 白读一次错误。
+        if !incremental {
+            if walk_due(since_full) {
+                self.rebuild_volume(vid);
+            }
+            return;
+        }
 
         // Phase 2: 取 scanner 锁执行 IO，释放 scanner。
         let res = {
@@ -794,6 +834,10 @@ impl EngineInner {
                         state: VolumeState::Ready,
                         message: None,
                         scan_progress: Arc::new(AtomicU64::new(u64::MAX)),
+                        // 冷启动载入的索引还不知道本卷当前是否有 USN：先按有增量处理，
+                        // 后台首轮 `rescan` 会用 `supports_incremental` 覆盖成真实值。
+                        incremental: true,
+                        last_full: Instant::now(),
                     },
                 );
                 loaded += 1;
@@ -991,6 +1035,8 @@ fn blank_volume(vol: &VolumeId) -> VolumeData {
         state: VolumeState::Scanning,
         message: None,
         scan_progress: Arc::new(AtomicU64::new(0)),
+        incremental: true,
+        last_full: Instant::now(),
     }
 }
 
@@ -2761,5 +2807,140 @@ mod tests {
         assert!(clipboard_set_text(&previous).is_ok());
         assert_eq!(read_clipboard_text().as_deref(), Some(previous.as_str()));
         eprintln!("clipboard roundtrip OK: 写入并回读 {} 字节", probe.len());
+    }
+}
+
+#[cfg(test)]
+mod non_ntfs_volume_tests {
+    //! M7（DESIGN §5.4）：无增量通道的卷（目录遍历回退）在引擎里的行为。
+
+    use super::*;
+    use ff_ntfs::{Change, ScanMeta};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 搜索请求（与 `tests` 模块里的同名辅助一致，保持断言口径统一）。
+    fn req(query: &str) -> SearchRequest {
+        SearchRequest {
+            query: query.to_string(),
+            sort: SortSpec::default(),
+            max_hits: None,
+            opts: crate::api::SearchOptions::default(),
+        }
+    }
+
+    /// 「遍历型」假扫描器：`full_scan` 计数，`read_changes` 计数且声明无增量。
+    struct WalkFakeScanner {
+        full: Vec<RawEntry>,
+        full_calls: Arc<AtomicU64>,
+        change_calls: Arc<AtomicU64>,
+    }
+
+    impl VolumeScanner for WalkFakeScanner {
+        fn full_scan(
+            &self,
+            _vol: &VolumeId,
+            sink: &mut dyn FnMut(RawEntry),
+        ) -> ff_ntfs::Result<ScanMeta> {
+            self.full_calls.fetch_add(1, Ordering::SeqCst);
+            for e in &self.full {
+                sink(e.clone());
+            }
+            Ok(ScanMeta {
+                // 遍历卷没有 journal：两个字段就是 0，引擎不该拿它们去读日志。
+                journal_id: 0,
+                next_usn: 0,
+                entries: self.full.len() as u64,
+                elapsed: Duration::ZERO,
+                warnings: 0,
+            })
+        }
+
+        fn read_changes(
+            &self,
+            _vol: &VolumeId,
+            _from: i64,
+            _jid: u64,
+        ) -> ff_ntfs::Result<(Vec<Change>, i64)> {
+            self.change_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ScanError::Unsupported("no usn on walked volume".into()))
+        }
+
+        fn supports_incremental(&self, _vol: &VolumeId) -> bool {
+            false
+        }
+    }
+
+    fn raw(frn: u64, parent: u64, name: &str, is_dir: bool) -> RawEntry {
+        RawEntry {
+            frn,
+            parent_frn: parent,
+            name: name.to_string(),
+            is_dir,
+            attrs: 0,
+            size: if is_dir { 0 } else { 42 },
+            mtime: 1,
+            ctime: 1,
+            atime: 1,
+        }
+    }
+
+    /// 走一遍「遍历卷建索引 → 多轮轮询」：索引可搜，且不会被当成 USN 卷空转。
+    #[test]
+    fn walked_volume_is_searchable_and_not_polled_for_usn() {
+        let e = InProcessEngine::empty();
+        let full_calls = Arc::new(AtomicU64::new(0));
+        let change_calls = Arc::new(AtomicU64::new(0));
+        let vol = VolumeId {
+            serial: 0xE7A1,
+            drive: Some('F'),
+        };
+        e.set_scanner(Box::new(WalkFakeScanner {
+            // 根条目（parent 0，名字不参与路径）+ Windows 目录 + 一个文件，
+            // 结构照搬真实遍历输出，用来验证路径拼接。
+            full: vec![
+                raw(11, 0, ".", true),
+                raw(12, 11, "Windows", true),
+                raw(13, 12, "walked_here.txt", false),
+            ],
+            full_calls: full_calls.clone(),
+            change_calls: change_calls.clone(),
+        }));
+
+        e.rescan(Some(vol.clone())).expect("遍历卷应能建索引");
+        assert_eq!(full_calls.load(Ordering::SeqCst), 1);
+
+        // 5 轮轮询：无增量卷一次都不该去读 USN，也不该在 30s 内重复全量重走。
+        for _ in 0..5 {
+            e.poll_once();
+        }
+        assert_eq!(
+            change_calls.load(Ordering::SeqCst),
+            0,
+            "无增量卷不应每轮空读 read_changes"
+        );
+        assert_eq!(
+            full_calls.load(Ordering::SeqCst),
+            1,
+            "未到间隔不应重复全量重走"
+        );
+
+        let sum = e.search(req("walked_here")).unwrap();
+        assert_eq!(sum.total, 1, "遍历卷的条目必须能被搜到");
+        let rows = e.range(sum.id, 0, 1).unwrap();
+        assert_eq!(rows[0].name, "walked_here.txt");
+        assert_eq!(
+            rows[0].dir, "F:\\Windows",
+            "路径按 parent 链拼出，根名不重复"
+        );
+        assert_eq!(rows[0].size, Some(42));
+    }
+
+    /// 间隔边界：30s 前不重走，到点重走（只测判定，不真等）。
+    #[test]
+    fn walk_rebuild_interval_boundary() {
+        assert!(!walk_due(WALK_REBUILD_INTERVAL - Duration::from_millis(1)));
+        assert!(!walk_due(Duration::ZERO));
+        assert!(walk_due(WALK_REBUILD_INTERVAL));
+        assert!(walk_due(WALK_REBUILD_INTERVAL + Duration::from_secs(5)));
     }
 }

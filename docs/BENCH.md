@@ -548,3 +548,41 @@ C: 约剩 1GB、Rust TMP/TEMP/TMPDIR=`F:/Temp`。以下为真实命令回显，�
   用户身份执行（DESIGN §12/§99）。
 
 **结论：M7 第 2 项「对话框集成」完成；M7 剩余 4 项未立项。**
+
+## M7 第 3 项：非 NTFS 回退遍历（#93，2026-11-16）
+
+环境：Windows（desktop-vtciagn，管理员会话），`ff-cli` debug 构建，TMP=`F:/Temp`。
+测试卷用 `diskpart` 现建现删（96MB VHD → `format fs=exfat quick` → 挂 `G:`），
+不依赖真实 U 盘。
+
+### 卷枚举与文件系统识别
+- `fsutil fsinfo volumeinfo G:` → `Volume Name : SIFTWALK` / `File System Name : exFAT`。
+- `enumerate_volumes` 枚举到 `G:`（`DRIVE_FIXED`；`DRIVE_REMOVABLE` 已纳入代码路径，
+  本机无 U 盘硬件，未实测）。
+
+### 遍历建索引与搜索（真实回显）
+- `ff-cli search G: quarterly`：
+  - `目标卷 G: 文件系统 exFAT（目录遍历回退（无增量））`
+  - `索引就绪: 1 卷 / 9 条 / 建索引 0.003 s`
+  - `查询 "quarterly": 命中 1 条 / 搜索耗时 2 ms` → `[F] 4.0 KB  G:\docs\reports\2026  quarterly-summary.txt`
+- CJK：`查询 "测试文件"` → `G:\media\音乐  测试文件.wav`（7 B）。
+- 目录：`查询 "reports"` → `[D] G:\  reports`。
+- 全量 `*`：9 条，含根条目 `[D] G:\  .`（合成根，见 DECISIONS #93）。
+- 对照：同一 CLI 在 NTFS 卷 `C:` → `1 卷 / 852922 条 / 16.419 s`，路径 `C:\Windows` 等正常
+  （本轮改动未影响 NTFS 路径）。
+
+### 无增量卷的 30s 定期重走（一次性 example，验证后已删除）
+- 首扫后创建 `G:\fresh_marker.txt`，每 1s `poll_once` + 搜索：
+  `BEFORE hits=0` → `CREATED G:\fresh_marker.txt` → `FOUND after 30.0s（定期重走生效）`
+  → `TOTAL entries visible via '*' = 10`。
+- 同一期间 `read_changes` 调用次数为 0（由 `walked_volume_is_searchable_and_not_polled_for_usn` 单测锁定）。
+
+### 门禁
+- workspace fmt/clippy(-D warnings)/test 全绿：**292 passed、0 failed**
+  （ff-ntfs 37 含新增 7 项遍历单测；ff-engine 49 含新增 2 项；其余无回归）。
+- Tauri fmt/clippy(-D warnings)/test/custom-protocol 全绿（顺带修掉上一轮遗留的
+  `cargo fmt` 差异：`fill_active_dialog` 的 `rows.first()` 换行）。
+- 前端 `npm run build` 50 modules、`npm run test:format` 29 断言通过。
+
+**结论：M7 第 3 项「非 NTFS 回退遍历」完成；M7 剩余 3 项（内容搜索 / 硬链接多路径 /
+filelist 导入）未立项。**

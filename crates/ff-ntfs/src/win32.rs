@@ -147,9 +147,14 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, ScanError> {
         let drive = (b'A' + bit) as char;
         let root = format!("{drive}:\\");
         let root_wide = wide(&root);
-        // DRIVE_FIXED = 3；过滤光驱、可移动盘与网络映射盘（DESIGN §5.4）。
+        // DRIVE_FIXED = 3 / DRIVE_REMOVABLE = 2（M7 §5.4：U 盘、存储卡这类
+        // exFAT / FAT32 卷也要能索引，走目录遍历回退）。
+        // 仍排除：光驱（5）、网络映射盘（4）、RAM 盘（6）。网络盘不是不想支持，
+        // 而是遍历没有超时/取消，SMB 卡住会长期占住 scanner 锁、拖死其它卷的
+        // 增量轮询——留到能中断的遍历做出来再开（DECISIONS #93）。
         // SAFETY: root_wide 是 NUL 结尾宽串，调用期间保持有效。
-        if unsafe { GetDriveTypeW(windows::core::PCWSTR(root_wide.as_ptr())) } != 3 {
+        let drive_type = unsafe { GetDriveTypeW(windows::core::PCWSTR(root_wide.as_ptr())) };
+        if drive_type != 3 && drive_type != 2 {
             continue;
         }
         let Ok((serial, fs_name)) = query_volume_by_root(&root) else {

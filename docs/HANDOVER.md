@@ -1,4 +1,4 @@
-# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1/2 项完成）
+# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1/2/3 项完成）
 
 ## 当前状态
 
@@ -22,7 +22,13 @@
   `Alt+D` / 右键「填入打开对话框」经 UIA `ValuePattern::SetValue` 把选中文件完整路径
   写回文件名框。真机踩坑：裸 `WM_SETTEXT` 对 IFileDialog 无效（1148 是 ComboBoxEx32），
   必须 UIA；生产 API 真机读回 `MATCH=true`。详见 BENCH「M7 第 2 项」。
-- **M7 剩余 4 项（内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）
+- **M7 第 3 项「非 NTFS 回退遍历」已完成（DECISIONS #93）**：`enumerate_volumes`
+  纳入可移动卷，新增 `AutoVolumeScanner` 按文件系统分派（NTFS → MFT+USN，其余 →
+  `DirWalkScanner` 目录遍历，`std::fs::read_dir` 手写、零新增依赖）；无增量的卷由引擎
+  每 30s 全量重走。真机用挂载的 exFAT VHD 验收：9 条索引、CJK 名与嵌套路径正确、
+  新建文件 30s 内可见（`FOUND after 30.0s`）。网络盘（`DRIVE_REMOTE`）仍不支持
+  （遍历无超时/取消），已记入 DESIGN §5.4 与本文件欠账。
+- **M7 剩余 3 项（内容搜索 / 硬链接多路径 / filelist 导入）
   未立项，逐项单独立项，不自动推进**。
 
 ## 上一轮局部调整（2026-11-16，已随本轮提交）
@@ -122,18 +128,26 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - **已知限制**：重连后服务侧 `EngineSession` 为全新实例，旧搜索的 `request_id` 失效，
   用户需重新搜索（toast 提示已覆盖）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
 
-## 下一步顺序（M0–M6 完成，M7 第 1/2 项完成；以下均未立项）
+## 下一步顺序（M0–M6 完成，M7 第 1/2/3 项完成；以下均未立项）
 
-1. M7 剩余 4 项逐项单独立项：内容搜索、硬链接多路径、filelist 导入、非 NTFS 回退遍历。
-   属性窗口（#91）、对话框集成（#92）已分别于第 1/2 项完成。
+1. M7 剩余 3 项逐项单独立项：内容搜索、硬链接多路径、filelist 导入。
+   属性窗口（#91）、对话框集成（#92）、非 NTFS 回退遍历（#93）已分别于第 1/2/3 项完成。
 2. 设置持久化、Shell 图标、列宽调整、Top-K 部分选择等既有欠账（见「保留约束与欠账」）。
 3. `ff-http` 目前只实现 `GET /search`；如需 `status`/`rescan` 等端点再单独扩展并重跑安全测试。
 4. UI 设置页的 HTTP 开关仍标「M6 提供 / 禁用」（UI_SPEC）；接入开关需先做设置持久化。
 
-（上述均不自动推进；里程碑边界见 DESIGN §13，M6 证据见 BENCH / #90，M7 属性窗口见 BENCH / #91。）
+（上述均不自动推进；里程碑边界见 DESIGN §13，M6 证据见 BENCH / #90，M7 第 1/2/3 项见 BENCH / #91 / #92 / #93。）
 
 ## 验证
 
+- **M7 第 3 项「非 NTFS 回退遍历」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test
+  全绿（**292 passed、0 failed**：ff-ntfs 37 含新增 7 项遍历单测，ff-engine 49 含新增 2 项）；
+  Tauri 门禁全绿（顺带修掉上一轮遗留的 `cargo fmt` 差异）；前端 build 50 modules + 29 断言。
+  真机 exFAT VHD（`diskpart` 现建现删）：`ff-cli search G: quarterly` 输出
+  `文件系统 exFAT（目录遍历回退（无增量））` / `1 卷 / 9 条 / 0.003 s` /
+  `G:\docs\reports\2026\quarterly-summary.txt`；CJK 与目录查询命中正确；
+eports6\quarterly-summary.txt`；CJK 与目录查询命中正确；
+  新建文件 `FOUND after 30.0s`（见 BENCH / #93）；VHD 与探测 example 已清理。
 - **M7 第 2 项「对话框集成」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test 全绿
   （**281 passed、0 failed**，ff-dialog 新增 5 项分类单测）；Tauri 门禁全绿；前端 build
   50 modules + 29 格式断言通过。真机标准「打开」对话框：`DialogWatcher` 检测到
