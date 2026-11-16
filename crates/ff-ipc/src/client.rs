@@ -43,6 +43,14 @@ impl PipeClient {
         self.last_open.lock().unwrap().clone()
     }
 
+    /// 是否已断线（最近一次命令因管道 I/O / 对端关闭失败）。
+    ///
+    /// `call` 把所有传输错误映射为 `EngineError::Io`，这里用消息前缀识别；
+    /// 仅用于决定是否触发重连，不影响返回给前端的错误语义。
+    pub fn is_disconnected(err: &ff_engine::EngineError) -> bool {
+        matches!(err, ff_engine::EngineError::Io(msg) if msg.contains("pipe"))
+    }
+
     /// 发送一条命令并读取对应响应；transport/协议错误映射为 `EngineError::Io`。
     fn call(&self, command: Command) -> Result<Reply> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -66,6 +74,32 @@ impl PipeClient {
             }),
             other => Ok(other),
         }
+    }
+
+    /// 与 [`EngineClient::status`] 相同的协议调用，但把传输/协议错误以 `Result` 返回，
+    /// 让 UI 后端能据此识别断线并触发重连（trait 方法为兼容契约吞掉错误）。
+    pub fn status_checked(&self) -> Result<EngineStatus> {
+        match self.call(Command::Status)? {
+            Reply::Status(s) => Ok(s),
+            other => Err(unexpected("status", other)),
+        }
+    }
+
+    /// 解析打开动作并返回 [`ResolvedAction`]，同时更新 `last_open()`。
+    ///
+    /// 服务只解析不执行（DESIGN §12）；调用方（UI）拿返回值后以自身身份执行动作。
+    pub fn open_resolved(
+        &self,
+        id: RequestId,
+        index: usize,
+        action: OpenAction,
+    ) -> Result<ResolvedAction> {
+        let resolved = match self.call(Command::Open { id, index, action })? {
+            Reply::Open(r) => r,
+            other => return Err(unexpected("open", other)),
+        };
+        *self.last_open.lock().unwrap() = Some(resolved.clone());
+        Ok(resolved)
     }
 
     /// 把 `VolumeId` 编码成服务侧 resolver 可解析的字符串：`<serial>:<drive>`。
@@ -108,16 +142,13 @@ impl EngineClient for PipeClient {
     }
 
     fn status(&self) -> EngineStatus {
-        match self.call(Command::Status) {
-            Ok(Reply::Status(s)) => s,
-            _ => EngineStatus {
-                volumes: Vec::new(),
-                total_entries: 0,
-                last_saved: None,
-                searching: false,
-                save_error: Some("pipe status request failed".into()),
-            },
-        }
+        self.status_checked().unwrap_or_else(|_| EngineStatus {
+            volumes: Vec::new(),
+            total_entries: 0,
+            last_saved: None,
+            searching: false,
+            save_error: Some("pipe status request failed".into()),
+        })
     }
 
     fn rescan(&self, volume: Option<VolumeId>) -> Result<()> {
@@ -129,14 +160,7 @@ impl EngineClient for PipeClient {
     }
 
     fn open(&self, id: RequestId, index: usize, action: OpenAction) -> Result<()> {
-        match self.call(Command::Open { id, index, action })? {
-            Reply::Open(resolved) => {
-                *self.last_open.lock().unwrap() = Some(resolved);
-                // 真实动作由 UI 进程执行（DESIGN §12），这里只负责解析。
-                Ok(())
-            }
-            other => Err(unexpected("open", other)),
-        }
+        self.open_resolved(id, index, action).map(|_| ())
     }
 }
 

@@ -674,3 +674,21 @@
       3 项真实 OS 管道端到端测试（往返、多客户端会话隔离、卷 ID 解析）通过；
       `ff-service status/bogus` 命令路径实机冒烟通过。**未实测**：SCM 实际安装/启停
       （需管理员、会改系统服务）、SYSTEM 权限下跨会话 ACL、服务崩溃重连、HTTP（未开始）。
+
+89. **M6 普通权限 Tauri 接 PipeClient + 断线重连**（2026-11-16）：
+    - Tauri `EngineState` 改为 `Arc<Backend>`：`InProcess`（管理员兜底）与 `Pipe`
+      （`ff_ipc::PipeClient`）。启动时按当前用户 SID 构造管道名并尝试连接，成功用
+      Pipe、失败回退 InProcess——未装 SCM 的机器行为与 M0–M5 完全一致；六个 Tauri
+      命令签名与前端契约不变。
+    - `open` 双路语义：InProcess 由引擎内部执行动作；Pipe 由服务经 IPC 只返回
+      `ResolvedAction`，UI 进程调新增的 `ff_engine::execute_open_checked` 以当前用户
+      身份执行（DESIGN §12，服务绝不以 SYSTEM 代用户打开/写剪贴板）。新增
+      `ff-engine::actions` 模块（3 项纯函数单测），把 inprocess 已有的 Win32 FFI 暴露给 UI 层。
+    - 重连：`PipeBackend::with_reconnect` 检测传输错误（`EngineError::Io` 含 `pipe`），
+      1s 退避后重建 PipeClient 并至多重试一次；`status_checked` 使状态轮询也走重连保护。
+      结果经 Tauri event `sift:service-status` 发「服务已重连 / 服务已断开，正在重试」，
+      前端 `App.tsx` 用状态栏 toast 如实提示。退避上限避免服务未起时忙重连。
+    - 已知限制：重连后服务侧 `EngineSession` 为全新实例，旧 `request_id` 失效需重新
+      搜索（toast 已提示）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
+    - 验证：workspace + Tauri 的 fmt/clippy(-D warnings)/test 全绿；前端 build + format
+      通过；Pipe 路径由 ff-ipc 3 项真实 OS 管道端到端测试覆盖。

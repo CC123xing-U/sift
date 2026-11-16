@@ -567,11 +567,13 @@ pub trait EngineClient: Send + Sync {
 - 第 10、12 节：服务拆分、命名管道、HTTP API（含全部安全要求）。
 - **验收**：UI 以普通权限运行即可搜索；HTTP 用错误 token / 错误 Host 头请求会被拒绝（写测试）；服务崩溃后 UI 能提示并重连。
 - **当前进度（2026-11-16）**：M6-1 共享协议/时间边界、M6-2 每连接会话隔离、
-  M6-3 连接循环已落地；本轮新增 `ff-ipc`（SID ACL 命名管道 server/client + 真实 OS
-  管道验收）与 `ff-service`（SCM 服务外壳 + 每连接 EngineSession + `%ProgramData%` 索引）。
-  当前桌面应用仍为 InProcess 引擎，**未切换到 Pipe、未安装服务、未开放 HTTP**。
-  下一步：普通权限 Tauri 接 `PipeClient`（含服务崩溃提示/重连），再做 HTTP 鉴权与端到端
-  验收。**SCM 实际安装/启停、SYSTEM 跨会话 ACL、跨进程重连尚未真机实测；M6 整体尚未完成**。
+  M6-3 连接循环已落地；`ff-ipc`（SID ACL 命名管道 server/client + 真实 OS 管道验收）与
+  `ff-service`（SCM 服务外壳 + 每连接 EngineSession + `%ProgramData%` 索引）已实现。
+  桌面 Tauri 已接入 PipeClient（启动时探测服务，可用走管道、否则回退 InProcess；UI 侧
+  执行打开动作；断线退避重连 + 状态事件提示，见 DECISIONS #89）。
+  **仍未安装服务、未开放 HTTP**。下一步：SCM 安装/启停与跨会话 ACL 真机实测，再做
+  HTTP 鉴权与端到端验收。**SCM 实际安装/启停、SYSTEM 跨会话 ACL、跨进程重连尚未真机
+  实测；M6 整体尚未完成**。
 
 ### M7 进阶（逐项单独立项）
 对话框集成（`SetWinEventHook` + UI Automation，先在记事本"打开"对话框验证）· 内容搜索 · 硬链接多路径 · filelist 导入 · 非 NTFS 回退遍历 · 属性窗口。（**结果行右键菜单已于 M5 收尾轮提前实现**，见 §13-M5 与 `UI_SPEC.md` §4.2，不再列在 M7。）

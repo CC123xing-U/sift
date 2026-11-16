@@ -1412,7 +1412,7 @@ fn explorer_select_arg(path: &str) -> String {
 /// - 不以 `explorer` 退出码误判失败（`cmd` 链路里 explorer 常返回 1 被当成失败）；
 /// - 不再继承管理员权限去 `start` 任意程序（至少不再新起一个 admin 控制台）。
 #[cfg(windows)]
-fn shell_open(path: &str, folder: bool) -> Result<()> {
+pub(crate) fn shell_open(path: &str, folder: bool) -> Result<()> {
     use std::ptr::{null, null_mut};
 
     let to_wide = |s: &str| {
@@ -1473,7 +1473,7 @@ fn shell_open(path: &str, folder: bool) -> Result<()> {
 
 /// 非 Windows：真实打开由 UI 层处理；本实现保持跨平台可编译，不实际启动进程。
 #[cfg(not(windows))]
-fn shell_open(_path: &str, _folder: bool) -> Result<()> {
+pub(crate) fn shell_open(_path: &str, _folder: bool) -> Result<()> {
     Ok(())
 }
 
@@ -1502,7 +1502,7 @@ fn file_name_from_full(full: &str) -> &str {
 /// - 失败返回 `Err`，经 `TauriEngine.open` → `onOpenError` 在状态栏显示（P1-9），
 ///   不再像旧实现那样静默 `Ok(())` 让界面撒谎。
 #[cfg(windows)]
-fn clipboard_set_text(text: &str) -> Result<()> {
+pub(crate) fn clipboard_set_text(text: &str) -> Result<()> {
     use std::ffi::c_void;
     use std::ptr::null_mut;
     use std::thread::sleep;
@@ -1571,7 +1571,7 @@ fn clipboard_set_text(text: &str) -> Result<()> {
 
 /// 非 Windows：显式报错而不是假成功——前端会如实提示「剪贴板不可用」。
 #[cfg(not(windows))]
-fn clipboard_set_text(_text: &str) -> Result<()> {
+pub(crate) fn clipboard_set_text(_text: &str) -> Result<()> {
     Err(EngineError::Io("当前平台不支持系统剪贴板".into()))
 }
 

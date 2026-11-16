@@ -10,12 +10,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ff_engine::timeconv;
 
 use ff_engine::api::{
-    EngineClient, EngineStatus, OpenAction, RequestId, ResultRow, SearchRequest, SearchSummary,
+    EngineClient, EngineError, EngineStatus, OpenAction, RequestId, ResultRow, SearchRequest,
+    SearchSummary, VolumeId,
 };
 use ff_engine::InProcessEngine;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -23,9 +24,156 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 
-/// 进程内引擎的托管状态（注入到 Tauri 状态容器，命令据此访问）。
+/// 引擎后端：M6 普通权限模式优先走命名管道连接 `ff-service`；服务不可用时回退
+/// 进程内引擎（M0–M5 管理员行为），保证未安装服务的机器仍可正常使用。
+///
+/// 两种实现都通过 [`EngineClient`] 暴露相同六方法；差异仅在 `open`：
+/// - `InProcess`：引擎内部以 UI 进程身份执行打开/剪贴板动作（见 inprocess::open_impl）；
+/// - `Pipe`：服务只解析出 `ResolvedAction`，由 UI 进程调用 `ff_engine::execute_open_checked`
+///   以当前用户身份执行（DESIGN §12）。
+enum Backend {
+    InProcess(Arc<InProcessEngine>),
+    #[cfg(windows)]
+    Pipe(PipeBackend),
+}
+
+/// 管道后端：持有一个可重连的 `PipeClient`（断线后整体替换，因 PipeClient 内部
+/// 管道流不可复用）。`Mutex` 仅在重连写入时短暂持有，命令调用走 guard 内的引用。
+#[cfg(windows)]
+struct PipeBackend {
+    client: Mutex<Arc<ff_ipc::PipeClient>>,
+    pipe_name: String,
+    /// 上次重连成功的时刻（毫秒）；用于退避，避免服务未起时忙重连。
+    last_reconnect_ms: AtomicU64,
+}
+
+impl Backend {
+    fn search(&self, req: SearchRequest) -> Result<SearchSummary, EngineError> {
+        match self {
+            Backend::InProcess(e) => e.search(req),
+            #[cfg(windows)]
+            Backend::Pipe(p) => p.with_reconnect(|c| c.search(req.clone())),
+        }
+    }
+    fn range(
+        &self,
+        id: RequestId,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ResultRow>, EngineError> {
+        match self {
+            Backend::InProcess(e) => e.range(id, offset, limit),
+            #[cfg(windows)]
+            Backend::Pipe(p) => p.with_reconnect(|c| c.range(id, offset, limit)),
+        }
+    }
+    fn cancel(&self, id: RequestId) {
+        match self {
+            Backend::InProcess(e) => e.cancel(id),
+            #[cfg(windows)]
+            Backend::Pipe(p) => {
+                let _ = p.with_reconnect(|c| {
+                    c.cancel(id);
+                    Ok(())
+                });
+            }
+        }
+    }
+    fn status(&self) -> EngineStatus {
+        match self {
+            Backend::InProcess(e) => e.status(),
+            #[cfg(windows)]
+            Backend::Pipe(p) => p
+                .with_reconnect(|c| c.status_checked())
+                .unwrap_or_else(|_| EngineStatus {
+                    volumes: Vec::new(),
+                    total_entries: 0,
+                    last_saved: None,
+                    searching: false,
+                    save_error: Some("服务不可用".into()),
+                }),
+        }
+    }
+    fn rescan(&self, volume: Option<VolumeId>) -> Result<(), EngineError> {
+        match self {
+            Backend::InProcess(e) => e.rescan(volume),
+            #[cfg(windows)]
+            Backend::Pipe(p) => p.with_reconnect(|c| c.rescan(volume.clone())),
+        }
+    }
+    fn open(&self, id: RequestId, index: usize, action: OpenAction) -> Result<(), EngineError> {
+        match self {
+            Backend::InProcess(e) => e.open(id, index, action),
+            #[cfg(windows)]
+            Backend::Pipe(p) => p.with_reconnect(|c| {
+                let resolved = c.open_resolved(id, index, action)?;
+                ff_engine::execute_open_checked(resolved.action, &resolved.row)
+            }),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl PipeBackend {
+    /// 在**重连保护**下执行一次管道调用：断线错误 → 退避重连 → 至多重试一次。
+    /// 重连成功/失败分别通过 Tauri event 通知前端提示用户。
+    fn with_reconnect<T>(
+        &self,
+        f: impl Fn(&ff_ipc::PipeClient) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let guard = self.client.lock().unwrap();
+        match f(&guard) {
+            Ok(v) => Ok(v),
+            Err(e) if ff_ipc::PipeClient::is_disconnected(&e) => {
+                drop(guard);
+                let now = now_ms();
+                let last = self.last_reconnect_ms.load(Ordering::Relaxed);
+                // 1s 退避：服务刚崩溃时避免每个命令都触发一次 CreateFile。
+                if now.saturating_sub(last) < 1000 {
+                    return Err(e);
+                }
+                self.last_reconnect_ms.store(now, Ordering::Relaxed);
+                dbg_log("pipe: disconnected, attempting reconnect");
+                match ff_ipc::PipeClient::connect(&self.pipe_name) {
+                    Ok(new_client) => {
+                        *self.client.lock().unwrap() = Arc::new(new_client);
+                        emit_service_msg("服务已重连");
+                        let guard = self.client.lock().unwrap();
+                        f(&guard)
+                    }
+                    Err(_) => {
+                        emit_service_msg("服务已断开，正在重试");
+                        Err(e)
+                    }
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// 通知前端服务状态变化（前端监听 `sift:service-status` 用 toast 提示）。
+/// AppHandle 在 setup 时注入 `SERVICE_HANDLE`，重连前若尚未注入则忽略。
+fn emit_service_msg(msg: &str) {
+    if let Some(app) = SERVICE_HANDLE.get() {
+        let _ = app.emit("sift:service-status", msg.to_string());
+    }
+}
+
+/// 服务状态事件使用的 AppHandle（setup 时注入一次）。
+static SERVICE_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 进程内/服务双后端的内核状态（注入到 Tauri 状态容器，命令据此访问）。
+/// `Arc` 使 rescan 线程可克隆共享后端，无需把整个状态跨线程搬运。
 struct EngineState {
-    engine: Arc<InProcessEngine>,
+    backend: Arc<Backend>,
 }
 
 // ───────────────────────── 引擎命令（镜像 EngineClient，DESIGN §9） ─────────────────────────
@@ -37,7 +185,7 @@ struct EngineState {
 
 #[tauri::command]
 fn search(state: tauri::State<EngineState>, req: SearchRequest) -> Result<SearchSummary, String> {
-    state.engine.search(req).map_err(|e| e.to_string())
+    state.backend.search(req).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -51,7 +199,7 @@ fn range(
     // 必须在序列化前转换——FILETIME ≈1.34e17 超过 2^53，直接送进 JS 会先丢精度
     // 再被 `new Date()` 判为 Invalid Date，前端补算也救不回来（见 timeconv.rs）。
     let mut rows = state
-        .engine
+        .backend
         .range(id, offset, limit)
         .map_err(|e| e.to_string())?;
     timeconv::convert_rows(&mut rows);
@@ -60,13 +208,13 @@ fn range(
 
 #[tauri::command]
 fn cancel(state: tauri::State<EngineState>, id: RequestId) {
-    state.engine.cancel(id);
+    state.backend.cancel(id);
 }
 
 #[tauri::command]
 fn status(state: tauri::State<EngineState>) -> EngineStatus {
     // P1-8：状态栏「已保存 HH:MM」同样需要 epoch 毫秒，转换口径与 `range` 一致。
-    let mut s = state.engine.status();
+    let mut s = state.backend.status();
     timeconv::convert_status(&mut s);
     s
 }
@@ -79,9 +227,9 @@ fn rescan(state: tauri::State<EngineState>, volume: Option<String>) -> Result<()
     let _ = volume;
     // P0-4：起线程立即返回，避免在主线程跑全量扫描（否则托盘「重建索引」会让
     // 窗口与托盘无响应数秒到数十秒）。
-    let engine = state.engine.clone();
+    let backend = state.backend.clone();
     std::thread::spawn(move || {
-        let _ = engine.rescan(None);
+        let _ = backend.rescan(None);
     });
     Ok(())
 }
@@ -94,7 +242,7 @@ fn open(
     action: OpenAction,
 ) -> Result<(), String> {
     state
-        .engine
+        .backend
         .open(id, index, action)
         .map_err(|e| e.to_string())
 }
@@ -220,9 +368,9 @@ fn rescan_all(app: &tauri::AppHandle) {
     // S4：托盘回调运行在 UI 线程，同步全量扫描会冻结窗口与托盘；与 `rescan` 命令
     // 路径保持一致——起线程后立即返回，扫描在后台进行。
     if let Some(state) = app.try_state::<EngineState>() {
-        let engine = state.engine.clone();
+        let backend = state.backend.clone();
         std::thread::spawn(move || {
-            let _ = engine.rescan(None);
+            let _ = backend.rescan(None);
         });
     }
 }
@@ -358,6 +506,38 @@ fn build_engine() -> Arc<InProcessEngine> {
     Arc::new(InProcessEngine::empty())
 }
 
+/// 选择引擎后端：服务模式（普通权限，经命名管道）优先，不可用则回退进程内引擎。
+///
+/// 探测方式：解析当前用户 SID → 构造管道名 → 尝试 `PipeClient::connect`（带短超时由
+/// CreateFileW 自身的管道等待决定）。连接成功即持该连接作为初始 client；失败（服务
+/// 未安装/未运行/权限不足）则回退 InProcess——安装服务前的应用行为与 M0–M5 完全一致。
+#[cfg(windows)]
+fn build_backend() -> Arc<Backend> {
+    let pipe_name = ff_ipc::current_user_sid()
+        .ok()
+        .map(|sid| ff_ipc::pipe_name(&sid));
+    if let Some(ref name) = pipe_name {
+        match ff_ipc::PipeClient::connect(name) {
+            Ok(client) => {
+                dbg_log(&format!("backend: pipe service available ({name})"));
+                return Arc::new(Backend::Pipe(PipeBackend {
+                    client: Mutex::new(Arc::new(client)),
+                    pipe_name: name.clone(),
+                    last_reconnect_ms: AtomicU64::new(0),
+                }));
+            }
+            Err(e) => dbg_log(&format!("backend: pipe unavailable ({name}): {e}")),
+        }
+    }
+    dbg_log("backend: falling back to in-process engine");
+    Arc::new(Backend::InProcess(build_engine()))
+}
+
+#[cfg(not(windows))]
+fn build_backend() -> Arc<Backend> {
+    Arc::new(Backend::InProcess(build_engine()))
+}
+
 // ───────────────────────── 托盘 ─────────────────────────
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -397,7 +577,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 // ───────────────────────── 入口 ─────────────────────────
 
 pub fn run() {
-    let engine = build_engine();
+    let backend = build_backend();
 
     let shortcut = "CmdOrCtrl+Alt+Space"
         .parse::<Shortcut>()
@@ -434,7 +614,9 @@ pub fn run() {
     builder
         .setup(move |app| {
             dbg_log("setup: begin");
-            app.manage(EngineState { engine });
+            // 服务状态事件需要 AppHandle；重连时由此通道通知前端 toast。
+            let _ = SERVICE_HANDLE.set(app.handle().clone());
+            app.manage(EngineState { backend });
             build_tray(app)?;
             dbg_log("setup: done (tray built, engine managed)");
             Ok(())

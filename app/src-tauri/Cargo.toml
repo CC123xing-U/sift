@@ -24,6 +24,9 @@ ff-core = { path = "../../crates/ff-core" }
 ff-match = { path = "../../crates/ff-match" }
 ff-ntfs = { path = "../../crates/ff-ntfs" }
 ff-engine = { path = "../../crates/ff-engine" }
+# M6 普通权限模式：经命名管道调用 ff-service；非 Windows 下 ff-ipc 为空 crate，
+# main.rs 的 Pipe 分支以 cfg(windows) 保护，不影响跨平台编译。
+ff-ipc = { path = "../../crates/ff-ipc" }
 
 [features]
 # 默认不启用自定义特性；Tauri 默认特性已含 wry / common-controls-v6。

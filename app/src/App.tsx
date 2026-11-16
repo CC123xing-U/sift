@@ -224,6 +224,12 @@ export default function App() {
     const unlistens: Array<() => void> = [];
     void listen('sift:shown', () => playIn()).then((u) => unlistens.push(u));
     void listen('sift:hiding', () => playOut()).then((u) => unlistens.push(u));
+    // M6 服务模式：后端管道断线/重连时 main.rs 发此事件，状态栏 toast 如实提示。
+    // 只在 Tauri 外壳内监听；浏览器原型（MockEngine）没有该事件。
+    void listen('sift:service-status', (e) => {
+      const msg = (e as { payload?: unknown })?.payload;
+      if (typeof msg === 'string' && msg) showToast(msg);
+    }).then((u) => unlistens.push(u));
     playIn(); // 初次挂载播一次进入动画
     return () => unlistens.forEach((u) => u());
   }, []);

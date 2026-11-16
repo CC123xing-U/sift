@@ -799,6 +799,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ff-ipc"
+version = "0.1.0"
+dependencies = [
+ "ff-engine",
+ "windows",
+]
+
+[[package]]
 name = "ff-match"
 version = "0.1.0"
 dependencies = [
@@ -2931,6 +2939,7 @@ version = "0.1.0"
 dependencies = [
  "ff-core",
  "ff-engine",
+ "ff-ipc",
  "ff-match",
  "ff-ntfs",
  "serde",

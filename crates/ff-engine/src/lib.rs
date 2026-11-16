@@ -8,12 +8,14 @@
 //! 索引落盘与载入、USN 增量接线（`ff_ntfs::VolumeScanner::read_changes` 已实现，但本
 //! crate 尚无调用方）。`api::EngineStatus::last_saved` 因此恒为 `None`。
 
+pub mod actions;
 pub mod api;
 pub mod inprocess;
 pub mod ipc;
 pub mod overlay;
 pub mod timeconv;
 
+pub use actions::{execute_open, execute_open_checked, full_path};
 pub use api::{
     EngineClient, EngineError, EngineStatus, OpenAction, ParseError, RequestId, Result, ResultRow,
     SearchOptions, SearchRequest, SearchSummary, SortKey, SortSpec, VolumeId, VolumeState,

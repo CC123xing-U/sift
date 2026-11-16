@@ -6,10 +6,13 @@
 - `e536db0`：搜索/设置 UI 重整、旧轮次窗口动效与 ACL 修复、规范及证据。
 - `b9075e9`：设置轻量上下转场。用户强调风格一致，因此没有照搬 CompressO 的
   Vaul 抽屉、大圆角、拖拽把手或背景缩放；仅借鉴进入/退出节奏。
-- **M6-1/M6-2/M6-3 + 命名管道与服务外壳已实现，M6 整体仍进行中。** 当前应用仍为
-  InProcess 引擎，没有切换到 Pipe 客户端，没有安装 SCM，没有开放 HTTP。
+- **M6-1/M6-2/M6-3 + 命名管道/服务外壳 + 普通权限 Tauri 接 PipeClient 均已实现，
+  M6 整体仍进行中。** 当前 Tauri 启动时优先探测服务管道（普通权限模式），不可用时
+  回退 InProcess（管理员兜底）；尚未安装 SCM，没有开放 HTTP。
 - 新增 `ff-ipc`（SID ACL 命名管道 server/client）与 `ff-service`（SCM 服务外壳），
-  真实 OS 管道端到端测试通过；下一对话从「普通权限 Tauri 接 PipeClient + 重连」开始。
+  真实 OS 管道端到端测试通过；Tauri 已接入 PipeClient（含 UI 侧执行打开动作、
+  断线退避重连 + 事件提示）。下一对话从「SCM 安装/启停与跨会话 ACL 真机实测」
+  与「HTTP 鉴权」开始。
 
 ## 上一轮局部调整（2026-11-16，已随本轮提交）
 
@@ -91,15 +94,29 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - **未实测**：SCM 实际安装/启停（需管理员）、SYSTEM 跨会话 ACL、服务崩溃重连；
   这些要在真机以普通权限 UI + 已安装服务验收，当前只做了进程内真实 OS 管道往返。
 
+## 普通权限 Tauri 接 PipeClient（2026-11-16，已实现）
+
+- `app/src-tauri/src/main.rs`：`EngineState.backend: Arc<Backend>` 抽象两种实现：
+  `InProcess`（管理员兜底）与 `Pipe`（`ff_ipc::PipeClient`，普通权限）。启动时按当前
+  用户 SID 构造 `\\.\pipe\sift-<SID>` 并尝试连接，成功用 Pipe，失败回退 InProcess——
+  未装服务的机器行为与 M0–M5 完全一致。六个 Tauri 命令签名与前端契约不变。
+- `open` 动作双路语义：InProcess 由引擎内部执行；Pipe 由服务经 IPC 只返回 `ResolvedAction`，
+  UI 进程调 `ff_engine::execute_open_checked` 以当前用户身份执行（DESIGN §12）。
+- 断线退避重连：`PipeBackend::with_reconnect` 检测 `EngineError::Io` 中含 `pipe` 的错误，
+  1s 退避后重建 `PipeClient` 并至多重试一次；成功发 `sift:service-status`「服务已重连」，
+  失败发「服务已断开，正在重试」。前端 `App.tsx` 监听该事件走状态栏 toast。
+  `status_checked` 让状态轮询也能触发重连（trait 方法为兼容契约吞掉错误）。
+- 新增 `ff-engine::actions`：`execute_open` / `execute_open_checked` / `full_path`，
+  把 inprocess 已有的 Win32 Shell/剪贴板 FFI 暴露给 UI 层；3 项纯函数单测。
+- **已知限制**：重连后服务侧 `EngineSession` 为全新实例，旧搜索的 `request_id` 失效，
+  用户需重新搜索（toast 提示已覆盖）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
+
 ## 下一步顺序
 
-1. **普通权限 Tauri 接 `PipeClient`**：UI 启动时判断是否已安装/运行服务，连
-   `\\.\pipe\sift-<SID>`；打开文件/剪贴板仍由 UI 用 `PipeClient::last_open()` 的结果以自身
-   身份执行。实现服务崩溃提示与自动重连（当前连接只在启动时建立，断开后无重连）。
-2. 服务崩溃后完整重连验收；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测（需管理员）。
-3. 默认关闭的 HTTP：127.0.0.1、Bearer token、严格 Host、无宽松 CORS、
+1. 服务崩溃后完整重连验收；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测（需管理员）。
+2. 默认关闭的 HTTP：127.0.0.1、Bearer token、严格 Host、无宽松 CORS、
    count/速率限制；错误 token/Host 等必须自动化测试。
-4. HTTP 完整端到端验收后才标 M6 完成。不进入 M7，不自动改里程碑范围。
+3. HTTP 完整端到端验收后才标 M6 完成。不进入 M7，不自动改里程碑范围。
 
 ## 验证
 
@@ -120,6 +137,10 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - 命名管道/服务验证（#88）：workspace fmt/clippy(-D warnings)/test 全绿；新增 4 项
   SID/SDDL 单测 + 3 项真实 OS 管道端到端测试（往返、多客户端会话隔离、卷 ID 解析）通过；
   `ff-service status/bogus` SCM 命令路径实机冒烟通过。SCM 实际安装/启停与跨会话 ACL 未实测。
+- 普通权限 UI 接入验证（#89）：workspace fmt/clippy(-D warnings)/test 全绿（ff-engine 46、
+  ff-ipc 4+3、其余无回归）；Tauri fmt/clippy(-D warnings)/test 通过；前端 build 50 模块 +
+  29 项格式断言通过。`ff-engine::actions` 新增 3 项纯函数单测；Tauri 管道模式/重连分支
+  仅编译期 + ff-ipc 端到端覆盖，SCM 真机安装后需实测。
 - **新 UI/转场尚未真实 WebView2 复验**。旧 #83 真机日志与截图只代表旧轮次。
   125% 缩放、IME、热键/失焦稳定性与原生窄窗口仍需覆盖。
 - 浏览器预览 `http://127.0.0.1:5177/` 为 MockEngine，不是真实文件结果。
@@ -134,6 +155,8 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - 窗口 CSS 不加常驻 will-change；避免多余大括号吞掉 topbar/flex 布局。
   Tauri 新增 core/event API 时检查 capabilities（#79/#83）。
 - C: 空间约 1GB，Rust 构建设置 TMP/TEMP/TMPDIR 为 `F:/Temp`。
-- M6-1/M6-2/M6-3 + 索引目录 + 8 项确认错误修复已提交（`91559ba`）；本轮命名管道与
-  `ff-service`（ff-ipc/ff-service 新 crate + 文档）尚在工作树，未提交；
-  已提交历史与当前状态以 `git log`、`git status` 为准。
+- 已提交三批：`91559ba`（M6-1/M6-2/M6-3 + 索引目录 + 8 项确认错误修复）、
+  `286e3d3`（命名管道与 `ff-service`：ff-ipc/ff-service 新 crate + 文档）、
+  本轮普通权限 UI 接入（Tauri 双后端 + 重连 + 动作执行 API，提交见 `git log`）。
+  当前工作树仅有 `.workbuddy/memory/` 本地日志（不入 git）；
+  已提交历史以 `git log`、当前状态以 `git status` 为准。
