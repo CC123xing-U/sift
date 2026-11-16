@@ -28,6 +28,8 @@ export interface ResultAreaHandle {
   home(): void;
   end(): void;
   open(action: OpenAction): void;
+  /** M7：把选中结果路径回填到最近的文件对话框（DECISIONS #92）。 */
+  fillActiveDialog(): void;
   hasSelection(): boolean;
 }
 
@@ -51,20 +53,25 @@ interface Props {
   onOpenError?: (msg: string) => void;
   /** P0-2：复制成功的可见反馈（复用状态栏 toast 通道）。 */
   onActionDone?: (msg: string) => void;
+  /** M7：把选中结果路径回填到最近的文件对话框（由 App 调 Tauri 命令）。 */
+  onFillDialog?: (id: number, index: number) => void;
 }
 
 type Panel = 'list' | 'scanning' | 'emptyQuery' | 'noResult' | 'searchingEmpty' | 'error';
 
 // P0-3：右键菜单项。快捷键显示在右侧，让键盘路径可发现（REVIEW_BRIEF §5 P0-3）。
-const MENU_ITEMS: { action: OpenAction; label: string; hint: string }[] = [
+// `fill_dialog` 不是引擎 OpenAction（不经过引擎），由 runAction 特判走 onFillDialog。
+type MenuAction = OpenAction | 'fill_dialog';
+const MENU_ITEMS: { action: MenuAction; label: string; hint: string }[] = [
   { action: 'open', label: I18N.ctxOpen, hint: 'Enter' },
   { action: 'open_folder', label: I18N.ctxOpenFolder, hint: 'Ctrl+Enter' },
   { action: 'properties', label: I18N.ctxProperties, hint: 'Alt+Enter' },
+  { action: 'fill_dialog', label: I18N.ctxFillDialog, hint: 'Alt+D' },
   { action: 'copy_path', label: I18N.ctxCopyPath, hint: 'Ctrl+C' },
   { action: 'copy_name', label: I18N.ctxCopyName, hint: '' },
 ];
 const MENU_W = 216;
-const MENU_H = 190;
+const MENU_H = 224;
 
 const PAGE = 15;
 // 滚动停止后才发 range 请求（UI_SPEC §6.5 / §10 待办 #2）。
@@ -96,6 +103,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     onRescan,
     onOpenError,
     onActionDone,
+    onFillDialog,
   } = props;
 
   const parentRef = useRef<HTMLDivElement>(null);
@@ -183,7 +191,12 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
 
   /** 统一的动作入口：键盘快捷键与右键菜单共用，成功 / 失败都有可见反馈。 */
   const runAction = useCallback(
-    (action: OpenAction, index: number) => {
+    (action: MenuAction, index: number) => {
+      // M7：回填对话框不是引擎动作，交给 App 的 onFillDialog（Tauri 命令）。
+      if (action === 'fill_dialog') {
+        onFillDialog?.(currentId, index);
+        return;
+      }
       // P1-9：open 返回 Result，失败（文件已删 / 结果集已回收 / 剪贴板不可用）
       // 通过 onOpenError 在状态栏提示，而不是静默吞掉。
       engine
@@ -196,7 +209,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
           onOpenError?.(err instanceof Error ? err.message : String(err)),
         );
     },
-    [engine, currentId, onOpenError, onActionDone],
+    [engine, currentId, onOpenError, onActionDone, onFillDialog],
   );
 
   useImperativeHandle(
@@ -211,10 +224,15 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
         if (i >= total) return;
         runAction(action, i);
       },
+      fillActiveDialog: () => {
+        const i = selectedRef.current;
+        if (i >= total) return;
+        onFillDialog?.(currentId, i);
+      },
       hasSelection: () => total > 0,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [total, currentId, engine, virtualizer, runAction],
+    [total, currentId, engine, virtualizer, runAction, onFillDialog],
   );
 
   /** P0-3：在结果行上右键，选中该行并在鼠标处弹出菜单（不越出窗口）。 */
@@ -421,7 +439,7 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
         >
           {MENU_ITEMS.map((it, k) => (
             <React.Fragment key={it.action}>
-              {k === 3 && <div className="ctxsep" role="separator" />}
+              {k === 4 && <div className="ctxsep" role="separator" />}
               <button
                 type="button"
                 role="menuitem"

@@ -748,3 +748,35 @@
   随后关闭）；测试后删除探测程序，无残留窗口。
 - **M7 剩余 5 项**（对话框集成 / 内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）
   仍逐项单独立项，不自动推进。
+
+## #92（2026-11-16）：M7 第 2 项 —— 对话框集成（文件打开/保存框回填）
+
+- **决定**：M7 第 2 项做「对话框集成」：在标准 Windows「打开 / 另存为」对话框成为前台时，
+  Sift 提示用户，用户按 `Alt+D` 或右键菜单「填入打开对话框」把选中文件的完整路径写回
+  对话框的「文件名(N):」框，回填后自动隐藏 Sift 让对话框回前台（用户按回车确认）。
+- **不注入（DESIGN §99）**：新 crate `ff-dialog` 用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND,
+  WINEVENT_OUTOFCONTEXT)` + 专用线程消息循环监听，`#32770` 窗口类 + 标题识别（中/英）
+  判定文件对话框；不注入目标进程 DLL，规避 32/64 位与杀软误报。记住的是对话框 HWND 快照
+  而非"当前前台"——Sift 热键唤出会抢焦点，回填仍写回用户先前打开的对话框。
+- **回填必须用 UI Automation**（真机踩坑）：裸 `FindWindowEx` + `WM_SETTEXT` 对 Vista+
+  IFileDialog 的文件名框无效——控件 ID 1148 实际是 `ComboBoxEx32` 不是 `Edit`；对子
+  `Edit`（非只读）SetFocus 后 `WM_SETTEXT` 读回仍为空（DirectUI 由 UIA 管理文本）。
+  改用 `IUIAutomation` → `ElementFromHandle(dialog)` → 找 control type=Edit 后代中
+  `AutomationId=="1148"` 或名字含「文件名 / File name」者 → `GetCurrentPattern(
+  UIA_ValuePatternId)` → `IUIAutomationValuePattern::SetValue(BSTR(path))`，读回校验通过。
+  这正是 DESIGN §99 指明 UIA 的原因。
+- **链路**：`ff-dialog::{DialogWatcher, fill_active_dialog, has_active_dialog}` →
+  Tauri setup 起监听线程，事件转发为 `sift:dialog-detected`（kind/title）/ `sift:dialog-closed`
+  → 前端状态栏提示 + `Alt+D` / 右键「填入打开对话框」→ Tauri 命令 `fill_active_dialog(id,index)`
+  用 `backend.range` 取行、`ff_engine::full_path` 拼路径（与 execute_open 同源）→ UIA 写入。
+  Backend（InProcess/Pipe）均可，回填在 UI 进程以当前用户身份执行（DESIGN §12）。
+- **FFI 细节**：windows 0.62 的 UIA 符号分散——`IUIAutomation`/`IUIAutomationElement`/
+  `IUIAutomationValuePattern`/`TreeScope_*` 在 `Win32::UI::Accessibility`（与 `CUIAutomation`、
+  `UIA_*PropertyId` 同模块）；`VARIANT` 在 `Win32::System::Variant`，需 `VT_I4` newtype
+  + `wReserved1..3` 字段；`cast()` 来自 `windows::core::Interface` trait。
+- **验证**：ff-dialog 5 项纯函数单测（标题/窗口类分类）+ workspace 281 passed、Tauri 门禁、
+  前端 build 50 modules + 29 格式断言全绿。**真机**（标准 `GetOpenFileNameW` 弹出的
+  `#32770`「打开」框）：`DialogWatcher` 检测到 title=打开/kind=Open；生产 API
+  `fill_active_dialog(D:\Sift\README.md)` 后经 UIA 读回 `READBACK=D:\Sift\README.md`
+  `MATCH=true`。探测 example 验证后已删除，无残留窗口。
+- **M7 剩余 4 项**（内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）仍单独立项。

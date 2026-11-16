@@ -12,6 +12,7 @@ members = [
     "crates/ff-match",
     "crates/ff-ntfs",
     "crates/ff-engine",
+    "crates/ff-dialog",
     "crates/ff-ipc",
     "crates/ff-http",
     "crates/ff-service",

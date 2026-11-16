@@ -517,3 +517,34 @@ C: 约剩 1GB、Rust TMP/TEMP/TMPDIR=`F:/Temp`。以下为真实命令回显，�
   UI 进程 `execute_open_checked` → `ShellExecuteExW`；服务模式仍不代人执行（DESIGN §12）。
 
 **结论：M7 第 1 项「属性窗口」完成；M7 其余 5 项未立项。**
+
+## M7 第 2 项：对话框集成（#92，2026-11-16）
+
+环境：Windows（desktop-vtciagn，管理员会话），workspace debug 构建，TMP=`F:/Temp`。
+
+### FFI 选型踩坑（真机回显，为何必须 UIA）
+- 标准「打开」对话框用 `GetOpenFileNameW`(COM 初始化后) 弹出真实 `#32770`，标题
+  `打开`。`DialogWatcher` 检测到 `DETECTED title="打开" kind=Open`。
+- 裸 Win32 方案失败：`GetDlgItem(1148)` 返回 `ComboBoxEx32`（非 `Edit`）；对两个子
+  `Edit`（`readonly=false`）SetFocus 后 `WM_SETTEXT("PROBE_XYZ")` → `WM_GETTEXT` 读回
+  均为 `""`。证明 Vista+ IFileDialog 文件名框由 UIA 管理，裸 Win32 无效。
+- UIA 方案成功：枚举 control type=Edit 后代，命中 `Edit[52] id="1148" name="文件名(N):"`，
+  `IUIAutomationValuePattern::SetValue` 写入 → `CurrentValue` 读回
+  `after="C:\Windows\notepad.exe" MATCH=true`。
+
+### 生产 API 完整链路（一次性 example，验证后已删除）
+- `DialogWatcher::start()` + `take_receiver()` → 弹框线程弹 `#32770`「打开」框 →
+  主线程收 `DialogEvent::Opened{title:"打开",kind:Open}` → `fill_active_dialog(
+  r"D:\Sift\README.md")` → UIA 独立读回：
+  `READBACK="D:\Sift\README.md"` / `MATCH=true` / `PROBE_DONE`。无残留窗口。
+
+### 门禁
+- workspace fmt/clippy(-D warnings)/test 全绿：**281 passed、0 failed**（ff-dialog 新增
+  5 项标题/窗口类分类单测）；Tauri fmt/clippy(-D warnings)/test/custom-protocol 全绿；
+  前端 build 50 modules + test:format 29 断言通过。
+- 全链路：SetWinEventHook 检测 → `sift:dialog-detected`/`closed` 事件 → 前端状态栏提示 +
+  `Alt+D`/右键「填入打开对话框」→ Tauri `fill_active_dialog(id,index)` → `backend.range`
+  取行 + `ff_engine::full_path` 拼路径 → UIA SetValue → 隐藏 Sift。不注入、UI 进程当前
+  用户身份执行（DESIGN §12/§99）。
+
+**结论：M7 第 2 项「对话框集成」完成；M7 剩余 4 项未立项。**

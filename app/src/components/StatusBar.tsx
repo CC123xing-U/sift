@@ -10,9 +10,11 @@ interface Props {
   status: EngineStatus;
   /** P1-9：打开 / 复制失败的临时提示。 */
   toast?: string | null;
+  /** M7：检测到文件对话框时的持久提示（对话框关闭后清除）。 */
+  hint?: string | null;
 }
 
-export default function StatusBar({ summary, requested, query, status, toast }: Props) {
+export default function StatusBar({ summary, requested, query, status, toast, hint }: Props) {
   const detailRef = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -76,6 +78,11 @@ export default function StatusBar({ summary, requested, query, status, toast }: 
       {toast && (
         <span className="status-toast" role="status">
           {toast}
+        </span>
+      )}
+      {!toast && hint && (
+        <span className="status-toast" role="status">
+          {hint}
         </span>
       )}
       <details

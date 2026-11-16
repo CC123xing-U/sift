@@ -223,6 +223,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ff-dialog"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "ff-engine"
 version = "0.1.0"
 dependencies = [

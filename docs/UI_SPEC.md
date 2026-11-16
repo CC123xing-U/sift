@@ -364,8 +364,8 @@
   `RowContent` 按 `row.is_dir` 传 `null` 给 `formatSize`（2026-11-15 P1-8）——引擎对目录给 `Some(0)`，直接渲染会变成误导性的 `0 B`；`formatSize` 另对 `NaN` / `Infinity` / 负数兜底。
 - 修改时间列：前端契约是 **JS epoch 毫秒**（`types.ts`），引擎 `ff-engine::api::ResultRow.mtime` / `EngineStatus.last_saved` 是 Windows **FILETIME**（100 ns、1601 纪元）。转换由 Tauri IPC 层调用共享模块 `crates/ff-engine/src/timeconv.rs` 在 `range` / `status` 序列化前完成（M6-1 从 Tauri 抽取），**不得在 TS 侧补算**：FILETIME ≈1.34e17 超过 2^53，JSON 反序列化时精度已丢（DECISIONS #81）。
   `stale_meta` 的 `null`、时间未设置（FILETIME ≤ 0）、换算后落在 1900 年前 / 9999 年后的值一律显示空白（状态栏 `—`），`formatTime` / `formatTimeFull` / `formatHHMM` 对 `Invalid Date` 也必须降级，界面不得出现 `NaN-NaN-NaN`。
-- 交互：单击选中；双击 / `Enter` 打开；`Ctrl+Enter` 打开所在文件夹并选中；`Ctrl+C` 复制完整路径；`Alt+Enter` 打开系统属性对话框（M7 第 1 项，DECISIONS #91）；**右键菜单已于 2026-11-15 提前实现**（原标 P2/M7，因用户明确反馈提为 P0，见 DECISIONS #75）。【DESIGN §11.1】
-- **右键菜单（2026-11-15 补，2026-11-16 加「属性」）**：在结果行上右键 → 弹出五项菜单，顺序为「打开（`Enter`）/ 打开所在文件夹（`Ctrl+Enter`）/ 属性（`Alt+Enter`）/ 复制完整路径（`Ctrl+C`）/ 复制文件名」，右侧显示对应快捷键（可发现性），第 3、4 项之间加分隔线（打开类与复制类分组）。
+- 交互：单击选中；双击 / `Enter` 打开；`Ctrl+Enter` 打开所在文件夹并选中；`Ctrl+C` 复制完整路径；`Alt+Enter` 打开系统属性对话框（M7 第 1 项，DECISIONS #91）；`Alt+D` 把路径填入最近的文件对话框（M7 第 2 项，DECISIONS #92）；**右键菜单已于 2026-11-15 提前实现**（原标 P2/M7，因用户明确反馈提为 P0，见 DECISIONS #75）。【DESIGN §11.1】
+- **右键菜单（2026-11-15 补，2026-11-16 加「属性」「填入打开对话框」）**：在结果行上右键 → 弹出六项菜单，顺序为「打开（`Enter`）/ 打开所在文件夹（`Ctrl+Enter`）/ 属性（`Alt+Enter`）/ 填入打开对话框（`Alt+D`）/ 复制完整路径（`Ctrl+C`）/ 复制文件名」，右侧显示对应快捷键（可发现性），第 4、5 项之间加分隔线（打开类与复制类分组）。检测到文件对话框时状态栏显示持久提示（对话框关闭后清除）。
   - 定位：`position:absolute` 相对 `.resultarea`，坐标由鼠标位置换算并 clamp 到窗口内；浏览器原型（居中模拟窗口）与 Tauri 真机都不会溢出。
   - 键盘：菜单 `role="menu"` + 项 `role="menuitem"`，打开后自动聚焦；↑↓ / Home / End 移动高亮，Enter / Space 执行，Esc 关闭。Esc 由 document capture 拦截并 `stopImmediatePropagation`，**抢在 App 全局 Esc 之前**，避免「关菜单顺带隐藏窗口」。
   - 关闭条件：点击菜单外、列表滚动、窗口 resize、搜索结果集切换（换 `currentId`）。
@@ -397,7 +397,7 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
 |---|---|---|
 | P1-1 | 拖拽区按下移动 (+200,+110) | 窗口 rect `[260,100,1033,587]` → `[452,206,1225,693]` ✅；输入框内拖动窗口不动（负向对照）✅ |
 | P0-2 | 无选区时 `Ctrl+C` | 剪贴板 `D:\Sift\.worktrees\d\target\criterion\report` + toast「已复制完整路径」✅ |
-| P0-3 | 结果行右键 | 四项菜单 + 快捷键，rect `[301,133,216,139]` 全在视口内 ✅（此为 2026-11-15 原始四项快照；2026-11-16 M7 加「属性」后为五项，见 DECISIONS #91） |
+| P0-3 | 结果行右键 | 四项菜单 + 快捷键，rect `[301,133,216,139]` 全在视口内 ✅（此为 2026-11-15 原始四项快照；2026-11-16 M7 加「属性」→五项（#91）、加「填入打开对话框」→六项（#92）） |
 | P0-3 | `Esc` / `End`+`Enter` / 鼠标点第三项 | 只关菜单不清输入不隐藏窗口 ✅；键盘复制文件名得 `report` ✅；鼠标复制完整路径 ✅ |
 | 窗口动效（#83） | `Ctrl+Alt+Space` 唤出 / Esc 隐藏 / 失焦隐藏，CDP 断言 `.app-window` 动画 class 与事件 | `sift:shown` → `.window-enter` 重播（140ms scale+fade 带过冲）；`sift:hiding` → `.window-exit`（90ms，实测 opacity 中间帧 0.84）后真隐藏（`hide result ok=true`）；hide 后 30ms 内再唤出挂起隐藏作废（`gen_match=false`）✅；`prefers-reduced-motion` 下时长 0.01ms ✅。**前置**：capabilities 需放行 `core:event:allow-listen/unlisten`（`__TAURI__.event.listen` 走 `plugin:event|listen`，受 ACL 约束，同 #79 模式） |
 | Esc 隐藏修复（#83） | 输入为空时按 `Esc` | 真机窗口隐藏（原 `invoke('hide')` 命令名错误被 `void` 吞掉，实际失效）✅ |
@@ -508,9 +508,10 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
 | `Ctrl+Enter` | 打开所在文件夹并选中该文件 | DESIGN §11.1 |
 | `Ctrl+C` | 输入框聚焦**且有文本选区** → 浏览器原生复制选中文本；无选区且有选中行 → 复制选中项完整路径 | DESIGN §11.1 + 自行决定（不抢走输入框的原生复制） |
 | `Alt+Enter` | 打开系统文件属性对话框（**M7 第 1 项已实现**，右键菜单亦有「属性」项；见 DECISIONS #91） | DESIGN §11.1 |
+| `Alt+D` | 把选中结果的完整路径填入最近的文件「打开 / 另存为」对话框的文件名框（**M7 第 2 项已实现**，右键菜单亦有「填入打开对话框」；见 DECISIONS #92）。无对话框时状态栏提示错误 | M7 #92 |
 | `Esc` | 输入框有内容 → 清空并取消当前搜索；已为空 → 隐藏窗口 | DESIGN §11.1（"清空 / 隐藏"的两段式展开） |
 | `Ctrl+F` | 聚焦输入框（窗口已唤出时） | DESIGN §11.1 |
-| 结果行右键 | 打开五项操作菜单（含「属性」）；菜单内 ↑↓ / Home / End 移动、Enter / Space 执行、Esc 只关菜单（不隐藏窗口） | 2026-11-15 补，P0-3；2026-11-16 加属性项，见 §4.2 / DECISIONS #91 |
+| 结果行右键 | 打开六项操作菜单（含「属性」「填入打开对话框」）；菜单内 ↑↓ / Home / End 移动、Enter / Space 执行、Esc 只关菜单（不隐藏窗口） | 2026-11-15 补，P0-3；2026-11-16 加属性（#91）、填入对话框（#92），见 §4.2 |
 | `Tab` / `Shift+Tab` | 焦点序：`输入框 → ✕ → ⚙ → chips（1 站）→ 列头（4 站）→ 列表（1 站）→ 回到输入框` 循环（Shift 反向） | DESIGN §11.1 + 自行决定：完整循环序 |
 | `Home` / `End` | 跳到首行 / 末行 | 自行决定（列表标准行为） |
 | `PageUp` / `PageDown` | 上/下翻一屏 | 自行决定 |

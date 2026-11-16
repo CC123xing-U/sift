@@ -787,6 +787,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ff-dialog"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "ff-engine"
 version = "0.1.0"
 dependencies = [
@@ -2938,6 +2945,7 @@ name = "sift-app"
 version = "0.1.0"
 dependencies = [
  "ff-core",
+ "ff-dialog",
  "ff-engine",
  "ff-ipc",
  "ff-match",

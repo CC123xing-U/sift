@@ -1,0 +1,34 @@
+[package]
+name = "ff-dialog"
+description = "Sift M7 对话框集成：文件对话框检测 + 路径回填（SetWinEventHook + UI Automation，不注入）"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+
+[target."cfg(windows)".dev-dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+    "UI_UIAutomation",
+]
+
+[target."cfg(windows)".dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+    "UI_UIAutomation",
+]

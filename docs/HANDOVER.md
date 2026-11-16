@@ -1,4 +1,4 @@
-# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1 项完成）
+# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1/2 项完成）
 
 ## 当前状态
 
@@ -17,7 +17,12 @@
   经 `OpenAction::Properties` 全链路调 Windows 系统文件属性对话框。真机踩坑：简单版
   `ShellExecuteW("properties")` 返回 31 被误判失败，改用 `ShellExecuteExW` +
   `SEE_MASK_INVOKEIDLIST` 后对话框真实弹出并验证成功。详见 BENCH「M7 第 1 项」。
-- **M7 剩余 5 项（对话框集成 / 内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）
+- **M7 第 2 项「对话框集成」已完成（DECISIONS #92）**：新 crate `ff-dialog`，
+  `SetWinEventHook` 检测标准「打开/另存为」对话框（`#32770` + 标题识别），
+  `Alt+D` / 右键「填入打开对话框」经 UIA `ValuePattern::SetValue` 把选中文件完整路径
+  写回文件名框。真机踩坑：裸 `WM_SETTEXT` 对 IFileDialog 无效（1148 是 ComboBoxEx32），
+  必须 UIA；生产 API 真机读回 `MATCH=true`。详见 BENCH「M7 第 2 项」。
+- **M7 剩余 4 项（内容搜索 / 硬链接多路径 / filelist 导入 / 非 NTFS 回退）
   未立项，逐项单独立项，不自动推进**。
 
 ## 上一轮局部调整（2026-11-16，已随本轮提交）
@@ -117,10 +122,10 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 - **已知限制**：重连后服务侧 `EngineSession` 为全新实例，旧搜索的 `request_id` 失效，
   用户需重新搜索（toast 提示已覆盖）；SCM 安装/启停、SYSTEM 跨会话 ACL 真机实测仍未做。
 
-## 下一步顺序（M0–M6 完成，M7 第 1 项完成；以下均未立项）
+## 下一步顺序（M0–M6 完成，M7 第 1/2 项完成；以下均未立项）
 
-1. M7 剩余 5 项逐项单独立项：对话框集成（`SetWinEventHook` + UI Automation）、内容搜索、
-   硬链接多路径、filelist 导入、非 NTFS 回退遍历。属性窗口已于第 1 项完成（#91）。
+1. M7 剩余 4 项逐项单独立项：内容搜索、硬链接多路径、filelist 导入、非 NTFS 回退遍历。
+   属性窗口（#91）、对话框集成（#92）已分别于第 1/2 项完成。
 2. 设置持久化、Shell 图标、列宽调整、Top-K 部分选择等既有欠账（见「保留约束与欠账」）。
 3. `ff-http` 目前只实现 `GET /search`；如需 `status`/`rescan` 等端点再单独扩展并重跑安全测试。
 4. UI 设置页的 HTTP 开关仍标「M6 提供 / 禁用」（UI_SPEC）；接入开关需先做设置持久化。
@@ -129,6 +134,11 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 
 ## 验证
 
+- **M7 第 2 项「对话框集成」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test 全绿
+  （**281 passed、0 failed**，ff-dialog 新增 5 项分类单测）；Tauri 门禁全绿；前端 build
+  50 modules + 29 格式断言通过。真机标准「打开」对话框：`DialogWatcher` 检测到
+  title=打开/kind=Open，生产 API `fill_active_dialog` 写路径后 UIA 读回 `MATCH=true`
+  （裸 `WM_SETTEXT` 无效的踩坑与 UIA 方案见 BENCH / #92）；探测 example 已删、无残留。
 - **M7 第 1 项「属性窗口」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test 全绿
   （ff-engine 47 + IPC 契约 12，新增 Properties 线格式与 roundtrip）；Tauri 门禁全绿；
   前端 build 50 modules + 29 格式断言通过。真机 `ShellExecuteExW` + `INVOKEIDLIST`

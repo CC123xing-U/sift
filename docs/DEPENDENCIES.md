@@ -58,3 +58,11 @@
 > 配置文件解析复用 ff-http 已有的 `serde_json 1.0.154`（已登记），token 生成用
 > std 时间/原子计数 + xorshift，无 `getrandom`/`rand`。`ff-service` 只新增一个内部
 > crate 依赖。偏离选型理由见 `DECISIONS #90`。
+
+> **M7 对话框集成（#92）：无新增 crate，但启用了既有 `windows` crate 的 UIA features。**
+> 新 crate `ff-dialog` 依赖 `windows 0.62`（workspace 已由 ff-ipc/ff-ntfs 引入，非新 crate），
+> 新增 feature：`Win32_System_Com` / `Win32_System_Variant` / `Win32_System_Ole` /
+> `Win32_UI_Accessibility` / `UI_UIAutomation`（均为 Windows SDK 绑定，不引入第三方运行时）。
+> 事件监听（SetWinEventHook）用裸 user32 extern，无 winapi 等额外依赖；UIA COM 经
+> windows crate 自动生成的绑定调用，未手写 vtable。偏离"零依赖"传统的原因（Vista+
+> IFileDialog 文件名框必须走 UIA ValuePattern）见 `DECISIONS #92`。

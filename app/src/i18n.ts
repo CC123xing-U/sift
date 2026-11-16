@@ -34,6 +34,7 @@ export const I18N = {
   ctxCopyPath: '复制完整路径',
   ctxCopyName: '复制文件名',
   ctxProperties: '属性',
+  ctxFillDialog: '填入打开对话框',
   ctxMenuLabel: '结果操作菜单',
   ctxHint: '右键查看更多操作',
   copiedPath: '已复制完整路径',

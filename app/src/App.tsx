@@ -122,6 +122,8 @@ export default function App() {
   const composingRef = useRef(false);
   // P1-9：打开 / 复制失败时的临时提示（3 秒）。
   const [toast, setToast] = useState<string | null>(null);
+  // M7：检测到文件对话框时的可发现性提示（状态栏展示，对话框关闭后清除）。
+  const [dialogHint, setDialogHint] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const spinnerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -130,6 +132,28 @@ export default function App() {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   }, []);
+
+  // M7：把选中结果的完整路径回填到最近的文件对话框。
+  // id/index 由 ResultArea 传入（它持有当前搜索 id 与选中行），避免在 currentId
+  // 声明前引用导致 TDZ；键盘 Alt+D 与右键菜单两条路径都保证有选中行。
+  const onFillDialog = useCallback(
+    (id: number, index: number) => {
+      const t = window.__TAURI__;
+      if (!t) {
+        showToast('对话框回填仅在桌面版可用');
+        return;
+      }
+      void t.core
+        .invoke<void>('fill_active_dialog', { id, index })
+        .then(() => {
+          showToast('已填入文件名，按回车确认');
+          // 回填后隐藏 Sift，让对话框回到前台。
+          void t.core.invoke('hide_window');
+        })
+        .catch((err: unknown) => showToast(err instanceof Error ? err.message : String(err)));
+    },
+    [showToast],
+  );
 
   // 状态轮询（1s，UI_SPEC §7.3）。status() 现在是异步（Tauri invoke / Mock 一致），
   // 立即拉一次首帧，之后每秒刷新；卸载时取消未完成的回包写入。
@@ -230,6 +254,14 @@ export default function App() {
       const msg = (e as { payload?: unknown })?.payload;
       if (typeof msg === 'string' && msg) showToast(msg);
     }).then((u) => unlistens.push(u));
+    // M7 对话框集成：检测到文件「打开 / 另存为」对话框时提示用户可用 Alt+D 回填。
+    void listen('sift:dialog-detected', (e) => {
+      const p = (e as { payload?: { kind?: string; title?: string } })?.payload;
+      if (p?.kind) {
+        setDialogHint(`${p.kind}对话框已打开 · 选中结果后按 Alt+D 填入文件名`);
+      }
+    }).then((u) => unlistens.push(u));
+    void listen('sift:dialog-closed', () => setDialogHint(null)).then((u) => unlistens.push(u));
     playIn(); // 初次挂载播一次进入动画
     return () => unlistens.forEach((u) => u());
   }, []);
@@ -397,6 +429,12 @@ export default function App() {
       e.preventDefault();
       return;
     }
+    // M7 对话框集成：Alt+D 把选中文件的完整路径回填到最近的文件对话框（DECISIONS #92）。
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'd') {
+      resultRef.current?.fillActiveDialog();
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter') {
       // P1-4：若还有未触发的防抖，先立即 flush 出搜索；若搜索仍在进行
       // （requested），忽略本次打开，避免打开「输入框已是新查询、结果还是旧」
@@ -517,6 +555,7 @@ export default function App() {
                 onRescan={onRescan}
                 onOpenError={showToast}
                 onActionDone={showToast}
+                onFillDialog={onFillDialog}
               />
               <StatusBar
                 summary={summary}
@@ -524,6 +563,7 @@ export default function App() {
                 query={input}
                 status={status}
                 toast={toast}
+                hint={dialogHint}
               />
               </>
             </div>

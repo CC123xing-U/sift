@@ -247,6 +247,82 @@ fn open(
         .map_err(|e| e.to_string())
 }
 
+// ───────────────────── M7 对话框集成（DESIGN §99 / DECISIONS #92） ─────────────────────
+//
+// 监听文件「打开 / 另存为」对话框前台事件（SetWinEventHook，不注入），用户显式触发后
+// 把选中结果的完整路径经 UIA ValuePattern 回填到对话框「文件名」框。回填在 UI 进程
+// 以当前用户身份执行，不经提权服务（DESIGN §12）。
+
+/// 进程生命周期持有对话框观察器：一旦 Drop 会卸载钩子，故存入 Mutex 常驻。
+/// （`DialogWatcher` 含 mpsc::Receiver 不实现 Sync，需 Mutex 包裹才能进静态区。）
+static DIALOG_WATCHER: Mutex<Option<ff_dialog::DialogWatcher>> = Mutex::new(None);
+
+/// 启动对话框监听：安装钩子并把事件转发为 Tauri 事件给前端提示。失败只记日志，不影响主流程。
+fn start_dialog_watcher(app: &tauri::AppHandle) {
+    let mut watcher = match ff_dialog::DialogWatcher::start() {
+        Ok(w) => w,
+        Err(e) => {
+            dbg_log(&format!("dialog watcher start failed: {e}"));
+            return;
+        }
+    };
+    let rx = match watcher.take_receiver() {
+        Some(rx) => rx,
+        None => {
+            dbg_log("dialog watcher receiver missing");
+            return;
+        }
+    };
+    // 观察器必须常驻（Drop 会卸载钩子）；放入静态 Mutex 槽直至进程退出。
+    *DIALOG_WATCHER.lock().unwrap() = Some(watcher);
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("sift-dialog-events".into())
+        .spawn(move || {
+            use ff_dialog::DialogEvent;
+            while let Ok(evt) = rx.recv() {
+                match evt {
+                    DialogEvent::Opened(snap) => {
+                        let _ = app.emit(
+                            "sift:dialog-detected",
+                            serde_json::json!({
+                                "title": snap.title,
+                                "kind": ff_dialog::kind_label(snap.kind),
+                            }),
+                        );
+                    }
+                    DialogEvent::Closed => {
+                        let _ = app.emit("sift:dialog-closed", ());
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
+/// 把选中结果的完整路径回填到最近识别到的文件对话框「文件名」框。
+/// `id`/`index` 定位结果行（复用引擎 range），路径在 Rust 侧拼（与 execute_open 同源）。
+#[tauri::command]
+fn fill_active_dialog(
+    state: tauri::State<EngineState>,
+    id: RequestId,
+    index: usize,
+) -> Result<(), String> {
+    let rows = state
+        .backend
+        .range(id, index, 1)
+        .map_err(|e| e.to_string())?;
+    let row = rows.first().ok_or_else(|| "结果行不存在或已过期".to_string())?;
+    let path = ff_engine::full_path(row);
+    ff_dialog::fill_active_dialog(&path).map_err(|e| e.to_string())
+}
+
+/// 当前是否存在可回填的文件对话框（前端据此决定是否显示"填入"动作）。
+#[tauri::command]
+fn has_active_dialog() -> bool {
+    ff_dialog::has_active_dialog()
+}
+
 // ───────────────────────── 窗口命令（OS 级 show/hide/toggle） ─────────────────────────
 //
 // 窗口动效（UI_SPEC §2.6 dur-window-in/out，2026-11-15 落地，DECISIONS #83）：
@@ -618,7 +694,9 @@ pub fn run() {
             let _ = SERVICE_HANDLE.set(app.handle().clone());
             app.manage(EngineState { backend });
             build_tray(app)?;
-            dbg_log("setup: done (tray built, engine managed)");
+            // M7：启动文件对话框监听（失败不影响主流程）。
+            start_dialog_watcher(app.handle());
+            dbg_log("setup: done (tray built, engine managed, dialog watcher started)");
             Ok(())
         })
         .on_window_event(move |window, event| {
@@ -656,6 +734,8 @@ pub fn run() {
             status,
             rescan,
             open,
+            fill_active_dialog,
+            has_active_dialog,
             show_window,
             hide_window,
             toggle_window
