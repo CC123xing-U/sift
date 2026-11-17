@@ -247,3 +247,35 @@
   `cd app/src-tauri && cargo build --release --features custom-protocol`（或 `npm run build:tauri`）。
   2026-11-17 17:41 用正确命令重建后截图验证：设置面板正常渲染，非错误页。
 - 门禁：`cargo test --workspace` 全绿、`cargo clippy --workspace --all-targets` 无告警。
+
+## M. 索引文件生命周期专项（2026-11-17）
+
+用户问「索引是否堆积、直接放程序根目录是否正常」。核实：`index_dir()` 取 exe 所在**盘符根**拼
+`<盘符>:\Sift`（main.rs:566），本例程序恰在 `D:\Sift` 故与程序目录重合，并非程序写死在 exe 旁。
+磁盘实况：3 个 `.ffix` 共 106 MB（对应 C/D/F 三卷，按 serial 命名，属正常量）。
+
+### 已修（F1/F4/F7，本轮）
+- **F1 服务模式不清理**：`prune_stale_indexes` 原只在桌面 `build_engine()` 内，`build_backend()` 选
+  PipeBackend 时不执行；ff-service 的 `spawn_initial_scan` 从无清理。换盘/拔盘/serial 变化的旧
+  `.ffix` 在两处各自堆积。修：清理逻辑下沉为 `ff-engine::prune_index_dir(dir, &valid_serials)`，
+  桌面与服务共用；服务 `spawn_initial_scan` 枚举成功后调用。
+- **F4 空集删光**：原守卫只挡 `enumerate_volumes() == Err`，`Ok(vec![])` 时 valid_serials 为空，
+  prune 会把全部合法 `.ffix` 判 stale 删光。修：两处 match 加 `Ok(vols) if !vols.is_empty()` guard，
+  空集与 Err 一样跳过清理。
+- **F7 tmp 残留**：落盘是原子的（写 `<serial>.tmp` → rename），崩溃在中间残留的 `.tmp` 无人清理，
+  且三处清理只认 `ffix`。修：`prune_index_dir` 同时删除 `*.tmp`。
+- 新模块 `crates/ff-engine/src/persist_cleanup.rs`，3 条单测（stale+tmp 删除 / 空集不删 /
+  不可解析文件名保留）；workspace 测试绿、clippy 无告警。
+- 顺带修正 `ff-engine/src/lib.rs` 顶部过期注释（长期 T7 欠账）：原写「落盘/USN 未落地、
+  last_saved 恒 None」，与现状矛盾。
+
+### 记录但不修（风险/收益权衡）
+- **F2 双索引目录**：桌面 InProcess 写 `<盘符>:\Sift`，服务写 `%ProgramData%\Sift`；切换后端
+  会各存一份且互不清理。统一需处理后端切换时的索引迁移 + ACL，牵涉较广，单独评估。
+- **F5 退出写放大**：`flush()->save_all()` 无条件重写全部 Ready 卷（退出即重写 106 MB），
+  `maybe_save()` 用全局 dirty 任一卷变脏就全量重写。改为 per-volume dirty 有「漏置位→变更
+  永不落盘」的数据丢失风险，收益仅是减少 SSD 写入，暂不动核心落盘逻辑。
+- **F6 克隆盘同 serial**：磁盘克隆会复制卷序列号，两卷同 serial 共用 `<serial>.ffix` 互相覆盖；
+  载入用文件内 drive 重建键，盘符漂移可能串卷。属罕见场景，需复合键（serial+GUID）+ 迁移。
+- **F8 离线卷误删**：`valid_serials` 来自 `enumerate_volumes`，排除网络盘/光驱/RAM 盘/离线卷；
+  曾落盘的这类卷再启动会被判 stale 删除，卷恢复后需重扫。可考虑延迟删除。
