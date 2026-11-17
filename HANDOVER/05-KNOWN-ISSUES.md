@@ -238,5 +238,12 @@
 ### 真机验证（本轮）
 - 管理员 + C/D/F 三 NTFS 卷；`cargo test -p sift-tests -- --ignored` 4/4 通过。
 - `ff-cli scan C:` 全量 854,721 条目 / 22.557s，峰值 WS 148.86 MiB，扫描前 NextUSN=27076950472（非0，印证 #38）。
-- debug exe 双击白屏根因：debug build 走 `devUrl=localhost:5173`，依赖 vite dev server；release 用 `frontendDist=../dist` 内嵌页面可独立打开。
+- debug exe 双击白屏根因：debug build 走 `devUrl=localhost:5173`，依赖 vite dev server。
+- **[更正 2026-11-17] release 双击白屏（"localhost 拒绝连接"）根因**：手动 `cargo build --release`
+  不带 `--features custom-protocol` 时，Tauri 的 `cfg(dev)` 仍为真 → 走 `devUrl=localhost:5173`
+  → 无 dev server 时报 ERR_CONNECTION_REFUSED。之前"release 用 frontendDist 可独立打开"的说法
+  **只在 `tauri build`（自动带该 feature）或显式 `--features custom-protocol` 时成立**。
+  `app/src-tauri/Cargo.toml` features 段已注释此坑。正确命令：
+  `cd app/src-tauri && cargo build --release --features custom-protocol`（或 `npm run build:tauri`）。
+  2026-11-17 17:41 用正确命令重建后截图验证：设置面板正常渲染，非错误页。
 - 门禁：`cargo test --workspace` 全绿、`cargo clippy --workspace --all-targets` 无告警。
