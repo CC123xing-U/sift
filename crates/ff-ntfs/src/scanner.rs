@@ -81,6 +81,8 @@ impl VolumeScanner for NtfsVolumeScanner {
                 let parent_frn = name.parent_reference();
                 let standard = file.standard_information();
                 let name = name.to_string();
+                // 主条目的 (parent, name) 副本：别名去重时要用，name 随后被 move 进 RawEntry。
+                let main_name = name.clone();
                 let is_dir = file.is_directory();
                 // DESIGN §5.2：排除规则在建索引时应用。排除目录时其**整棵子树**一并排除
                 // （否则子条目的 parent 找不到、会被挂到根下并计入警告计数）。
@@ -97,7 +99,7 @@ impl VolumeScanner for NtfsVolumeScanner {
                     // Display 是尽力而为的 UTF-8（未配对代理 → U+FFFD）；
                     // to_os_string 无损但契约的 name 是 String。
                     name,
-                    is_dir: file.is_directory(),
+                    is_dir,
                     attrs: standard.map_or(0, |s| s.file_attributes()),
                     size: default_stream_size(&file),
                     mtime: standard.map_or(0, |s| filetime_from(s.modified())),
@@ -105,6 +107,35 @@ impl VolumeScanner for NtfsVolumeScanner {
                     atime: standard.map_or(0, |s| filetime_from(s.accessed())),
                 });
                 entries += 1;
+
+                // M7 #97：硬链接的其余名字（不同目录 / 不同名字）作为额外条目产出。
+                // ntfs-reader 的 hard_links() 已排除 DOS 8.3 别名，每个就是一个真实链接。
+                // 与主条目相同的 FRN + 相同元数据，只是 name/parent 不同；引擎 finish()
+                // 对重复 FRN「先推入者胜」，frn_to_id 仍指向主条目，USN 增量语义不变。
+                // 主条目自身也在 hard_links() 里，按 (parent, name) 去掉即为别名。
+                for link in file.hard_links() {
+                    let lp = link.parent_reference();
+                    let ln = link.to_string();
+                    if lp == parent_frn && ln == main_name {
+                        continue; // 主条目，已产出
+                    }
+                    // 别名指向被排除目录时同样跳过（与主条目排除口径一致）。
+                    if is_excluded_subtree(&ln, is_dir, lp, &excluded_frns) {
+                        continue;
+                    }
+                    sink(RawEntry {
+                        frn, // 与主条目相同
+                        parent_frn: lp,
+                        name: ln,
+                        is_dir,
+                        attrs: standard.map_or(0, |s| s.file_attributes()),
+                        size: default_stream_size(&file),
+                        mtime: standard.map_or(0, |s| filetime_from(s.modified())),
+                        ctime: standard.map_or(0, |s| filetime_from(s.created())),
+                        atime: standard.map_or(0, |s| filetime_from(s.accessed())),
+                    });
+                    entries += 1; // 别名也是可搜索条目，计入 ScanMeta.entries
+                }
 
                 frn_set.insert(mask_frn(frn));
                 *parent_counts.entry(mask_frn(parent_frn)).or_default() += 1;

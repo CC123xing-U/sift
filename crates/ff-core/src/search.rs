@@ -496,6 +496,25 @@ mod tests {
     }
 
     #[test]
+    fn hardlink_alias_is_searchable() {
+        // M7 #97：同一 FRN 的两条名字都能被各自的查询命中。
+        let mut b = IndexBuilder::new(info());
+        b.push(dir(5, 0, "."));
+        b.push(dir(100, 5, "Bin"));
+        b.push(dir(200, 5, "Sys32"));
+        b.push(file(999, 100, "tool.exe", 10, 1)); // 主条目 id=3
+        b.push(file(999, 200, "driver.dll", 10, 1)); // 别名 id=4
+        let ix = b.finish();
+        let token = CancelToken::new();
+        assert_eq!(ix.search(&parse("tool").unwrap(), &token), vec![3]);
+        assert_eq!(ix.search(&parse("driver").unwrap(), &token), vec![4]);
+        // 扩展名过滤与 path: 条件对别名同样生效。
+        assert_eq!(ix.search(&parse("*.exe").unwrap(), &token), vec![3]);
+        assert_eq!(ix.search(&parse("*.dll").unwrap(), &token), vec![4]);
+        assert_eq!(ix.search(&parse("path:sys32").unwrap(), &token), vec![2, 4]);
+    }
+
+    #[test]
     fn substring_and_phrase() {
         assert_eq!(hits("read"), vec![1]);
         assert_eq!(hits("pdf"), vec![2, 5]);

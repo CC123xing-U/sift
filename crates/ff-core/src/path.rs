@@ -142,6 +142,24 @@ mod tests {
     }
 
     #[test]
+    fn hardlink_aliases_have_independent_paths() {
+        // M7 #97：同一 FRN（一个文件）在两处各有一个名字。两条索引条目各自
+        // 解析出真实路径；frn_to_id 仍指向先推入的主条目。
+        let mut b = IndexBuilder::new(info());
+        b.push(dir(5, 0, ".")); // 0 root
+        b.push(dir(100, 5, "Bin")); // 1
+        b.push(dir(200, 5, "Tools")); // 2
+                                      // 主条目：C:\Bin\tool.exe
+        b.push(file(999, 100, "tool.exe")); // 3
+                                            // 别名：同 FRN，另一 parent 与名字 → C:\Tools\driver.dll
+        b.push(file(999, 200, "driver.dll")); // 4
+        let ix = b.finish();
+        assert_eq!(ix.path_string(3).unwrap(), "C:\\Bin\\tool.exe");
+        assert_eq!(ix.path_string(4).unwrap(), "C:\\Tools\\driver.dll");
+        assert_eq!(ix.frn_to_id(999), Some(3), "frn_to_id 指向先推入的主条目");
+    }
+
+    #[test]
     fn write_path_reuses_buffer() {
         let ix = tree();
         let mut buf = Vec::with_capacity(64);
