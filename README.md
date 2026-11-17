@@ -24,16 +24,14 @@
 需要 Rust（stable）、Node.js 18+。
 
 ```bash
-# 1) 前端
-cd app && npm install && npm run build && cd ..
+# 一条命令搞定（推荐）：构建前端 + 带 custom-protocol 的正式版
+cd app && npm install && npm run build:release
+#   产物：app/src-tauri/target/release/sift-app.exe
 
-# 2) 桌面正式版（关键：必须带 custom-protocol，否则双击报"localhost 拒绝连接"）
-cd app/src-tauri
-cargo build --release --features custom-protocol
-#   产物：target/release/sift-app.exe
-
-# 也可以直接用 Tauri CLI（会自动带上该 feature）：
-#   npm run build:tauri
+# 或手动分步（关键：必须带 custom-protocol，否则双击报"localhost 拒绝连接"）：
+#   cd app && npm run build
+#   cd src-tauri && cargo build --release --features custom-protocol
+# 也可用 Tauri CLI（自动带该 feature）：npm run build:tauri
 ```
 
 > ⚠️ 单纯的 `cargo build --release` **不带** `--features custom-protocol` 会产出白屏 exe（Tauri 走 `devUrl` 请求 `localhost:5173`）。开发调试用 `npm run dev:tauri`（需先起 vite dev server）。
