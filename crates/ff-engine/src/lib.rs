@@ -2,18 +2,21 @@
 //! （DESIGN §2.2-1、§9）。
 //!
 //! 已落地：`api` 契约 + `InProcess` 实现（`inprocess.rs`：卷管理、`search` / `range` /
-//! `cancel` / `status` / `rescan` / `open`，跨平台可编译）。
+//! `cancel` / `status` / `rescan` / `open`；Base+Overlay 增量层、后台合并、索引落盘 /
+//! 载入、USN 增量轮询、启动复用 `startup_reconcile`），跨平台可编译。
+//! `api::EngineStatus::last_saved` 在确有落盘索引时反映最近保存时间。
 //!
-//! 仍未落地（DESIGN §4.3 / §6 / §13-M2）：Base+Overlay 增量层、后台合并（compaction）、
-//! 索引落盘与载入、USN 增量接线（`ff_ntfs::VolumeScanner::read_changes` 已实现，但本
-//! crate 尚无调用方）。`api::EngineStatus::last_saved` 因此恒为 `None`。
+//! 目录清理（`persist_cleanup.rs`）由桌面与服务两个后端共用。
 
 pub mod actions;
 pub mod api;
 pub mod inprocess;
 pub mod ipc;
 pub mod overlay;
+pub mod persist_cleanup;
 pub mod timeconv;
+
+pub use persist_cleanup::prune_index_dir;
 
 pub use actions::{execute_open, execute_open_checked, full_path};
 pub use api::{

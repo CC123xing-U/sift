@@ -8,7 +8,7 @@
 #![windows_subsystem = "windows"]
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -506,11 +506,20 @@ fn build_engine() -> Arc<InProcessEngine> {
         // 既有 .ffix 误判为幽灵卷删光，毁掉秒级冷启动。失败时跳过清理，保留磁盘
         // 上的索引，仍尝试 load_all；本轮不扫描，下次启动枚举恢复后再收敛。
         let available = match ff_ntfs::win32::enumerate_volumes() {
-            Ok(vols) => {
+            Ok(vols) if !vols.is_empty() => {
                 let valid_serials: HashSet<u32> = vols.iter().map(|v| v.serial).collect();
-                prune_stale_indexes(&save_dir, &valid_serials);
+                let removed = ff_engine::prune_index_dir(&save_dir, &valid_serials);
+                if removed > 0 {
+                    dbg_log(&format!("engine: pruned {removed} stale index/tmp file(s)"));
+                }
                 cleanup_legacy_indexes();
                 vols
+            }
+            Ok(empty) => {
+                // 枚举「成功但为空」：不得清理（否则空集删光所有合法索引），但仍保留
+                // 已载入的磁盘索引供查询；本轮不扫描。
+                dbg_log("engine: enumerate_volumes returned empty, skip prune");
+                empty
             }
             Err(e) => {
                 dbg_log(&format!(
@@ -577,29 +586,6 @@ fn index_dir() -> PathBuf {
             PathBuf::from(format!(r"{}\Sift", prefix.as_os_str().to_string_lossy()))
         }
         _ => fallback(),
-    }
-}
-
-#[cfg(windows)]
-fn prune_stale_indexes(dir: &Path, valid_serials: &HashSet<u32>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("ffix") {
-            continue;
-        }
-        let Some(serial) = path
-            .file_stem()
-            .and_then(|x| x.to_str())
-            .and_then(|x| x.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if !valid_serials.contains(&serial) {
-            let _ = std::fs::remove_file(path);
-        }
     }
 }
 

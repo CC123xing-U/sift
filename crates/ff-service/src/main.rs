@@ -188,7 +188,7 @@ fn run_service() -> windows_service::Result<()> {
         eprintln!("load_all failed (will full-scan): {e}");
     }
     // 后台全量扫描各卷（此处用卷枚举；失败则仅以已载入索引服务）。
-    spawn_initial_scan(engine.clone());
+    spawn_initial_scan(engine.clone(), save_dir);
 
     // 管道名与 ACL：优先活动登录用户 SID；无交互会话时回退 SYSTEM SID（仅 SYSTEM 客户端可用）。
     let sid = interactive_user_sid().or_else(|_| current_user_sid());
@@ -291,9 +291,16 @@ fn program_data_sift_dir() -> PathBuf {
         .join("Sift")
 }
 
-fn spawn_initial_scan(engine: Arc<InProcessEngine>) {
+fn spawn_initial_scan(engine: Arc<InProcessEngine>, save_dir: std::path::PathBuf) {
     std::thread::spawn(move || match ff_ntfs::win32::enumerate_volumes() {
-        Ok(vols) => {
+        Ok(vols) if !vols.is_empty() => {
+            // 与桌面端共用清理：删除幽灵卷 .ffix + 崩溃残留 .tmp。服务模式此前
+            // 完全没有清理，换盘/拔盘/serial 变化的旧索引永久堆积（F1）。
+            let valid: std::collections::HashSet<u32> = vols.iter().map(|v| v.serial).collect();
+            let removed = ff_engine::prune_index_dir(&save_dir, &valid);
+            if removed > 0 {
+                eprintln!("pruned {removed} stale index/tmp file(s) from {save_dir:?}");
+            }
             let vids: Vec<_> = vols
                 .iter()
                 .map(|v| ff_engine::VolumeId {
@@ -316,6 +323,7 @@ fn spawn_initial_scan(engine: Arc<InProcessEngine>) {
                 }
             }
         }
+        Ok(empty) => eprintln!("enumerate_volumes returned empty, skip prune: {} volume(s)", empty.len()),
         Err(e) => eprintln!("enumerate_volumes failed: {e}"),
     });
 }
