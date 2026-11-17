@@ -329,7 +329,10 @@ impl VolumeIndex {
                 e
             }
         };
-        &arena[start..end.max(start)]
+        // 防御性取切片：正常索引由 load / IndexBuilder 保证 start/end 合法，但
+        // name_in 接收任意 arena，用 get() 确保畸形数据下退化为空串而非越界 panic。
+        let hi = end.max(start);
+        arena.get(start..hi).unwrap_or(&[])
     }
 
     /// 匹配用 arena（默认小写副本；大小写敏感时用原文）。

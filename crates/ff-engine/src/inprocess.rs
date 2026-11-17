@@ -237,6 +237,11 @@ impl EngineInner {
                     journal_id: meta.journal_id,
                     next_usn: meta.next_usn,
                 };
+                // 把权威续读起点同步进 index.volume，再赋给 vd.index：
+                // 任何直接 index.save() 的路径（或旧版本代码）都不会把
+                // next_usn 写回成 0。vd.info 与 index.volume 保持同一份值。
+                let mut index = index;
+                index.volume = vd.info.clone();
                 vd.index = index;
                 vd.overlay = Overlay::default();
                 vd.state = VolumeState::Ready;
@@ -787,7 +792,11 @@ impl EngineInner {
             return Ok(());
         }
         let path = dir.join(format!("{}.ffix", vd.info.serial));
-        vd.index.save(&path)?;
+        // 用运行时权威 info 落盘：它携带推进后的 journal_id / next_usn。
+        // vd.index.volume 只是全扫那一刻的快照（next_usn 常为 0），若直接
+        // 用 index.save() 会让磁盘索引的续读起点永远停在旧值，重启后回放 /
+        // 全量重建，磁盘缓存形同虚设（见 I 组索引复用缺陷）。
+        vd.index.save_with_volume(&path, &vd.info)?;
         *self.last_saved.lock().unwrap() = Some(now_filetime());
         Ok(())
     }
@@ -837,7 +846,9 @@ impl EngineInner {
     }
 
     fn load_all(&self, dir: &Path) -> io::Result<()> {
-        let mut loaded = 0usize;
+        // 三阶段，避免持 volumes 写锁时做 IO（GetVolumeInformationW）/ 与 scanner
+        // 锁形成 AB-BA：① 读盘收集；② 锁外查增量通道；③ 一次性插入。
+        let mut loaded: Vec<(VolumeId, VolumeIndex)> = Vec::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -849,7 +860,29 @@ impl EngineInner {
                     serial: index.volume.serial,
                     drive: index.volume.drive,
                 };
-                let mut vols = self.volumes.write().unwrap();
+                loaded.push((vid, index));
+            }
+        }
+
+        // 增量通道在锁外一次性查好。冷启动不再强制全量 rescan，所以这里必须把
+        // load_all 原先硬编码的 `incremental: true` 覆盖成真实值：非 NTFS 卷若
+        // 误判为有 USN，后台会一直空读 Unsupported，永不走定期重走而停在旧索引。
+        let incremental_flags: HashMap<VolumeId, bool> = {
+            let guard = self.scanner.lock().unwrap();
+            match guard.as_ref() {
+                Some(sc) => loaded
+                    .iter()
+                    .map(|(vid, _)| (vid.clone(), sc.supports_incremental(vid)))
+                    .collect(),
+                None => HashMap::new(),
+            }
+        };
+
+        let loaded_count = loaded.len();
+        {
+            let mut vols = self.volumes.write().unwrap();
+            for (vid, index) in loaded {
+                let incremental = incremental_flags.get(&vid).copied().unwrap_or(true);
                 vols.insert(
                     vid,
                     VolumeData {
@@ -859,21 +892,36 @@ impl EngineInner {
                         state: VolumeState::Ready,
                         message: None,
                         scan_progress: Arc::new(AtomicU64::new(u64::MAX)),
-                        // 冷启动载入的索引还不知道本卷当前是否有 USN：先按有增量处理，
-                        // 后台首轮 `rescan` 会用 `supports_incremental` 覆盖成真实值。
-                        incremental: true,
+                        incremental,
                         last_full: Instant::now(),
                     },
                 );
-                loaded += 1;
             }
         }
         // E5：只在真的载入了索引时才标记"已保存"；全新安装 0 个 .ffix 时保持 None，
         // 避免状态栏显示误导性的"已保存 HH:MM"。
-        if loaded > 0 {
+        if loaded_count > 0 {
             *self.last_saved.lock().unwrap() = Some(now_filetime());
         }
         Ok(())
+    }
+
+    /// 启动对账：返回磁盘上无可复用索引、必须全量重建的卷。
+    ///
+    /// `load_all` 已把可续读的磁盘索引置为 `Ready`；这些卷保持原样，由后台
+    /// `poll_volume` 从 `next_usn` 续读关机期间的变更（journal 失效会自动重建，
+    /// 见 `poll_volume` 的 `JournalUnavailable` 分支）。只有新卷 / 空卷 /
+    /// 载入失败卷才需要全量扫描，交给调用方 `mark_pending` + `rescan`。
+    fn startup_reconcile(&self, available: &[VolumeId]) -> Vec<VolumeId> {
+        let vols = self.volumes.read().unwrap();
+        available
+            .iter()
+            .filter(|vid| match vols.get(*vid) {
+                Some(vd) => vd.state != VolumeState::Ready || vd.index.entry_count() == 0,
+                None => true,
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -963,6 +1011,14 @@ impl InProcessEngine {
     /// 从落盘目录载入所有卷（按 `<serial>.ffix` 文件名）。
     pub fn load_all(&self, dir: &Path) -> io::Result<()> {
         self.inner.load_all(dir)
+    }
+
+    /// 启动对账：载入磁盘索引后，返回仍需全量重建的卷（新卷 / 空索引 / 失效卷）。
+    ///
+    /// 配套用法：`load_all(dir)` → `startup_reconcile(&vids)` → 仅对返回列表
+    /// `mark_pending` + `rescan`。已复用的卷保持 `Ready`，由后台续读增量。
+    pub fn startup_reconcile(&self, available: &[VolumeId]) -> Vec<VolumeId> {
+        self.inner.startup_reconcile(available)
     }
 }
 
@@ -3168,5 +3224,108 @@ mod non_ntfs_volume_tests {
         assert!(!walk_due(Duration::ZERO));
         assert!(walk_due(WALK_REBUILD_INTERVAL));
         assert!(walk_due(WALK_REBUILD_INTERVAL + Duration::from_secs(5)));
+    }
+
+    // ───────────── 索引复用回归：落盘续读起点 + 启动对账 ─────────────
+
+    /// 落盘必须携带权威 journal 起点（next_usn / journal_id），否则重启后
+    /// 从 0 续读 → JournalUnavailable → 全量重建，磁盘缓存形同虚设。
+    #[test]
+    fn save_persists_runtime_usn_position_not_index_snapshot() {
+        let dir = std::env::temp_dir().join(format!("sift_usn_pos_{}", now_filetime()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vid = VolumeId {
+            serial: 7,
+            drive: Some('D'),
+        };
+
+        // 索引快照里的 volume 是默认值（next_usn=0）；运行时的 vd.info 带真实起点。
+        let entry = |frn, parent, name: &str, is_dir| EntryInput {
+            frn,
+            parent_frn: parent,
+            name: name.to_string(),
+            is_dir,
+            attrs: 0,
+            size: 42,
+            mtime: 1,
+            ctime: 1,
+            atime: 1,
+        };
+        let mut b = IndexBuilder::new(VolumeInfo {
+            drive: Some('D'),
+            serial: 7,
+            ..Default::default()
+        });
+        b.push(entry(5, 0, ".", true));
+        b.push(entry(100, 5, "reuse_me.txt", false));
+        let snap = b.finish();
+        let e = InProcessEngine::empty();
+        e.add_volume(vid.clone(), snap);
+
+        // 通过增量轮询推进运行时 next_usn（Overlay 变更路径），index 快照不会跟着变。
+        {
+            let mut vols = e.inner.volumes.write().unwrap();
+            let vd = vols.get_mut(&vid).unwrap();
+            vd.info.journal_id = 0xABCD;
+            vd.info.next_usn = 987_654;
+        }
+        e.set_save_dir(&dir);
+        e.save_all().unwrap();
+
+        // 重新载入：索引元数据必须带推进后的起点，而不是快照的 0。
+        let e2 = InProcessEngine::empty();
+        e2.set_save_dir(&dir);
+        e2.load_all(&dir).unwrap();
+        {
+            let vols = e2.inner.volumes.read().unwrap();
+            let vd = vols.get(&vid).expect("卷应从磁盘载入");
+            assert_eq!(
+                vd.info.journal_id, 0xABCD,
+                "落盘应携带运行时 journal_id"
+            );
+            assert_eq!(
+                vd.info.next_usn, 987_654,
+                "落盘应携带推进后的 next_usn（而非索引快照的 0）"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// startup_reconcile：磁盘有可续读索引的卷不应再被全扫；新卷/空索引才需重建。
+    #[test]
+    fn startup_reconcile_only_returns_missing_or_empty_volumes() {
+        let e = InProcessEngine::empty();
+        let reused = VolumeId {
+            serial: 10,
+            drive: Some('C'),
+        };
+        let brand_new = VolumeId {
+            serial: 11,
+            drive: Some('D'),
+        };
+        // 非空 Ready 索引 → 可复用
+        let entry = |frn, parent, name: &str, is_dir| EntryInput {
+            frn,
+            parent_frn: parent,
+            name: name.to_string(),
+            is_dir,
+            attrs: 0,
+            size: 42,
+            mtime: 1,
+            ctime: 1,
+            atime: 1,
+        };
+        let mut b = IndexBuilder::new(VolumeInfo {
+            drive: Some('C'),
+            ..Default::default()
+        });
+        b.push(entry(5, 0, ".", true));
+        b.push(entry(100, 5, "reuse_me.txt", false));
+        e.add_volume(reused.clone(), b.finish());
+        // brand_new 完全不在 vols 里 → 需要全扫
+
+        let need = e.startup_reconcile(&[reused.clone(), brand_new.clone()]);
+        assert_eq!(need, vec![brand_new], "只有缺失索引的卷需要全量重建");
+        assert!(!need.contains(&reused), "已有磁盘索引的卷必须复用，不得重扫");
     }
 }

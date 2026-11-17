@@ -43,11 +43,14 @@ pub fn check_bearer(auth: Option<&str>, expected: &str) -> Result<(), &'static s
     let auth = auth.ok_or("missing Authorization header")?;
     let value = auth.trim();
     // 严格前缀匹配（大小写不敏感的方案名，RFC 7235），后接一个空格 + token。
-    if value.len() < 7 || !value[..7].eq_ignore_ascii_case("Bearer ") {
+    // 按字节切片：value 是 UTF-8 String，value[..7] 在第 7 字节落在多字节字符中间时会
+    // panic（char boundary）。头值可由远端控制，故全程用 as_bytes() 比较。
+    let bytes = value.as_bytes();
+    if bytes.len() < 7 || !bytes[..7].eq_ignore_ascii_case(b"Bearer ") {
         return Err("not a Bearer credential");
     }
-    let candidate = &value[7..];
-    if constant_time_eq(candidate.as_bytes(), expected.as_bytes()) {
+    let candidate = &bytes[7..];
+    if constant_time_eq(candidate, expected.as_bytes()) {
         Ok(())
     } else {
         Err("invalid bearer token")
@@ -221,6 +224,16 @@ mod tests {
         assert!(check_bearer(Some("Bearer "), token).is_err());
         // token 不得出现在查询串里——服务端根本只看 Authorization 头。
         assert!(check_bearer(Some("?token=abc123TOKEN"), token).is_err());
+    }
+
+    #[test]
+    fn bearer_non_ascii_prefix_does_not_panic() {
+        let token = "abc123TOKEN";
+        // 第 7 字节落在多字节字符中间时，字符串切片 value[..7] 会 panic（char boundary）。
+        // 头值可由远端控制，必须优雅返回 Err。
+        assert!(check_bearer(Some("abcdefé"), token).is_err());
+        assert!(check_bearer(Some("Bearer 你好"), token).is_err());
+        assert!(check_bearer(Some("中文字符填充值超过七字节"), token).is_err());
     }
 
     // ── Rate limit ──────────────────────────────────────────

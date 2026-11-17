@@ -216,10 +216,21 @@ impl VolumeIndex {
     /// 由调用方传入完整路径（开发期 `%LOCALAPPDATA%\Sift\index-<serial>.bin`，
     /// 服务期 `%ProgramData%\Sift\...`）；本函数不触碰环境变量，保持纯逻辑可单测。
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        self.save_with_volume(path, &self.volume)
+    }
+
+    /// 用外部卷元数据落盘，条目列仍取自本索引。
+    ///
+    /// 引擎运行时的 `VolumeInfo.next_usn` 会随每次 USN 增量推进，而
+    /// `index.volume` 只是建索引那一刻的快照。若落盘坚持用 `self.volume`，
+    /// 重启后就会从旧的续读起点（全扫时甚至为 0）回放，轻则重复处理大批变更，
+    /// 重则被判 `JournalUnavailable` 触发全量重建——磁盘缓存就此失效。
+    /// 调用方应传入权威的运行时 `VolumeInfo`。
+    pub fn save_with_volume(&self, path: &Path, volume: &VolumeInfo) -> io::Result<()> {
         let mut w = Writer::new();
         w.bytes(&MAGIC);
         w.u32(FORMAT_VERSION);
-        write_volume(&mut w, &self.volume);
+        write_volume(&mut w, volume);
         w.blob(self.names.as_slice());
         w.blob(self.names_lower.as_slice());
         w.slice(self.name_off.as_slice(), |e| e.to_le_bytes());
@@ -299,6 +310,15 @@ impl VolumeIndex {
             return None;
         }
 
+        // name_off 是名字 arena 的切片偏移，name_in/highlight 会直接拿它索引 names。
+        // CRC 只保证字节未被意外改动（算法公开可重算），不保证语义合法：一个 CRC 正确
+        // 但 name_off 越界/非单调的索引会在首次取名字时 panic。这里把不变量在数据入口
+        // 一次性校验：首项 0、单调不减、每项的界不超过 arena 长度。
+        // 非法则返回 None → 调用方触发全量重建，符合"load 绝不 panic"契约。
+        if !name_off_valid(&name_off, names.len()) {
+            return None;
+        }
+
         Some(VolumeIndex::from_raw(
             volume,
             names,
@@ -313,6 +333,20 @@ impl VolumeIndex {
             atime,
         ))
     }
+}
+
+/// 校验名字偏移表的语义不变量：条目非空时首项必须为 0、序列单调不减、
+/// 每项都落在名字 arena 范围内。防止 CRC 合法但内容畸形的索引在取名字时越界 panic。
+fn name_off_valid(off: &[u32], arena_len: usize) -> bool {
+    if off.is_empty() {
+        return true;
+    }
+    let limit = arena_len as u64;
+    if off[0] != 0 {
+        return false;
+    }
+    off.windows(2).all(|w| w[0] <= w[1])
+        && off.iter().all(|&o| (o as u64) <= limit)
 }
 
 fn u16_from(b: &[u8]) -> u16 {
@@ -474,5 +508,20 @@ mod tests {
         fs::write(&p, &bytes[..bytes.len() - 8]).unwrap();
         assert!(VolumeIndex::load(&p).is_none());
         cleanup(&p);
+    }
+
+    #[test]
+    fn name_off_valid_rejects_malformed_offsets() {
+        // 合法：首项 0、单调、不越界
+        assert!(name_off_valid(&[0, 3, 7], 8));
+        assert!(name_off_valid(&[0], 0));
+        assert!(name_off_valid(&[], 100));
+        // 首项非 0
+        assert!(!name_off_valid(&[1, 3], 8));
+        // 非单调
+        assert!(!name_off_valid(&[0, 5, 3], 8));
+        // 越界（含 u32::MAX）
+        assert!(!name_off_valid(&[0, u32::MAX], 8));
+        assert!(!name_off_valid(&[0, 9], 8));
     }
 }

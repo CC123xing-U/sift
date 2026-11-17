@@ -97,11 +97,17 @@ impl Read for PipeStream {
             return Ok(0);
         }
         let mut read = 0u32;
-        unsafe { ReadFile(self.handle, Some(buf), Some(&mut read), None) }
-            .map_err(io::Error::other)?;
-        // 同步管道：客户端 WriteFile 全部写完并关闭/无更多数据时，ReadFile 返回
-        // ERROR_BROKEN_PIPE 会被 windows crate 映射为 Err；这里统一转成 EOF(Ok(0))，
-        // 让上层 read_message 能区分「干净断开」与「截断帧」。
+        if let Err(e) = unsafe { ReadFile(self.handle, Some(buf), Some(&mut read), None) } {
+            // windows-core 0.62 把 Win32 失败码封进 HRESULT 低 16 位（同 ff-ntfs::win32_code）。
+            // 客户端已写完并关闭时 ReadFile 报 ERROR_BROKEN_PIPE(109) / ERROR_NO_DATA(232)，
+            // 这是「干净断开」而非连接错误：转成 EOF(Ok(0))，让上层 read_message 能区分
+            // 干净断开与截断帧，也避免服务侧把每次正常退出误记成错误日志。
+            let win32 = (e.code().0 as u32) & 0xFFFF;
+            if win32 == 109 || win32 == 232 {
+                return Ok(0);
+            }
+            return Err(io::Error::other(e));
+        }
         Ok(read as usize)
     }
 }

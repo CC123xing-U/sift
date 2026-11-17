@@ -131,7 +131,10 @@ unsafe extern "system" fn on_foreground(
 }
 
 /// 钩子线程：安装 OUTOFCONTEXT 钩子后跑消息循环，回调由系统投递到本线程队列。
-fn hook_thread(id_tx: Sender<u32>) {
+/// 把 `SetWinEventHook` 的结果随线程 ID 一起回传：`None` 表示钩子安装失败，
+/// 让 `start()` 能据此返回 Err（此前无条件先发线程 ID，失败分支永远不可达，
+/// 钩子静默失效而调用方误以为监听已建立）。
+fn hook_thread(id_tx: Sender<Option<u32>>) {
     unsafe {
         let hook = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
@@ -142,10 +145,11 @@ fn hook_thread(id_tx: Sender<u32>) {
             0,
             WINEVENT_OUTOFCONTEXT,
         );
-        let _ = id_tx.send(GetCurrentThreadId());
         if hook.is_null() {
+            let _ = id_tx.send(None);
             return;
         }
+        let _ = id_tx.send(Some(GetCurrentThreadId()));
         let mut msg: Msg = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
@@ -174,9 +178,9 @@ impl DialogWatcher {
             .spawn(move || hook_thread(id_tx))
             .map_err(|e| DialogError::Hook(e.to_string()))?;
         let thread_id = id_rx.recv().map_err(|e| DialogError::Hook(e.to_string()))?;
-        if thread_id == 0 {
-            return Err(DialogError::Hook("SetWinEventHook 返回空句柄".into()));
-        }
+        let thread_id = thread_id.ok_or_else(|| {
+            DialogError::Hook("SetWinEventHook 返回空句柄（对话框监听未建立）".into())
+        })?;
         Ok(Self {
             thread_id,
             thread: Some(thread),

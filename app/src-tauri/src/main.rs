@@ -538,11 +538,19 @@ fn build_engine() -> Arc<InProcessEngine> {
                     drive: vi.drive,
                 })
                 .collect();
-            // 先把本轮要扫的卷全部置为「待扫描」：否则未轮到的卷仍是 Ready
-            // （索引自磁盘载入），全局进度会把它们算作已完成，每开扫一个新卷
-            // 就被拽回低位（实机：70 多 → 90 多 → 退回 70 多 反复回跳）。
-            scan.mark_pending(&vids);
-            for vid in vids {
+            // 索引复用：load_all 已把可续读的磁盘索引置为 Ready，不再逐卷全量
+            // 重扫覆盖掉它们。startup_reconcile 只挑出新卷 / 空索引 / 失效卷。
+            // 复用的卷由后台 poll_volume 从 next_usn 续读关机期间的增量。
+            let need_scan = scan.startup_reconcile(&vids);
+            dbg_log(&format!(
+                "engine: {} volume(s) reused from disk, {} need full scan",
+                vids.len() - need_scan.len(),
+                need_scan.len()
+            ));
+            // 只把真正要扫的卷置为「待扫描」，避免进度条把复用的 Ready 卷算成
+            // 已完成又被拽回低位（实机进度回跳）；否则该卷会停在 Scanning 不恢复。
+            scan.mark_pending(&need_scan);
+            for vid in need_scan {
                 dbg_log(&format!("engine: rescan volume {:?}", vid));
                 if let Err(e) = scan.rescan(Some(vid)) {
                     dbg_log(&format!("engine: rescan error: {}", e));

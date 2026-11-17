@@ -301,8 +301,16 @@ fn spawn_initial_scan(engine: Arc<InProcessEngine>) {
                     drive: v.drive,
                 })
                 .collect();
-            engine.mark_pending(&vids);
-            for vid in vids {
+            // 索引复用：load_all 已载入磁盘索引，startup_reconcile 只挑出
+            // 新卷 / 空索引 / 失效卷做全量扫描；复用卷交给后台 USN 增量续读。
+            let need_scan = engine.startup_reconcile(&vids);
+            eprintln!(
+                "startup: {} volume(s) reused, {} need full scan",
+                vids.len() - need_scan.len(),
+                need_scan.len()
+            );
+            engine.mark_pending(&need_scan);
+            for vid in need_scan {
                 if let Err(e) = engine.rescan(Some(vid.clone())) {
                     eprintln!("rescan {vid} failed: {e}");
                 }
