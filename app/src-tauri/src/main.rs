@@ -417,13 +417,23 @@ fn foreground_pid() -> u32 {
     // P2：非 Windows 平台下没有 user32，直接返回 0（不启用「前台属于本进程」豁免）。
     #[cfg(windows)]
     unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_null() {
-            return 0;
+        // 启动瞬间 / Alt+Tab 切换中，GetForegroundWindow 会短暂返回 NULL，
+        // 或返回非空 HWND 但 PID 仍为 0。此时「前台是谁」无法确定，调用方
+        // 必须据此放弃失焦隐藏——否则刚显示的窗口会被误藏（真机实测，见
+        // DECISIONS #96）。重试 3 次（共 ~90ms）跨过系统切换的瞬态；仍拿
+        // 不到就返回 0，由 on_window_event 的守卫兜住。
+        for _ in 0..3 {
+            let hwnd = GetForegroundWindow();
+            if !hwnd.is_null() {
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                if pid != 0 {
+                    return pid;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        pid
+        0 // 三次都没拿到有效 PID：前台无法确定，交给调用方保守处理。
     }
     #[cfg(not(windows))]
     0
@@ -434,6 +444,11 @@ fn foreground_pid() -> u32 {
 /// P2：无大小上限会随焦点/热键事件无限增长，这里超过 1MB 就先删除旧文件再写。
 fn dbg_log(msg: &str) {
     use std::io::Write;
+    // 后台索引线程与 UI 线程会并发写；不加锁时两行会交错成一团（真机见到
+    // `[ts1] [ts2] msg1msg2`），诊断日志本身就不可读了。持锁覆盖"删旧文件 +
+    // 打开 + 写一行"整个过程，保证每行完整。
+    static LOG_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = std::env::temp_dir().join("sift-debug.log");
     // 超过 1MB 先删除，避免无限膨胀（调试日志，丢旧内容无妨）。
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -479,35 +494,40 @@ fn build_engine() -> Arc<InProcessEngine> {
     let save_dir = index_dir();
     let _ = std::fs::create_dir_all(&save_dir);
     engine.set_save_dir(&save_dir);
-    // S3：卷枚举失败（瞬时 RPC / 权限故障）时绝不能用空集去清理——那会把所有既有
-    // .ffix 误判为幽灵卷删光，毁掉秒级冷启动。失败时跳过清理，保留磁盘上的索引，
-    // 仍尝试 load_all；本轮不扫描（available 为空），下次启动枚举恢复后再正常收敛。
-    let available = match ff_ntfs::win32::enumerate_volumes() {
-        Ok(vols) => {
-            let valid_serials: HashSet<u32> = vols.iter().map(|v| v.serial).collect();
-            prune_stale_indexes(&save_dir, &valid_serials);
-            cleanup_legacy_indexes();
-            vols
-        }
-        Err(e) => {
-            dbg_log(&format!(
-                "engine: enumerate_volumes failed, skip prune: {e}"
-            ));
-            Vec::new()
-        }
-    };
-    if let Err(e) = engine.load_all(&save_dir) {
-        dbg_log(&format!("engine: load_all failed (will full-scan): {}", e));
-    } else {
-        dbg_log(&format!(
-            "engine: loaded persisted indexes from {:?}",
-            save_dir
-        ));
-    }
 
-    // 后台线程逐个卷触发全量扫描，避免阻塞窗口显示（DESIGN §5.2：扫描期间 UI 显示 Scanning）。
+    // 启动路径上的所有重活——枚举卷、清理旧索引、load_all（真机 200MB / ~5s）、
+    // 逐卷增量扫描——全部挪进后台线程。窗口创建不能等它们：否则双击 exe 后
+    // 先看到透明窗口的阴影，约 5s 后才显示内容，看起来像「索引完才显现」
+    // （DECISIONS #96）。引擎内部 volumes 由 RwLock 保护，后台写与 UI 的
+    // status/search/range 读并发安全；加载完成前 UI 显示 Scanning（DESIGN §5.2）。
     let scan = engine.clone();
     std::thread::spawn(move || {
+        // S3：卷枚举失败（瞬时 RPC / 权限故障）时绝不能用空集去清理——那会把所有
+        // 既有 .ffix 误判为幽灵卷删光，毁掉秒级冷启动。失败时跳过清理，保留磁盘
+        // 上的索引，仍尝试 load_all；本轮不扫描，下次启动枚举恢复后再收敛。
+        let available = match ff_ntfs::win32::enumerate_volumes() {
+            Ok(vols) => {
+                let valid_serials: HashSet<u32> = vols.iter().map(|v| v.serial).collect();
+                prune_stale_indexes(&save_dir, &valid_serials);
+                cleanup_legacy_indexes();
+                vols
+            }
+            Err(e) => {
+                dbg_log(&format!(
+                    "engine: enumerate_volumes failed, skip prune: {e}"
+                ));
+                Vec::new()
+            }
+        };
+        if let Err(e) = scan.load_all(&save_dir) {
+            dbg_log(&format!("engine: load_all failed (will full-scan): {}", e));
+        } else {
+            dbg_log(&format!(
+                "engine: loaded persisted indexes from {:?}",
+                save_dir
+            ));
+        }
+
         {
             let vols = available;
             dbg_log(&format!("engine: {} volume(s) found", vols.len()));
@@ -669,7 +689,12 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 // ───────────────────────── 入口 ─────────────────────────
 
 pub fn run() {
+    let t0 = std::time::Instant::now();
     let backend = build_backend();
+    dbg_log(&format!(
+        "startup: backend built @{}ms",
+        t0.elapsed().as_millis()
+    ));
 
     let shortcut = "CmdOrCtrl+Alt+Space"
         .parse::<Shortcut>()
@@ -702,10 +727,14 @@ pub fn run() {
             "global shortcut register failed, continue without it: {e}"
         )),
     }
+    dbg_log(&format!(
+        "startup: plugins registered @{}ms (about to .run)",
+        t0.elapsed().as_millis()
+    ));
 
     builder
         .setup(move |app| {
-            dbg_log("setup: begin");
+            dbg_log(&format!("setup: begin @{}ms", t0.elapsed().as_millis()));
             // 服务状态事件需要 AppHandle；重连时由此通道通知前端 toast。
             let _ = SERVICE_HANDLE.set(app.handle().clone());
             app.manage(EngineState { backend });
@@ -731,6 +760,11 @@ pub fn run() {
                 ));
                 if *focused {
                     focused_once_evt.store(true, Ordering::SeqCst);
+                } else if fg_pid == 0 {
+                    // GetForegroundWindow 无法确定前台（启动瞬间 / 系统切换中）。
+                    // 曾因缺这个守卫，启动 2.7s 后的假失焦把窗口误藏，用户看到
+                    // 「窗口一闪就没、索引完才再出现」（DECISIONS #96）。
+                    dbg_log("  -> ignore: foreground pid unknown (0)");
                 } else if !focused_once_evt.load(Ordering::SeqCst) {
                     dbg_log("  -> ignore: never focused before");
                 } else if fg_pid == std::process::id() {

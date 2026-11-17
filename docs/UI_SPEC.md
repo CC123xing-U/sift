@@ -400,6 +400,7 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
 | P0-3 | 结果行右键 | 四项菜单 + 快捷键，rect `[301,133,216,139]` 全在视口内 ✅（此为 2026-11-15 原始四项快照；2026-11-16 M7 加「属性」→五项（#91）、加「填入打开对话框」→六项（#92）） |
 | P0-3 | `Esc` / `End`+`Enter` / 鼠标点第三项 | 只关菜单不清输入不隐藏窗口 ✅；键盘复制文件名得 `report` ✅；鼠标复制完整路径 ✅ |
 | 窗口动效（#83） | `Ctrl+Alt+Space` 唤出 / Esc 隐藏 / 失焦隐藏，CDP 断言 `.app-window` 动画 class 与事件 | `sift:shown` → `.window-enter` 重播（140ms scale+fade 带过冲）；`sift:hiding` → `.window-exit`（90ms，实测 opacity 中间帧 0.84）后真隐藏（`hide result ok=true`）；hide 后 30ms 内再唤出挂起隐藏作废（`gen_match=false`）✅；`prefers-reduced-motion` 下时长 0.01ms ✅。**前置**：capabilities 需放行 `core:event:allow-listen/unlisten`（`__TAURI__.event.listen` 走 `plugin:event|listen`，受 ACL 约束，同 #79 模式） |
+| 启动时序（#96） | 双击 exe 后窗口应在 ~0.5s 内显示（WebView2 冷启动开销），索引在后台加载；前台 PID 无法确定（`fg_pid=0`）时不触发失焦隐藏，避免窗口一闪就没 |
 | Esc 隐藏修复（#83） | 输入为空时按 `Esc` | 真机窗口隐藏（原 `invoke('hide')` 命令名错误被 `void` 吞掉，实际失效）✅ |
 | 边界 | 结果集 60 s 过期后执行菜单项 | toast「请求不存在或已过期」，不是静默失败 ✅ |
 | 首屏 | 三轮「清空 → 键入 `report` → 首屏行」 | 145.6 / 146.2 / 146.8 ms（引擎 6–7 ms，120 ms 防抖主导），见 DECISIONS #80 |

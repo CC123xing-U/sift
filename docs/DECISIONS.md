@@ -919,3 +919,39 @@
   （`regex:` 只作用于名字，内容侧保持字节子串，避免用户写出跨文件的回溯灾难）；
   编码嗅探（UTF-16 / GBK 文本按原始字节匹配，命中率交给用户的关键词）。
 - **M7 剩余 1 项**（硬链接多路径）仍单独立项。
+
+## #96（2026-11-17）：启动窗口延迟显示 / 误藏
+
+- **现象**（用户真机报告）：双击 exe 后不立刻显示窗口，只看到窗口阴影，"像是在后台索引，
+  等索引完才显现"。非预期设计。
+- **两个独立根因**（`%TEMP%\sift-debug.log` 时间戳坐实）：
+  ① **误藏（主因）**：窗口显示 2.7s 后收到 `Focused(false)`，此时 `GetForegroundWindow()` 
+  返回 NULL（`fg_pid=0`，启动瞬间 / 系统切换中的瞬态），旧代码把 0 当成"切到别的应用"，
+  触发失焦自动隐藏。用户看到窗口一闪就没，之后按热键再唤出时索引已接近完成——主观上就成了
+  "等索引完才显现"。修复：`foreground_pid()` 重试 3 次（~90ms）跨过瞬态；`on_window_event`
+  增 `fg_pid==0` 守卫，**无法确定前台时永不隐藏**（保守优先：宁可不藏，不可误藏）。
+  ② **启动空窗**：`build_engine()` 里 `enumerate_volumes` + `prune_stale_indexes` + 
+  `cleanup_legacy_indexes` + `load_all`（真机 200MB / ~5s）全在 `build_backend()` 同步执行，
+  而它发生在 `builder.setup().run()` **之前**——窗口要等这些重活完成才创建。透明窗口
+  （`transparent:true` + `decorations:false`） content 未就绪时只剩阴影。修复：把上述重活
+  全部挪进已有的后台扫描线程；`build_engine()` 只保留毫秒级的 `new` / `create_dir_all` / 
+  `set_save_dir` 后立即返回。引擎 `volumes` 由 RwLock 保护，后台写与 UI 读并发安全。
+- **真机数据**（`npm run tauri dev`，debug，同一台机同一索引）：
+
+  | 阶段 | 修复前 | 修复后 |
+  |---|---|---|
+  | backend built | 5724 ms | **2 ms** |
+  | setup begin（窗口创建） | 6761 ms | **568 ms** |
+  | window focused | 6761 ms | **569 ms** |
+  | load_all 完成 | 窗口前（阻塞 5.6s） | 5600 ms（窗口后，后台） |
+  | 启动后 hide 事件 | 2.7s 时误藏 1 次 | **0** |
+
+  568ms 是 Tauri/WebView2 自身冷启动开销，已无法再压；索引在后台加载，窗口全程可见。
+  12s 后 `listwin` 确认主窗口 `visible=True`。
+- **附带**：`dbg_log` 加 `Mutex`——主线程与后台索引线程并发写会让两行交错成一团
+  （真机见过 `[ts1][ts2] msg1msg2`），诊断日志本身就不可读。持锁覆盖"删旧 + 打开 + 
+  写一行"全过程。
+- **门禁**：Tauri fmt/clippy(`-D warnings`)/test 绿；workspace 323 passed / 0 failed；
+  前端 build + 32 格式断言绿。改动只在 `app/src-tauri/src/main.rs`，零新增依赖。
+- **未做**：把 `transparent:true` 换掉或加启动闪屏以消除 568ms 的 WebView2 冷启动空窗——
+  属于打磨期外观决策，不影响功能，本轮不动。

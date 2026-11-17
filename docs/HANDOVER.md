@@ -1,4 +1,4 @@
-# Sift 交接（2026-11-16，M0–M6 完成，M7 第 1/2/3/4/5 项完成）
+# Sift 交接（2026-11-17，M0–M6 完成，M7 第 1/2/3/4/5 项完成）
 
 ## 当前状态
 
@@ -155,6 +155,12 @@ L3（Alt+F4 退出终止托盘）涉及退出语义、DESIGN/DECISIONS 未规定
 
 ## 验证
 
+- **启动窗口延迟显示 / 误藏修复（2026-11-17，DECISIONS #96）**：窗口显示 2.7s 后因
+  `fg_pid=0`（前台瞬态）被误判失焦自动隐藏；`build_backend` 同步加载 200MB 索引（~5s）
+  还占住窗口创建。修：`foreground_pid` 重试 + `fg_pid==0` 守卫（无法确定前台时永不隐藏）、
+  索引加载/卷枚举/清理全部挪进后台线程。真机：`backend built` 5724ms→**2ms**，
+  `setup begin` 6761ms→**568ms**（WebView2 冷启动），启动后 hide 事件 1→**0**，
+  12s 后窗口 `visible=True`。Tauri/workspace/前端门禁全绿。
 - **M7 第 5 项「内容搜索」（2026-11-16）**：workspace fmt/clippy(-D warnings)/test
   全绿（**323 passed、0 failed**：ff-core +11 内容单测、query +2 解析约束、
   ff-engine +4 真文件集成）；Tauri 门禁全绿；前端 build 50 modules + 32 格式断言；
