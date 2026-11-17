@@ -21,7 +21,7 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +37,36 @@ use crate::api::{
     SearchRequest, SearchSummary, SortKey, SortSpec, VolumeState, VolumeStatus,
 };
 use crate::overlay::{Overlay, OverlayEntry};
+
+/// 锁中毒容错（#10）：持锁线程一旦 panic，`std` 会把锁标记为中毒，后续所有
+/// `.lock_or_recover()` 全部连锁 panic——一次局部故障被放大成整个引擎不可用。
+///
+/// 引擎持锁区内的临界区都很短（取快照 / 换入结果），panic 后内部值仍是**上一次
+/// 完整写入**的状态，取回它继续服务比整进程崩溃安全。因此统一用下面三个方法。
+trait LockRecover<T> {
+    fn lock_or_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> LockRecover<T> for Mutex<T> {
+    fn lock_or_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// `RwLock` 的中毒容错版本（读 / 写各一个）。
+trait RwLockRecover<T> {
+    fn read_or_recover(&self) -> RwLockReadGuard<'_, T>;
+    fn write_or_recover(&self) -> RwLockWriteGuard<'_, T>;
+}
+
+impl<T> RwLockRecover<T> for RwLock<T> {
+    fn read_or_recover(&self) -> RwLockReadGuard<'_, T> {
+        self.read().unwrap_or_else(|e| e.into_inner())
+    }
+    fn write_or_recover(&self) -> RwLockWriteGuard<'_, T> {
+        self.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 /// Overlay 合并阈值（DESIGN §4.3：增量条目超过此数即落入 Base）。
 const MERGE_THRESHOLD: usize = 50_000;
@@ -70,12 +100,20 @@ struct VolumeData {
     incremental: bool,
     /// 最近一次全量扫描**完成**的时刻（定期重走的计时起点）。
     last_full: Instant,
+    /// 索引代次：每次 Base 索引被整体替换（全量扫描 / Overlay 合并 / 退出合并）
+    /// 自增一次。搜索结果集里存的是搜索时的代次快照，`range` / `open` 据此判断
+    /// 「这一批 Hit 的 EntryId 是否仍指向同一个文件」——换代后旧 eid 会错位甚至
+    /// 越界，必须让旧结果集失效而不是拿新索引去解读（#21）。
+    generation: u64,
 }
 
 /// 一次搜索的持久结果：命中列表（全局有序，每条带所属卷 + 命中来源）+ 原查询 +
 /// 本次搜索的 M5 开关（供 `range` 高亮时复用同一套 T2/T3 判定）。
 struct StoredResult {
     hits: Vec<(VolumeId, Hit)>,
+    /// 搜索时各卷的索引代次快照。`range` / `open` 用它与当前 `VolumeData::generation`
+    /// 比对：不一致说明索引已换代，`Hit::Base(eid)` 指向的条目可能已错位（#21）。
+    generations: HashMap<VolumeId, u64>,
     query: Query,
     mopts: MatchOptions,
 }
@@ -141,7 +179,7 @@ impl EngineInner {
     /// 直接注入一个已建好的索引（测试与合成数据用；标记为 `Ready`）。
     fn add_volume(&self, vol: VolumeId, index: VolumeIndex) {
         let info = index.volume.clone();
-        let mut vols = self.volumes.write().unwrap();
+        let mut vols = self.volumes.write_or_recover();
         // P0-5：直接注入的索引视为「已就绪、可能需落盘」（测试持久化 / 合成数据）。
         self.dirty.store(true, Ordering::SeqCst);
         vols.insert(
@@ -157,6 +195,7 @@ impl EngineInner {
                 // 与真实 NTFS 卷一致；测试若要覆盖无增量分支可用 `set_incremental`。
                 incremental: true,
                 last_full: Instant::now(),
+                generation: 0,
             },
         );
     }
@@ -168,7 +207,7 @@ impl EngineInner {
     fn load_volume_with(&self, scanner: &dyn VolumeScanner, vol: &VolumeId) -> Result<()> {
         // 先标记 Scanning，取出 progress atomic 和上一轮条目数作为进度分母。
         let (progress_arc, total_estimate) = {
-            let mut vols = self.volumes.write().unwrap();
+            let mut vols = self.volumes.write_or_recover();
             let vd = vols.entry(vol.clone()).or_insert_with(|| blank_volume(vol));
             vd.state = VolumeState::Scanning;
             vd.message = None;
@@ -216,7 +255,7 @@ impl EngineInner {
                 // 在拿 `volumes` 写锁之前问：`AutoVolumeScanner` 的判定要走一次
                 // `GetVolumeInformationW`，不能持锁做 IO（DESIGN §0.6 / 锁序）。
                 let incremental = scanner.supports_incremental(vol);
-                let mut vols = self.volumes.write().unwrap();
+                let mut vols = self.volumes.write_or_recover();
                 let vd = vols
                     .get_mut(vol)
                     .expect("load_volume_with: 卷在 Scanning 阶段已插入");
@@ -244,6 +283,8 @@ impl EngineInner {
                 index.volume = vd.info.clone();
                 vd.index = index;
                 vd.overlay = Overlay::default();
+                // #21：Base 整体替换 → 代次自增，旧结果集在 range/open 时判失效。
+                vd.generation = vd.generation.wrapping_add(1);
                 vd.state = VolumeState::Ready;
                 vd.message = None;
                 vd.incremental = incremental;
@@ -255,7 +296,7 @@ impl EngineInner {
             Err(e) => {
                 progress_arc.store(u64::MAX, Ordering::Relaxed);
                 let msg = e.to_string();
-                let mut vols = self.volumes.write().unwrap();
+                let mut vols = self.volumes.write_or_recover();
                 if let Some(vd) = vols.get_mut(vol) {
                     vd.state = VolumeState::Error;
                     vd.message = Some(msg);
@@ -271,14 +312,14 @@ impl EngineInner {
         self.searching.store(true, Ordering::SeqCst);
         // 新搜索覆盖上一次（单客户端语义）
         {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.sessions.lock_or_recover();
             let state = sessions.entry(session).or_default();
             state.results.clear();
             state.result_access.clear();
         }
         let token = CancelToken::new();
         {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.sessions.lock_or_recover();
             let cancels = &mut sessions.entry(session).or_default().cancels;
             cancels.insert(id, token.clone());
             // P2：清理过期令牌（id 单调递增，只保留最新一个）。
@@ -320,10 +361,12 @@ impl EngineInner {
         let hide_hidden = req.opts.hide_hidden;
         // 三元组：所属卷 + 命中来源 + M5 评分（SortKey::Score 的排序键）。
         let mut hits: Vec<(VolumeId, Hit, f64)> = Vec::new();
+        // #21：与命中同批采集各卷索引代次，随结果集保存，供 range/open 校验。
+        let mut generations: HashMap<VolumeId, u64> = HashMap::new();
         // M7：`content:` 的统计（无内容条件时为 None）。
         let mut content_report: Option<ff_core::ContentReport> = None;
         {
-            let vols = self.volumes.read().unwrap();
+            let vols = self.volumes.read_or_recover();
             for (vid, vd) in vols.iter() {
                 // P0-1：旧索引正在后台刷新（`Scanning` 但已有条目）的卷仍应参与搜索；
                 // 只有「首次建索引、毫无可用索引」的卷（`Scanning` 且 `entries==0`）
@@ -333,6 +376,7 @@ impl EngineInner {
                 if !searchable {
                     continue;
                 }
+                generations.insert(vid.clone(), vd.generation);
                 // —— Base 命中：M5 分层搜索（T1 子串 / T2 拼音 / T3 模糊）+ 评分 ——
                 let ranked = vd.index.search_ranked(&query, &mopts, &score_cfg, &token);
                 // T3 稀疏触发条件（DESIGN §8.1）：Base 上 T1+T2 命中 < 100 时，
@@ -441,12 +485,13 @@ impl EngineInner {
 
         let total = hits.len();
         {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.sessions.lock_or_recover();
             let state = sessions.entry(session).or_default();
             state.results.insert(
                 id,
                 Arc::new(StoredResult {
                     hits,
+                    generations,
                     query: query.clone(),
                     mopts,
                 }),
@@ -471,8 +516,8 @@ impl EngineInner {
         limit: usize,
     ) -> Result<Vec<ResultRow>> {
         // 先取窗口命中 + 查询（避免同时持有两个锁导致加锁顺序反转死锁）
-        let (window, query, mopts) = {
-            let sessions = self.sessions.lock().unwrap();
+        let (window, generations, query, mopts) = {
+            let sessions = self.sessions.lock_or_recover();
             let stored = sessions
                 .get(&session)
                 .and_then(|s| s.results.get(&id))
@@ -484,19 +529,26 @@ impl EngineInner {
             let end = (offset + limit).min(len);
             (
                 stored.hits[offset..end].to_vec(),
+                stored.generations.clone(),
                 stored.query.clone(),
                 stored.mopts,
             )
         };
         // 更新访问时间（60 秒无访问释放，DESIGN §9）
-        if let Some(state) = self.sessions.lock().unwrap().get_mut(&session) {
+        if let Some(state) = self.sessions.lock_or_recover().get_mut(&session) {
             state.result_access.insert(id, Instant::now());
         }
 
-        let vols = self.volumes.read().unwrap();
+        let vols = self.volumes.read_or_recover();
         let mut rows = Vec::with_capacity(window.len());
         for (vid, hit) in &window {
-            rows.push(resolve_row(&vols, vid, hit, &query, mopts));
+            // #21：索引换代后旧 `Hit::Base(eid)` 指向的条目已错位（甚至越界）。
+            // 代次不符整批作废 → 前端收到 NotFound 后重搜，避免显示出错的行。
+            let vd = vols.get(vid).ok_or(EngineError::NotFound)?;
+            if generations.get(vid) != Some(&vd.generation) {
+                return Err(EngineError::NotFound);
+            }
+            rows.push(resolve_row(&vols, vid, hit, &query, mopts)?);
         }
         Ok(rows)
     }
@@ -514,7 +566,7 @@ impl EngineInner {
     }
 
     fn status_impl(&self) -> EngineStatus {
-        let vols = self.volumes.read().unwrap();
+        let vols = self.volumes.read_or_recover();
         let mut volumes = Vec::new();
         let mut total_entries = 0u64;
         for (vid, vd) in vols.iter() {
@@ -547,14 +599,14 @@ impl EngineInner {
         EngineStatus {
             volumes,
             total_entries,
-            last_saved: *self.last_saved.lock().unwrap(),
+            last_saved: *self.last_saved.lock_or_recover(),
             searching: self.searching.load(Ordering::SeqCst),
-            save_error: self.save_error.lock().unwrap().clone(),
+            save_error: self.save_error.lock_or_recover().clone(),
         }
     }
 
     fn rescan_impl(&self, volume: Option<VolumeId>) -> Result<()> {
-        let guard = self.scanner.lock().unwrap();
+        let guard = self.scanner.lock_or_recover();
         let scanner = match guard.as_ref() {
             Some(s) => s,
             None => return Ok(()), // 无扫描器（测试 / 合成数据）：跳过
@@ -562,7 +614,7 @@ impl EngineInner {
         match volume {
             Some(v) => self.load_volume_with(&**scanner, &v),
             None => {
-                let ids: Vec<VolumeId> = self.volumes.read().unwrap().keys().cloned().collect();
+                let ids: Vec<VolumeId> = self.volumes.read_or_recover().keys().cloned().collect();
                 for id in ids {
                     // P2：单个卷扫描失败不应中断其余卷（一个 U 盘拔出不影响 C: 重扫）。
                     let _ = self.load_volume_with(&**scanner, &id);
@@ -579,32 +631,54 @@ impl EngineInner {
         index: usize,
         action: OpenAction,
     ) -> Result<()> {
-        let hit = {
-            let sessions = self.sessions.lock().unwrap();
+        let (hit, gen) = {
+            let sessions = self.sessions.lock_or_recover();
             let stored = sessions
                 .get(&session)
                 .and_then(|s| s.results.get(&id))
                 .ok_or(EngineError::NotFound)?;
-            stored.hits.get(index).ok_or(EngineError::NotFound)?.clone()
+            let hit = stored.hits.get(index).ok_or(EngineError::NotFound)?.clone();
+            let gen = stored.generations.get(&hit.0).copied();
+            (hit, gen)
         };
-        if let Some(state) = self.sessions.lock().unwrap().get_mut(&session) {
+        if let Some(state) = self.sessions.lock_or_recover().get_mut(&session) {
             state.result_access.insert(id, Instant::now());
         }
-        let vols = self.volumes.read().unwrap();
+        let vols = self.volumes.read_or_recover();
         let vd = vols.get(&hit.0).ok_or(EngineError::NotFound)?;
-        let full = match &hit.1 {
-            Hit::Base(eid) => vd.index.path_string(*eid).ok_or(EngineError::NotFound)?,
+        // #21：代次不符 → 该 eid 已不是用户看到的那一条（索引换代），拒绝操作。
+        if gen != Some(vd.generation) {
+            return Err(EngineError::NotFound);
+        }
+        // #36：两后端统一口径——都按结果行的 name 字段取名，并同样拒绝空名行。
+        // 旧实现这里用 `file_name_from_full(&full)` 从完整路径反推，管道侧却直接用
+        // `row.name`，空名 / 特殊字符场景两边会给出不同结果。
+        let (full, name) = match &hit.1 {
+            Hit::Base(eid) => (
+                vd.index.path_string(*eid).ok_or(EngineError::NotFound)?,
+                vd.index
+                    .name_str(*eid)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
             Hit::Overlay(frn) => match vd.overlay.added_or_changed.get(frn) {
-                Some(oe) => overlay_full_path(&vd.index, &vd.overlay, oe),
+                Some(oe) => (
+                    overlay_full_path(&vd.index, &vd.overlay, oe),
+                    oe.name.clone(),
+                ),
                 None => return Err(EngineError::NotFound),
             },
         };
         drop(vols);
+        if name.is_empty() {
+            // 与 `actions::execute_open_checked` 一致：空名行没有可打开的东西。
+            return Err(EngineError::NotFound);
+        }
         match action {
             // P0-2：真实写入系统剪贴板。InProcess 引擎运行在 UI 进程内，
             // 由 UI 进程以当前用户身份执行符合 DESIGN §12；不再「静默成功」。
             OpenAction::CopyPath => clipboard_set_text(&full),
-            OpenAction::CopyName => clipboard_set_text(file_name_from_full(&full)),
+            OpenAction::CopyName => clipboard_set_text(&name),
             OpenAction::Open => shell_open(&full, false),
             OpenAction::OpenFolder => shell_open(&full, true),
             OpenAction::Properties => shell_properties(&full),
@@ -615,7 +689,7 @@ impl EngineInner {
 
     /// 轮询所有 Ready 卷的增量变更（后台线程与测试 `poll_once` 共用）。
     fn poll_all(&self) {
-        let vols: Vec<VolumeId> = self.volumes.read().unwrap().keys().cloned().collect();
+        let vols: Vec<VolumeId> = self.volumes.read_or_recover().keys().cloned().collect();
         for vid in vols {
             self.poll_volume(&vid);
         }
@@ -632,7 +706,7 @@ impl EngineInner {
     fn poll_volume(&self, vid: &VolumeId) {
         // Phase 0：快照轮询参数与「是否有增量通道」，释放 volumes 读锁。
         let (from_usn, journal_id, incremental, since_full) = {
-            let vols = self.volumes.read().unwrap();
+            let vols = self.volumes.read_or_recover();
             let vd = match vols.get(vid) {
                 Some(v) => v,
                 None => return,
@@ -659,7 +733,7 @@ impl EngineInner {
 
         // Phase 2: 取 scanner 锁执行 IO，释放 scanner。
         let res = {
-            let guard = self.scanner.lock().unwrap();
+            let guard = self.scanner.lock_or_recover();
             match guard.as_ref() {
                 Some(sc) => sc.read_changes(vid, from_usn, journal_id),
                 None => return,
@@ -679,7 +753,7 @@ impl EngineInner {
                 // search/range/status 全被卡住，窗口冻结）。因此合并走「读锁快照 →
                 // 锁外重建 → 短暂写锁换入」三阶段。
                 let need_merge = {
-                    let vols = self.volumes.read().unwrap();
+                    let vols = self.volumes.read_or_recover();
                     match vols.get(vid) {
                         Some(vd) => vd.overlay.len() + changes.len() > MERGE_THRESHOLD,
                         None => return,
@@ -687,7 +761,7 @@ impl EngineInner {
                 };
                 if !need_merge {
                     // 常见路径：增量未达阈值，短暂持写锁应用即可（廉价，不重建索引）。
-                    let mut vols = self.volumes.write().unwrap();
+                    let mut vols = self.volumes.write_or_recover();
                     if let Some(vd) = vols.get_mut(vid) {
                         vd.overlay.apply(&changes, &vd.index);
                         vd.info.next_usn = new_usn;
@@ -697,7 +771,7 @@ impl EngineInner {
                 // 合并路径（昂贵）：读锁取快照（index + overlay + 代次 usn）→ 释放
                 // 读锁 → 锁外重建 merged → 短暂写锁换入并校验代次。
                 let (snap_index, snap_overlay, snap_usn) = {
-                    let vols = self.volumes.read().unwrap();
+                    let vols = self.volumes.read_or_recover();
                     let vd = match vols.get(vid) {
                         Some(v) => v,
                         None => return,
@@ -709,13 +783,15 @@ impl EngineInner {
                 let mut overlay = snap_overlay;
                 overlay.apply(&changes, &snap_index);
                 let merged = merge_overlay_into_base(&snap_index, &overlay);
-                let mut vols = self.volumes.write().unwrap();
+                let mut vols = self.volumes.write_or_recover();
                 if let Some(vd) = vols.get_mut(vid) {
                     // 代次校验：若期间被 rescan 替换（index 已变、usn 已推进），
                     // 丢弃本次合并结果，交给 rescan 产生的新索引。
                     if vd.state == VolumeState::Ready && vd.info.next_usn == snap_usn {
                         vd.index = merged;
                         vd.overlay = Overlay::default();
+                        // #21：合并即换代，旧结果集的 eid 不再可信。
+                        vd.generation = vd.generation.wrapping_add(1);
                         vd.info.next_usn = new_usn;
                         // P0-5：Base 已变，标记需落盘。
                         self.dirty.store(true, Ordering::SeqCst);
@@ -732,7 +808,7 @@ impl EngineInner {
 
     /// 触发单卷全量重建（不持锁，内部自行加锁）。
     fn rebuild_volume(&self, vid: &VolumeId) {
-        let guard = self.scanner.lock().unwrap();
+        let guard = self.scanner.lock_or_recover();
         if let Some(sc) = guard.as_ref() {
             let _ = self.load_volume_with(&**sc, vid);
         }
@@ -748,25 +824,25 @@ impl EngineInner {
         if !self.dirty.swap(false, Ordering::SeqCst) {
             return;
         }
-        let dir = self.save_dir.lock().unwrap().clone();
+        let dir = self.save_dir.lock_or_recover().clone();
         let dir = match dir {
             Some(d) => d,
             None => return,
         };
-        let ids: Vec<VolumeId> = self.volumes.read().unwrap().keys().cloned().collect();
+        let ids: Vec<VolumeId> = self.volumes.read_or_recover().keys().cloned().collect();
         let mut err: Option<String> = None;
         for id in ids {
             if let Err(e) = self.save_volume(&id, &dir) {
                 err = Some(e.to_string());
             }
         }
-        *self.save_error.lock().unwrap() = err;
+        *self.save_error.lock_or_recover() = err;
     }
 
     /// 结果集 60 秒无访问即释放（DESIGN §9 / #54）。
     fn reap_stale(&self) {
         let now = Instant::now();
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock_or_recover();
         for state in sessions.values_mut() {
             let stale: Vec<_> = state
                 .result_access
@@ -781,7 +857,7 @@ impl EngineInner {
     }
 
     fn save_volume(&self, vid: &VolumeId, dir: &Path) -> io::Result<()> {
-        let vols = self.volumes.read().unwrap();
+        let vols = self.volumes.read_or_recover();
         let vd = match vols.get(vid) {
             Some(v) => v,
             None => return Ok(()),
@@ -797,17 +873,17 @@ impl EngineInner {
         // 用 index.save() 会让磁盘索引的续读起点永远停在旧值，重启后回放 /
         // 全量重建，磁盘缓存形同虚设（见 I 组索引复用缺陷）。
         vd.index.save_with_volume(&path, &vd.info)?;
-        *self.last_saved.lock().unwrap() = Some(now_filetime());
+        *self.last_saved.lock_or_recover() = Some(now_filetime());
         Ok(())
     }
 
     fn save_all(&self) -> io::Result<()> {
-        let dir = self.save_dir.lock().unwrap().clone();
+        let dir = self.save_dir.lock_or_recover().clone();
         let dir = match dir {
             Some(d) => d,
             None => return Ok(()),
         };
-        let ids: Vec<VolumeId> = self.volumes.read().unwrap().keys().cloned().collect();
+        let ids: Vec<VolumeId> = self.volumes.read_or_recover().keys().cloned().collect();
         for id in ids {
             self.save_volume(&id, &dir)?;
         }
@@ -820,23 +896,25 @@ impl EngineInner {
     /// 回放补齐，若 USN 起点未随索引落盘（P1-7）就会被迫全量重扫。
     fn flush(&self) {
         {
-            let mut vols = self.volumes.write().unwrap();
+            let mut vols = self.volumes.write_or_recover();
             for vd in vols.values_mut() {
                 if vd.state == VolumeState::Ready && !vd.overlay.is_empty() {
                     let merged = merge_overlay_into_base(&vd.index, &vd.overlay);
                     vd.index = merged;
                     vd.overlay = Overlay::default();
+                    // #21：退出前合并同样换代（进程即将结束，此处只是保持口径一致）。
+                    vd.generation = vd.generation.wrapping_add(1);
                 }
             }
         }
         if let Err(e) = self.save_all() {
-            *self.save_error.lock().unwrap() = Some(e.to_string());
+            *self.save_error.lock_or_recover() = Some(e.to_string());
         }
     }
 
     /// 把一批卷置为「待扫描」（见 [`InProcessEngine::mark_pending`]）。
     fn mark_pending(&self, vols: &[VolumeId]) {
-        let mut map = self.volumes.write().unwrap();
+        let mut map = self.volumes.write_or_recover();
         for vol in vols {
             let vd = map.entry(vol.clone()).or_insert_with(|| blank_volume(vol));
             vd.state = VolumeState::Scanning;
@@ -868,7 +946,7 @@ impl EngineInner {
         // load_all 原先硬编码的 `incremental: true` 覆盖成真实值：非 NTFS 卷若
         // 误判为有 USN，后台会一直空读 Unsupported，永不走定期重走而停在旧索引。
         let incremental_flags: HashMap<VolumeId, bool> = {
-            let guard = self.scanner.lock().unwrap();
+            let guard = self.scanner.lock_or_recover();
             match guard.as_ref() {
                 Some(sc) => loaded
                     .iter()
@@ -880,7 +958,7 @@ impl EngineInner {
 
         let loaded_count = loaded.len();
         {
-            let mut vols = self.volumes.write().unwrap();
+            let mut vols = self.volumes.write_or_recover();
             for (vid, index) in loaded {
                 let incremental = incremental_flags.get(&vid).copied().unwrap_or(true);
                 vols.insert(
@@ -894,6 +972,7 @@ impl EngineInner {
                         scan_progress: Arc::new(AtomicU64::new(u64::MAX)),
                         incremental,
                         last_full: Instant::now(),
+                        generation: 0,
                     },
                 );
             }
@@ -901,7 +980,7 @@ impl EngineInner {
         // E5：只在真的载入了索引时才标记"已保存"；全新安装 0 个 .ffix 时保持 None，
         // 避免状态栏显示误导性的"已保存 HH:MM"。
         if loaded_count > 0 {
-            *self.last_saved.lock().unwrap() = Some(now_filetime());
+            *self.last_saved.lock_or_recover() = Some(now_filetime());
         }
         Ok(())
     }
@@ -913,7 +992,7 @@ impl EngineInner {
     /// 见 `poll_volume` 的 `JournalUnavailable` 分支）。只有新卷 / 空卷 /
     /// 载入失败卷才需要全量扫描，交给调用方 `mark_pending` + `rescan`。
     fn startup_reconcile(&self, available: &[VolumeId]) -> Vec<VolumeId> {
-        let vols = self.volumes.read().unwrap();
+        let vols = self.volumes.read_or_recover();
         available
             .iter()
             .filter(|vid| match vols.get(*vid) {
@@ -961,7 +1040,7 @@ impl InProcessEngine {
 
     /// 设置扫描器（测试用，不启动后台线程）。
     pub fn set_scanner(&self, scanner: Box<dyn VolumeScanner + Send + Sync>) {
-        *self.inner.scanner.lock().unwrap() = Some(scanner);
+        *self.inner.scanner.lock_or_recover() = Some(scanner);
     }
 
     /// 手动触发一次全卷增量轮询（测试用；真实场景由后台线程自动调用）。
@@ -990,13 +1069,13 @@ impl InProcessEngine {
 
     /// 设置落盘目录（持久化开关）。
     pub fn set_save_dir(&self, dir: &Path) {
-        *self.inner.save_dir.lock().unwrap() = Some(dir.to_path_buf());
+        *self.inner.save_dir.lock_or_recover() = Some(dir.to_path_buf());
     }
 
     /// 为一个独立调用方创建会话。会话只隔离请求结果与取消状态，共享同一份卷索引。
     pub fn create_session(&self) -> EngineSession {
         let id = self.inner.session_counter.fetch_add(1, Ordering::SeqCst);
-        self.inner.sessions.lock().unwrap().entry(id).or_default();
+        self.inner.sessions.lock_or_recover().entry(id).or_default();
         EngineSession {
             inner: self.inner.clone(),
             id,
@@ -1019,6 +1098,19 @@ impl InProcessEngine {
     /// `mark_pending` + `rescan`。已复用的卷保持 `Ready`，由后台续读增量。
     pub fn startup_reconcile(&self, available: &[VolumeId]) -> Vec<VolumeId> {
         self.inner.startup_reconcile(available)
+    }
+
+    /// 当前已载入的卷 ID 列表。
+    ///
+    /// 上层（桌面外壳的 `rescan("C")`）需要把显示用的盘符映射回带 `serial` 的
+    /// [`VolumeId`]——`status()` 只给人类可读字符串，不足以构造引擎入参。
+    pub fn volume_ids(&self) -> Vec<VolumeId> {
+        self.inner
+            .volumes
+            .read_or_recover()
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
@@ -1083,7 +1175,7 @@ impl EngineClient for EngineSession {
 
 impl Drop for EngineSession {
     fn drop(&mut self) {
-        self.inner.sessions.lock().unwrap().remove(&self.id);
+        self.inner.sessions.lock_or_recover().remove(&self.id);
     }
 }
 
@@ -1118,6 +1210,7 @@ fn blank_volume(vol: &VolumeId) -> VolumeData {
         scan_progress: Arc::new(AtomicU64::new(0)),
         incremental: true,
         last_full: Instant::now(),
+        generation: 0,
     }
 }
 
@@ -1361,42 +1454,51 @@ fn to_utf16_ranges(name: &str, ranges: &[Range<u32>]) -> Vec<Range<u32>> {
 }
 
 /// 由 `(vid, hit)` 构造单条 `ResultRow`（Base 走索引原路径，Overlay 走增量路径解析）。
+///
+/// 任何取不到的情况都返回 `NotFound` 而不是 panic：结果集与索引之间本就存在
+/// 「后台换代 / Overlay 条目被删」的竞态，`range` 拿到错误会让前端重搜一次，
+/// 比整进程崩掉或静默显示错行更好（#21）。
 fn resolve_row(
     vols: &HashMap<VolumeId, VolumeData>,
     vid: &VolumeId,
     hit: &Hit,
     query: &Query,
     mopts: MatchOptions,
-) -> ResultRow {
-    let vd = vols.get(vid).expect("resolve_row: 卷必存在");
+) -> Result<ResultRow> {
+    let vd = vols.get(vid).ok_or(EngineError::NotFound)?;
     match hit {
         Hit::Base(eid) => {
             let index = &vd.index;
-            let name = index.name_str(*eid).unwrap_or_default().to_string();
-            let full = index.path_string(*eid).unwrap_or_default();
+            let i = *eid as usize;
+            let flags_v = *index.flags.get(i).ok_or(EngineError::NotFound)?;
+            let size_v = *index.size.get(i).ok_or(EngineError::NotFound)?;
+            let mtime_v = *index.mtime.get(i).ok_or(EngineError::NotFound)?;
+            let name = index
+                .name_str(*eid)
+                .ok_or(EngineError::NotFound)?
+                .to_string();
+            let full = index.path_string(*eid).ok_or(EngineError::NotFound)?;
             let dir = parent_dir(&full);
-            let is_dir = (index.flags[*eid as usize] & flags::IS_DIR) != 0;
-            let size = Some(index.size[*eid as usize]);
-            let mtime = Some(index.mtime[*eid as usize]);
+            let is_dir = (flags_v & flags::IS_DIR) != 0;
             let name_matches = to_utf16_ranges(
                 &name,
                 &index.highlight_ranges(*eid, query, mopts.fuzzy, mopts.pinyin),
             );
-            ResultRow {
+            Ok(ResultRow {
                 name,
                 dir,
                 is_dir,
-                size,
-                mtime,
+                size: Some(size_v),
+                mtime: Some(mtime_v),
                 name_matches,
-            }
+            })
         }
         Hit::Overlay(frn) => {
             let oe = vd
                 .overlay
                 .added_or_changed
                 .get(frn)
-                .expect("resolve_row: overlay 命中必存在");
+                .ok_or(EngineError::NotFound)?;
             let name = oe.name.clone();
             let full = overlay_full_path(&vd.index, &vd.overlay, oe);
             let dir = parent_dir(&full);
@@ -1404,14 +1506,14 @@ fn resolve_row(
             let size = if oe.stale_meta { None } else { Some(oe.size) };
             let mtime = if oe.stale_meta { None } else { Some(oe.mtime) };
             let name_matches = to_utf16_ranges(&name, &overlay_highlight(query, &name, mopts));
-            ResultRow {
+            Ok(ResultRow {
                 name,
                 dir,
                 is_dir,
                 size,
                 mtime,
                 name_matches,
-            }
+            })
         }
     }
 }
@@ -1778,6 +1880,10 @@ fn wide_with_nul(s: &str) -> Vec<u16> {
 ///
 /// 末尾分隔符（盘符根 `C:\`）先裁掉；无分隔符时返回整串（`C:`）。
 /// 不用 `std::path::Path::file_name`，避免非 Windows 构建把 `\` 当普通字符。
+///
+/// 仅供测试保留：#36 之后 `open(CopyName)` 与管道侧统一改用结果行的 `name`
+/// 字段，运行时不再需要从路径反推（保留此工具与用例是因为它能覆盖分隔符边界）。
+#[cfg(test)]
 fn file_name_from_full(full: &str) -> &str {
     let trimmed = full.trim_end_matches(['\\', '/']);
     trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed)
@@ -2617,6 +2723,80 @@ mod tests {
         assert_eq!(sum.total, 0, "被删除的 base 条目不应再出现");
     }
 
+    /// #22 回归：同一批里「FILE_CREATE（带名）→ 写入（空名）」时，空名记录必须
+    /// 沿用本 Overlay 已有的名字。Base 里没有这个新文件，旧实现只查 Base 会拿到
+    /// 空名并把带名条目覆盖掉，文件直接从搜索结果消失。
+    #[test]
+    fn overlay_nameless_upsert_keeps_same_batch_new_name() {
+        let e = engine();
+        e.set_scanner(Box::new(FakeScanner {
+            changes: vec![
+                Change::Upsert(RawEntry {
+                    frn: 9100,
+                    parent_frn: 100,
+                    name: "newborn.txt".to_string(),
+                    is_dir: false,
+                    attrs: 0,
+                    size: 0,
+                    mtime: 1,
+                    ctime: 1,
+                    atime: 1,
+                }),
+                // 同批后续写入：USN 不带名字。
+                Change::Upsert(RawEntry {
+                    frn: 9100,
+                    parent_frn: 100,
+                    name: String::new(),
+                    is_dir: false,
+                    attrs: 0,
+                    size: 0,
+                    mtime: 2,
+                    ctime: 2,
+                    atime: 2,
+                }),
+            ],
+            next_usn: 3,
+            full: vec![],
+            unavailable: false,
+        }));
+        e.poll_once();
+        let sum = e.search(req("newborn")).unwrap();
+        assert_eq!(sum.total, 1, "空名记录不得把同批新建条目覆盖成空名");
+        let rows = e.range(sum.id, 0, 10).unwrap();
+        assert_eq!(rows[0].name, "newborn.txt");
+    }
+
+    /// #21 回归：索引换代（后台合并 / 重建）后旧结果集的 `EntryId` 已错位，
+    /// `range` / `open` 必须返回 NotFound 让上层重搜，而不是越界 panic 或串行到别的文件。
+    #[test]
+    fn range_and_open_reject_stale_generation() {
+        let e = engine();
+        let sum = e.search(req("txt")).unwrap();
+        assert_eq!(sum.total, 2);
+        assert_eq!(e.range(sum.id, 0, 10).unwrap().len(), 2);
+
+        // 模拟后台换代（合并 Overlay / 全量重建都会 bump）。
+        {
+            let vid = VolumeId {
+                serial: 1,
+                drive: Some('C'),
+            };
+            let mut vols = e.inner.volumes.write_or_recover();
+            vols.get_mut(&vid).unwrap().generation += 1;
+        }
+        assert!(
+            matches!(e.range(sum.id, 0, 10), Err(EngineError::NotFound)),
+            "换代后 range 应报 NotFound（前端据此重搜）"
+        );
+        assert!(
+            matches!(
+                e.open(sum.id, 0, OpenAction::CopyName),
+                Err(EngineError::NotFound)
+            ),
+            "换代后 open 不应拿新索引去解读旧结果"
+        );
+    }
+
     #[test]
     fn journal_unavailable_triggers_rescan() {
         let e = engine();
@@ -2927,7 +3107,7 @@ mod tests {
         // 标记为「正在刷新」（有旧索引）。
         {
             let inner = &e.inner;
-            let mut vols = inner.volumes.write().unwrap();
+            let mut vols = inner.volumes.write_or_recover();
             vols.get_mut(&vid).unwrap().state = VolumeState::Scanning;
         }
         let sum = e.search(req("readme")).unwrap();
@@ -2938,7 +3118,7 @@ mod tests {
         // 撤销索引（清空为无条目）再标 Scanning → 不应参与搜索。
         {
             let inner = &e.inner;
-            let mut vols = inner.volumes.write().unwrap();
+            let mut vols = inner.volumes.write_or_recover();
             let vd = vols.get_mut(&vid).unwrap();
             vd.index = IndexBuilder::new(VolumeInfo {
                 drive: Some('C'),
@@ -3264,7 +3444,7 @@ mod non_ntfs_volume_tests {
 
         // 通过增量轮询推进运行时 next_usn（Overlay 变更路径），index 快照不会跟着变。
         {
-            let mut vols = e.inner.volumes.write().unwrap();
+            let mut vols = e.inner.volumes.write_or_recover();
             let vd = vols.get_mut(&vid).unwrap();
             vd.info.journal_id = 0xABCD;
             vd.info.next_usn = 987_654;
@@ -3277,7 +3457,7 @@ mod non_ntfs_volume_tests {
         e2.set_save_dir(&dir);
         e2.load_all(&dir).unwrap();
         {
-            let vols = e2.inner.volumes.read().unwrap();
+            let vols = e2.inner.volumes.read_or_recover();
             let vd = vols.get(&vid).expect("卷应从磁盘载入");
             assert_eq!(
                 vd.info.journal_id, 0xABCD,

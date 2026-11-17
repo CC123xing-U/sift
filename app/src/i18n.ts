@@ -4,6 +4,9 @@ export const I18N = {
   chips: ['全部', '文件夹', '文档', '图片', '视频', '音频', '压缩包'] as const,
   cols: ['名称', '路径', '大小', '修改时间'] as const,
   found: (n: number, ms: number) => `找到 ${n.toLocaleString('zh-CN')} 个结果 · ${ms} ms`,
+  // #23：命中数达到 max_hits 上限时如实说明，别让用户以为"全世界就这么多"。
+  foundTruncated: (n: number, ms: number) =>
+    `仅显示前 ${n.toLocaleString('zh-CN')} 个结果 · ${ms} ms（请补充关键词缩小范围）`,
   // 无障碍播报文案：只播报命中数，不播报耗时（UI_SPEC §3.7）。
   foundA11y: (n: number) => `找到 ${n.toLocaleString('zh-CN')} 个结果`,
   searching: '搜索中…',
@@ -91,3 +94,21 @@ export const CHIP_MOD: Record<string, string> = {
   音频: 'ext:mp3;wav;flac;aac;ogg;wma;m4a',
   压缩包: 'ext:zip;rar;7z;tar;gz;bz2;xz',
 };
+
+/**
+ * 查询语法错误的展示文案（#26）。
+ *
+ * `ParseError.span` 是 **UTF-8 字节**区间（Rust 侧 `Range<usize>`，见 types.ts），
+ * 而「第 N 位」要按用户看到的**字符**计数：中文一个字 3 字节，直接把字节起点 +1
+ * 会指到别的字符上。这里按字节切片再解码，得到真正的字符位（0-based），
+ * 再由文案函数转成 1-based。
+ */
+export function parseErrorText(
+  pe: { message: string; span: { start: number } },
+  query: string,
+): string {
+  const bytes = new TextEncoder().encode(query);
+  const start = Math.min(pe.span.start, bytes.length);
+  const charPos = Array.from(new TextDecoder().decode(bytes.slice(0, start))).length;
+  return pe.message ? I18N.parseErrorWith(charPos, pe.message) : I18N.parseError(charPos);
+}

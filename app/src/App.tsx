@@ -26,6 +26,12 @@ import { applyChip, deriveChip } from './queryUtils';
 // DESIGN §13-M3 的 50 ms 验收指「检索触发后的执行段」，不含这 120 ms 停顿窗口。
 const SEARCH_DEBOUNCE_MS = 120;
 
+// #23：宽查询（单字符、`ext:` 之类）可能命中上百万条。前端虚拟滚动用
+// `total × 32px` 撑高度，超过 Chromium 的滚动高度上限后定位就失效；`rows`
+// 也会随滚动只增不减。这里给引擎一个硬上限，并在状态栏如实说明「已截断」。
+// 10,000 与 `api.rs` 契约注释里的 DESIGN 默认值一致。
+const MAX_HITS = 10_000;
+
 // P2：status 每秒轮询一次，逐字段浅比较；引擎侧已按盘符排序使数组顺序稳定。
 function statusShallowEq(a: EngineStatus, b: EngineStatus): boolean {
   if (
@@ -131,6 +137,28 @@ export default function App() {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  // #34：卸载时清掉两个定时器（此前只有 searchTimer 有清理）。组件卸载后
+  // 定时器回调里的 setState 会在 StrictMode / 热更新下触发对已卸载组件的写入。
+  useEffect(
+    () => () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      if (spinnerTimer.current) clearTimeout(spinnerTimer.current);
+    },
+    [],
+  );
+
+  // #21/#24：`range` 报「结果集失效」时的自愈入口。索引换代（后台合并 / 重建）
+  // 或 60s TTL 回收后，旧 id 的取行请求会失败；这里自动重跑当前查询，但要限频，
+  // 避免扫描期间反复重搜。
+  const staleRetryAtRef = useRef(0);
+  const onRangeStale = useCallback(() => {
+    const now = Date.now();
+    if (now - staleRetryAtRef.current < 1500) return;
+    staleRetryAtRef.current = now;
+    const q = inputRef.current?.value ?? '';
+    if (q.trim() !== '') runSearchRef.current(q);
   }, []);
 
   // M7：把选中结果的完整路径回填到最近的文件对话框。
@@ -246,24 +274,41 @@ export default function App() {
     const listen = window.__TAURI__?.event?.listen;
     if (!listen) return;
     const unlistens: Array<() => void> = [];
-    void listen('sift:shown', () => playIn()).then((u) => unlistens.push(u));
-    void listen('sift:hiding', () => playOut()).then((u) => unlistens.push(u));
+    // #25：StrictMode 下 effect 会「挂载 → 清理 → 再挂载」，而 `listen()` 是
+    // 异步的。若清理先于 Promise 兑现执行，`unlistens` 还是空数组，监听就
+    // 永远留着（toast / 动画重复触发）。用 cancelled 标志在兑现时补注销。
+    let cancelled = false;
+    const track = (p: Promise<() => void>) => {
+      void p.then((u) => {
+        if (cancelled) u();
+        else unlistens.push(u);
+      });
+    };
+    track(listen('sift:shown', () => playIn()));
+    track(listen('sift:hiding', () => playOut()));
     // M6 服务模式：后端管道断线/重连时 main.rs 发此事件，状态栏 toast 如实提示。
     // 只在 Tauri 外壳内监听；浏览器原型（MockEngine）没有该事件。
-    void listen('sift:service-status', (e) => {
-      const msg = (e as { payload?: unknown })?.payload;
-      if (typeof msg === 'string' && msg) showToast(msg);
-    }).then((u) => unlistens.push(u));
+    track(
+      listen('sift:service-status', (e) => {
+        const msg = (e as { payload?: unknown })?.payload;
+        if (typeof msg === 'string' && msg) showToast(msg);
+      }),
+    );
     // M7 对话框集成：检测到文件「打开 / 另存为」对话框时提示用户可用 Alt+D 回填。
-    void listen('sift:dialog-detected', (e) => {
-      const p = (e as { payload?: { kind?: string; title?: string } })?.payload;
-      if (p?.kind) {
-        setDialogHint(`${p.kind}对话框已打开 · 选中结果后按 Alt+D 填入文件名`);
-      }
-    }).then((u) => unlistens.push(u));
-    void listen('sift:dialog-closed', () => setDialogHint(null)).then((u) => unlistens.push(u));
+    track(
+      listen('sift:dialog-detected', (e) => {
+        const p = (e as { payload?: { kind?: string; title?: string } })?.payload;
+        if (p?.kind) {
+          setDialogHint(`${p.kind}对话框已打开 · 选中结果后按 Alt+D 填入文件名`);
+        }
+      }),
+    );
+    track(listen('sift:dialog-closed', () => setDialogHint(null)));
     playIn(); // 初次挂载播一次进入动画
-    return () => unlistens.forEach((u) => u());
+    return () => {
+      cancelled = true;
+      unlistens.forEach((u) => u());
+    };
   }, []);
 
   const runSearch = useCallback(
@@ -287,7 +332,7 @@ export default function App() {
       // P1-4.1：先拿 summary，再取首批行，一次性提交 summary + 首屏 rows，
       // 避免「先清空 → 90ms 后才回来」的闪烁；过期回包靠 seq 丢弃。
       engineRef.current
-        .search({ query: q, sort, opts: searchOpts })
+        .search({ query: q, sort, opts: searchOpts, max_hits: MAX_HITS })
         .then(async (s) => {
           if (seq !== searchSeqRef.current) {
             engineRef.current.cancel(s.id); // 过期，释放结果集
@@ -318,6 +363,13 @@ export default function App() {
           if (spinnerTimer.current) clearTimeout(spinnerTimer.current);
           setShowSpinner(false);
           setRequested(false);
+          // #27：失败时必须清掉上一轮的结果 —— 否则状态栏会拿新 query 显示旧
+          // 命中数 / 旧耗时（界面撒谎），列表里还留着上一次的文件行。
+          // 与空查询分支保持同一套重置动作。
+          setSummary(null);
+          setTotal(0);
+          setRows({});
+          setParseError(null);
         });
     },
     [sort, searchOpts],
@@ -512,7 +564,11 @@ export default function App() {
           ) : (
             <div
               className={'search-view' + (searchEntering ? ' search-view-enter' : '')}
-              onAnimationEnd={() => setSearchEntering(false)}
+              onAnimationEnd={(e) => {
+                // #35：只认这个容器自身的动画结束。子元素（骨架 / spinner 等）
+                // 的动画结束事件会冒泡上来，导致进入动画被提前判为播完。
+                if (e.target === e.currentTarget) setSearchEntering(false);
+              }}
             >
               <>
               <TopBar
@@ -556,6 +612,7 @@ export default function App() {
                 onOpenError={showToast}
                 onActionDone={showToast}
                 onFillDialog={onFillDialog}
+                onRangeStale={onRangeStale}
               />
               <StatusBar
                 summary={summary}
@@ -564,6 +621,7 @@ export default function App() {
                 status={status}
                 toast={toast}
                 hint={dialogHint}
+                truncated={total >= MAX_HITS}
               />
               </>
             </div>

@@ -5,12 +5,14 @@
 //!   `*`、`?` 仅在 term 含它们时启用通配符路径。
 //! - 修饰符（§7.2 M4 必做）：`case:` `nocase:` `file:` `folder:` `ext:a;b` `path:`
 //!   `regex:` `ww:`/`wholeword:` `startwith:` `endwith:` `size:` `dm:` `dc:` `da:`
-//!   `parent:` `infolder:` `depth:` `attrib:`。
+//!   `parent:` `infolder:` `depth:` `attrib:` `content:`。
 //! - 容错（§7.3）：不完整的输入（用户正在打字）尽量降级为字面子串或「无贡献」；
 //!   只有**明确非法**的修饰符值（`size:abc`、`regex:(`、`dm:notadate`）才返回
 //!   带位置的 [`ParseError`]。
 //!
-//! M7 再说：`content:` 族、`dupe:`、`runcount:`、`len:`。
+//! `content:` 已在 M7 落地：它**不进 AST**，解析时收进 `[`Query::content`]`，
+//! 由引擎在候选集上读文件过滤（见 `crate::content`）。
+//! 仍未实现：`dupe:`、`runcount:`、`len:`。
 
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -829,7 +831,14 @@ impl Parser<'_> {
                 });
                 Ok(Expr::Empty)
             }
-            _ => unreachable!("is_modifier 已过滤"),
+            _ => {
+                // #11：`is_modifier` 白名单与上面这些分支必须一一对应。万一以后新增
+                // 修饰符却漏了分支，这里退化成「该条件不进 AST」而不是 panic——
+                // 查询串是用户输入，任何输入都不该让搜索进程崩掉。
+                // debug 下保留断言，让开发者在测试里第一时间发现漏分支。
+                debug_assert!(false, "is_modifier 命中但缺少处理分支: {ident}");
+                Ok(Expr::Empty)
+            }
         }
     }
 

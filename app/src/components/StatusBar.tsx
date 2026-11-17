@@ -12,9 +12,19 @@ interface Props {
   toast?: string | null;
   /** M7：检测到文件对话框时的持久提示（对话框关闭后清除）。 */
   hint?: string | null;
+  /** #23：命中数被 max_hits 截断（结果只显示前 N 条）。 */
+  truncated?: boolean;
 }
 
-export default function StatusBar({ summary, requested, query, status, toast, hint }: Props) {
+export default function StatusBar({
+  summary,
+  requested,
+  query,
+  status,
+  toast,
+  hint,
+  truncated,
+}: Props) {
   const detailRef = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -36,7 +46,9 @@ export default function StatusBar({ summary, requested, query, status, toast, hi
   let left: string;
   if (requested) left = I18N.searching;
   else if (summary && query.trim() !== '')
-    left = I18N.found(summary.total, summary.elapsed_ms);
+    left = truncated
+      ? I18N.foundTruncated(summary.total, summary.elapsed_ms)
+      : I18N.found(summary.total, summary.elapsed_ms);
   else left = '';
 
   let right: string;

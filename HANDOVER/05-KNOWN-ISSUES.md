@@ -6,7 +6,7 @@
 
 ## A. 文档与实现矛盾（优先核实）
 
-### #1 ff-engine lib.rs 注释与实现矛盾（已亲自核实）
+### #1 ff-engine lib.rs 注释与实现矛盾（已亲自核实，**已修 2026-11-17**）
 - `crates/ff-engine/src/lib.rs:6-9` 写：「仍未落地：Base+Overlay 增量层、后台合并（compaction）、
   索引落盘与载入、USN 增量接线（`read_changes` 已实现但本 crate 尚无调用方）；`last_saved` 恒为 None」。
 - **实证为假**：`overlay.rs:13,67` 已实现 Overlay；`inprocess.rs` 有 `poll_volume` 调 `read_changes`（约 :627/:659）、
@@ -14,7 +14,12 @@
 - 可能仍成立的只有「后台合并 compaction」——源码未见 compaction 独立逻辑（Overlay 在退出/落盘时并入 Base）。
 - **动作**：修正注释为准确描述；单独确认 compaction 状态。这是「文档会骗人」的头号实证。
 
-### #2 ff-core 注释滞后
+### #2 ff-core 注释滞后（**已修 2026-11-17**）
+
+- 修正 `query.rs` 顶部模块注释：`content:` 已进修饰符列表并注明「不进 AST、由引擎过滤」；
+  仍未实现的只剩 `dupe:` / `runcount:` / `len:`。
+- 修正 `app/src/format.ts` 的 `timeconv.rs` 路径指向（实际在 `crates/ff-engine/src/timeconv.rs`）。
+- `ff-core/src/lib.rs:8`「§8.3 用户规则 / PriorFolders 留接口、未实现」**属实**，保留（属未实现功能，不是缺陷）。
 - `crates/ff-core/src/query.rs:13` 写「M7 再说：`content:` 族、`dupe:`、`runcount:`、`len:`」——
   但 `content:` 已在 M7 落地（`content.rs`）。注释滞后。
 - `crates/ff-core/src/lib.rs:8`：「§8.3 用户规则 / PriorFolders 仍留接口、未实现」——这条属实（见 T2 评分规则编辑器）。
@@ -22,27 +27,33 @@
 
 ## B. 明确标注的未完成（注释自述）
 
+> 本节 #3/#4/#5/#8 都是**未实现的功能**（不是缺陷），按用户要求暂不处理。
+> #6/#7 属实现缺陷，已在 2026-11-17 修复。
+
 | # | 位置 | 内容 |
 |---|---|---|
-| 3 | `ff-core/src/lib.rs:8` | §8.3 用户规则 / PriorFolders 留接口未实现 |
-| 4 | `ff-cli/src/main.rs:5` | `bench` / `dump` 子命令待后续里程碑（#40） |
+| 3 | `ff-core/src/lib.rs:8` | §8.3 用户规则 / PriorFolders 留接口未实现（功能未做） |
+| 4 | `ff-cli/src/main.rs:5` | `bench` / `dump` 子命令待后续里程碑（功能未做） |
 | 5 | `ff-match/pinyin.rs:71` | 字典 `_ => return None`，未收录汉字无拼音（设计如此，覆盖有限）；多音字/双语未覆盖（#70） |
-| 6 | `app/src-tauri/src/main.rs:237` | 带盘符单卷重建需引擎暴露卷列表（现忽略 volume 参数） |
-| 7 | `app/src-tauri/src/main.rs:442` | `dbg_log` 注释「定位后移除」，调试日志常驻 |
-| 8 | `Settings.tsx:253-345` | 11 项 pending 设置（详见 03 T2） |
+| 6 | `app/src-tauri/src/main.rs` | **已修 2026-11-17**：`rescan(volume)` 现按盘符解析为 `VolumeId`（`Backend::resolve_volume`），解析不到才回退「全部重建」；引擎新增 `InProcessEngine::volume_ids()` |
+| 7 | `app/src-tauri/src/main.rs` | **已修 2026-11-17**：`dbg_log` 默认只在 debug 构建或 `SIFT_DEBUG=1` 时写盘，release 不再常驻写 `%TEMP%`；保留 1MB 上限 |
+| 8 | `Settings.tsx:253-345` | 11 项 pending 设置（详见 03 T2，功能未做） |
 
-## C. 生产路径 panic / unwrap 风险（需谨慎维护，非必然 bug）
+## C. 生产路径 panic / unwrap 风险（#10/#11/#12 已修 2026-11-17）
 
-- **#9 USN 解析器 slice unwrap**：`ff-ntfs/src/usn.rs:159,171-173,199-206` 解析磁盘/FSCTL 不可信字节用
-  `.try_into().unwrap()`。**已核实有前置长度检查**（:152-158 短缓冲返回、:175-188 record_length 校验、
-  :193 V2 头长、:208 checked_add），当前不会越界；风险在于逻辑改动破坏不变量时。
-- **#10 锁中毒 panic**：ff-engine 生产路径大量 `lock().unwrap()` / `read().unwrap()`，如
-  `inprocess.rs:545,630,657,791,874,916,945,951`。持锁线程 panic 会导致后续连锁 panic。
-  （对比：`main.rs:451` 的 dbg_log 用 `unwrap_or_else(|e| e.into_inner())` 容忍毒化。）
-- **#11 `unreachable!` 在解析路径**：`ff-core/src/query.rs:832` `_ => unreachable!("is_modifier 已过滤")`，
-  依赖 `is_modifier` 前置过滤不变量；枚举变体遗漏会 panic。
-- **#12 快捷键注册 `expect`**：`main.rs:699-701` 解析 `CmdOrCtrl+Alt+Space` 失败直接 panic
-  （注册失败已有降级 :709-710，但解析失败没有）。
+- **#9 USN 解析器 slice unwrap**（保持，非缺陷）：`ff-ntfs/src/usn.rs:159,171-173,199-206` 解析磁盘
+  /FSCTL 不可信字节用 `.try_into().unwrap()`。**已核实有前置长度检查**（:152-158 短缓冲返回、
+  :175-188 record_length 校验、:193 V2 头长、:208 checked_add，本轮又补了 name_offset 下界 /
+  name_length 偶校验，见 #29），当前不会越界。
+- **#10 锁中毒 panic（已修）**：ff-engine 生产路径原大量 `lock().unwrap()` / `read().unwrap()`，
+  持锁线程 panic 会导致后续连锁 panic。修：`inprocess.rs` 顶部新增 `LockRecover` /
+  `RwLockRecover` trait，统一 `lock_or_recover()` / `read_or_recover()` / `write_or_recover()`
+  （`unwrap_or_else(|e| e.into_inner())`），51 处调用点全部替换。
+- **#11 `unreachable!` 在解析路径（已修）**：`ff-core/src/query.rs` 的 `modifier()` 兜底分支原为
+  `unreachable!("is_modifier 已过滤")`，现改为 `debug_assert!(false, …)` + `Ok(Expr::Empty)`：
+  查询串是用户输入，漏分支时降级（条件不进 AST）而不是让搜索进程崩掉。
+- **#12 快捷键注册 `expect`（已修）**：`main.rs` 的 `"CmdOrCtrl+Alt+Space".parse::<Shortcut>()`
+  改为 `.ok()` + 分支降级；解析失败与「注册被占用」走同一条「无全局热键但应用照常启动」路径。
 
 ## D. 并发 / 死锁（已修复，改动锁逻辑务必知晓）
 
@@ -50,14 +61,16 @@
   `rescan_impl` 反向互抢；已三阶段分离修复，回归测试 `inprocess.rs:2792-2802` 有 8s 超时 panic 断言。
   任何改动锁顺序的打磨都要保持「任一时刻至多一把锁」并跑该测试。
 
-## E. 死代码 / 语义不符
+## E. 死代码 / 语义不符（#14 已修）
 
-- **#14 `has_active_dialog` 命令已注册但前端无调用点**：`main.rs:335-338,788`；
-  命令注释写「前端据此决定是否显示填入动作」，实际提示由 `sift:dialog-detected` 事件驱动（`App.tsx:258-263`）。
-  要么接上、要么删。
-- **#15 `categoryOf` 工具函数 UI 未用**：`app/src/data.ts:149` 注释「仅用于调试/统计（UI 暂未用）」。
-- **#16 两处查询解析并存**：`app/src/engine/query.ts`（前端 MockEngine 用）与 Rust `ff-core::query` 各一套，
-  概念漂移风险——改查询语法时两边都要动，或让原型只做最小子集并明确标注。
+- **#14 `has_active_dialog` 命令已注册但前端无调用点（已修 2026-11-17）**：原 `main.rs` 注册了该
+  Tauri 命令，前端却只消费 `sift:dialog-detected` / `sift:dialog-closed` 事件。修：删除命令与
+  `generate_handler!` 注册项，`ff_dialog::has_active_dialog` 本身保留（crate 内仍在使用）。
+- **#15 `categoryOf` 工具函数 UI 未用**（保持）：`app/src/data.ts:149` 注释已写明「仅用于调试/统计」，
+  属有意的工具函数，不是坏味道。
+- **#16 两处查询解析并存**（保持，架构取舍）：`app/src/engine/query.ts` 服务浏览器原型的 MockEngine，
+  Rust `ff-core::query` 服务真机。改语法要两边同步，这是原型阶段的已知成本；接入真机后
+  原型仅用于离线演示，不影响产品。
 
 ## F. unsafe 使用点（平台隔离 crate，均有不变量注释）
 
@@ -96,8 +109,10 @@
 
 > 逐文件重读源码得出，与 A–H 已知项不重复。标注「已复核」= 亲自追过触发链；其余为位置明确的待确认项。
 > 行号基于提交 `6334be3`，改动后以源码为准。
+>
+> **2026-11-17 第二批：本节 #21–#36 全部修复**，逐条修法见文末 N 节。
 
-### #21 [高·已复核] 索引换代后 StoredResult 持有失效引用 → range panic / open 失败
+### #21 [高·已复核·**已修**] 索引换代后 StoredResult 持有失效引用 → range panic / open 失败
 - `inprocess.rs:77-97`：结果集缓存 `Hit::Base(EntryId)` / `Hit::Overlay(frn)`，仅 `search_impl:271` 新搜索时 clear。
 - 后台换代索引**不清结果集**：`poll_volume:712-714` 合并后换 `vd.index` + `vd.overlay=default()`；
   `load_volume_with:240-241` 全量重建同样换代。
@@ -108,7 +123,7 @@
 - 修法：换代 index/overlay 时按 session 淘汰 `results`，或结果集带索引代次号并在 range/open 校验。
   淘汰时勿在写锁内遍历 sessions（保持 #13「至多一把锁」）。
 
-### #22 [高·已复核] Overlay 空名 Upsert 只回查 Base，不查自身 → 新建文件被同批清空名字
+### #22 [高·已复核·**已修**] Overlay 空名 Upsert 只回查 Base，不查自身 → 新建文件被同批清空名字
 - `overlay.rs:88-97`：空名时仅 `base.frn_to_id(e.frn).and_then(base.name_str)`。
 - `usn.rs:317/360`：`METADATA_CHANGE_REASONS` 且名字为空 → `Change::Upsert{ name:"" }`。
 - 触发：新建文件首条 FILE_CREATE（带名）入 Overlay → 同批后续写入产生空名 Upsert → Base 查不到 →
@@ -116,7 +131,7 @@
 - 这绕过 README §4「overlay 空名按 frn 从 Base 回填」关键修复的盲区（只查 Base 未查自身）。
 - 修法：空名时先查 `self.added_or_changed.get(&e.frn)` 已有名字，再回退 Base。
 
-### #23 [高·已复核] 前端从不传 max_hits，宽查询击穿虚拟滚动上限
+### #23 [高·已复核·**已修**] 前端从不传 max_hits，宽查询击穿虚拟滚动上限
 - `App.tsx:290` search 只传 `{query,sort,opts}`，无 `max_hits`；`TauriEngine.ts:48-50` 直接透传。
 - `api.rs:119` 契约注释「DESIGN 默认 10,000」，但引擎 `req.max_hits==None` 不截断（`inprocess.rs:432`），
   `total = hits.len()` 是全量命中。
@@ -124,34 +139,34 @@
   滚动高度超 Chromium 上限（~3355 万 px），虚拟化定位失效；`rows` 随滚动只增不减（`:174`）内存膨胀。
 - 修法：`search({...,max_hits:10000})`，触顶时在状态栏提示结果已截断；对窗口外 rows 做淘汰。
 
-### #24 [中·已复核] 虚拟滚动 range 回包无 .catch
+### #24 [中·已复核·**已修**] 虚拟滚动 range 回包无 .catch
 - `ResultArea.tsx:172-181` `engine.range(...).then(...)` 无 catch；`App.tsx:298` 首屏 range 有 `.catch(()=>[])`。
 - TTL 60s 回收 / id 失效后滚动 → rejected Promise 未处理 + 缺失行永久空白。修法：补 catch 并标记 id 失效。
 
-### #25 [中·已复核] 事件监听在 StrictMode 清理竞态下泄漏
+### #25 [中·已复核·**已修**] 事件监听在 StrictMode 清理竞态下泄漏
 - `main.tsx:10` 启用 StrictMode；`App.tsx:246-266` 五个 `listen().then(u => unlistens.push(u))` 在 Promise
   兑现后才登记，cleanup 若先于兑现执行则数组为空 → 监听永不注销 → toast/动画重复触发。
 - 修法：加 `cancelled` 标志，`.then` 内若已取消则立即 `u()`。
 
-### #26 [中·已复核] ParseError.span 字节偏移被当成字符位展示
+### #26 [中·已复核·**已修**] ParseError.span 字节偏移被当成字符位展示
 - Rust `ParseError.span` 为**字节**区间（`lib.rs:91-93`、`types.ts:31-32` 注释明确）；
   `i18n.ts:21` 用 `pos+1` 直接当「第 N 位」，`TopBar.tsx:176-178` 直接传入；Mock 侧 `query.ts` 用 UTF-16 下标。
 - 错误位前有中文时真机/Mock 显示位置不一致且均非字符位。修法：前端按 `Array.from(query.slice(0,start)).length` 换算。
 
-### #27 [中·已复核] 搜索失败不清旧结果，状态栏对错误查询显示旧命中
+### #27 [中·已复核·**已修**] 搜索失败不清旧结果，状态栏对错误查询显示旧命中
 - `App.tsx:315-321` catch 仅收 spinner，不重置 summary/rows/total/parseError；
   `StatusBar.tsx:38-39` 仍按新 query 显示旧 `summary.total`/`elapsed_ms`（UI 撒谎）。修法：与空查询分支一致清空。
 
-### #28 [中·已复核] 卷枚举第三遍未过滤 drive_type，CDROM/RAM 盘重新混入
+### #28 [中·已复核·**已修**] 卷枚举第三遍未过滤 drive_type，CDROM/RAM 盘重新混入
 - `win32.rs:118-136` 第一遍按 serial 收全部 GUID 卷（无 drive_type 过滤）；第二遍 `:157` 排除光驱/网络/RAM；
   第三遍 `:178-191` 补无盘符卷只查 `has_mount_points`，未再过滤 drive_type → 被第二遍排除的卷又加回（drive:None）。
 - 后果：本应排除的卷进入扫描，`walk.rs` logical_root 返回 Unsupported 或触发无谓 MFT 全扫。修法：第三遍套用同一过滤。
 
-### #29 [中低·已复核] USN V2 FileNameOffset 未校验下界
+### #29 [中低·已复核·**已修**] USN V2 FileNameOffset 未校验下界
 - `usn.rs:208-217` 仅校验 `name_offset+name_length<=record_length`，未校验 `name_offset>=USN_V2_HEADER_LEN(60)`。
 - 损坏记录可令偏移指向固定头内部，解码出垃圾文件名且 `stopped_at` 仍为 None。修法：追加下界与 `name_length%2==0` 校验。
 
-### 低危（位置明确，待确认影响）
+### 低危（#30–#36，**全部已修 2026-11-17**）
 | # | 位置 | 问题 |
 |---|---|---|
 | 30 | `win32.rs:133-135` | `FindNextVolumeW` 任何错误都 break，非 NO_MORE_FILES 也静默吞掉 |
@@ -162,12 +177,29 @@
 | 35 | `App.tsx:515` | `.search-view` 的 onAnimationEnd 未校验 target，子动画冒泡会提前结束进入动画 |
 | 36 | `actions.rs:34`/`inprocess.rs:601` | CopyName 两后端取名方式不一致；Pipe 侧多一层空名校验 |
 
+修法（2026-11-17）：
+- **#30**：`FindNextVolumeW` 失败时取 `win32_code`，只有 `ERROR_NO_MORE_FILES(18)` 静默结束，
+  其它错误码 `eprintln!` 提示「卷列表可能不完整」，不再一律静默 break。
+- **#31**：`classify_usn_record` 里 `parent_frn: mask_frn(record.parent_frn)`，与 `record_to_change`
+  同口径（后者相应去掉重复掩码）。
+- **#32**：`ResultArea` 新增 `inflightRanges: Set<"id:lo:hi">`，在途请求直接跳过，`finally` 释放。
+- **#33**：新增 `HIDE_PENDING: AtomicBool`；`hide_window` 调度时置位、真隐藏/`show_window` 时清零，
+  `toggle_window` 见 `pending_hide` 就走 `show_window`（连按两次热键 = 唤回）。
+- **#34**：新增卸载 effect，清 `toastTimer` / `spinnerTimer`。
+- **#35**：`onAnimationEnd` 加 `e.target === e.currentTarget` 判断。
+- **#36**：`open_impl` 改用结果行的 name（Base 取 `name_str`、Overlay 取 `oe.name`），并补
+  `name.is_empty() → NotFound`，与 `actions::execute_open_checked` 完全一致；
+  `file_name_from_full` 降级为 `#[cfg(test)]` 工具函数。
+
 ## J. 打磨优先级建议（用户可感知价值 × 成本）
+
+> 2026-11-17：以下四项已全部落地，#21–#36 全部关闭。本表保留作为当初的判断依据。
+
 1. **#23 max_hits**（一行改动，直接解决宽查询 UI 卡死/空白）→ 2. **#24 range catch**（一行，消除永久空白行）。
 2. **#21/#22 两个 overlay/结果集一致性 bug**（真机增量场景才会触发，建议各补一条回归测试再改）。
 3. **#25/#27/#26 前端健壮性**（StrictMode 泄漏、失败清态、错误位置换算，成本低）。
 4. **#28/#29 ntfs 健壮性** → **低危表批量清理**。
-- 三项清理类旧账（T7：lib.rs 过期注释、dbg_log 常驻、has_active_dialog 死代码）仍有效，可随手带走。
+- 三项清理类旧账（T7：lib.rs 过期注释、dbg_log 常驻、has_active_dialog 死代码）已随本批一起清掉。
 
 ## K. 索引复用缺陷（2026-11-17 发现并修复）
 
@@ -279,3 +311,55 @@
   载入用文件内 drive 重建键，盘符漂移可能串卷。属罕见场景，需复合键（serial+GUID）+ 迁移。
 - **F8 离线卷误删**：`valid_serials` 来自 `enumerate_volumes`，排除网络盘/光驱/RAM 盘/离线卷；
   曾落盘的这类卷再启动会被判 stale 删除，卷恢复后需重扫。可考虑延迟删除。
+
+## N. 缺陷总清理（2026-11-17 · 用户要求「把缺陷都先解决」）
+
+本轮把 A–I 中**所有真缺陷**一次修完，未实现的功能（#3/#4/#5/#8）与架构取舍（#15/#16）保留。
+门禁：`cargo test --workspace` 全绿（ff-engine 60 + 12、ff-ntfs 37、其余见输出）、
+`cargo clippy --workspace --all-targets` 无告警、Tauri crate `cargo check` 通过、
+`npm run build`（tsc + vite）通过。
+
+### 引擎层
+
+- **#21 索引换代后结果集失效（高）** —— 新增 `VolumeData::generation`，Base 被整体替换
+  （全量扫描 `load_volume_with` / 后台合并 `poll_volume` / 退出 `flush`）时自增；
+  `StoredResult` 存搜索时的 `generations: HashMap<VolumeId, u64>`；
+  `range_impl` / `open_impl` 先比对代次，不符返回 `EngineError::NotFound`；
+  `resolve_row` 改返回 `Result`，Base 取 `flags/size/mtime` 一律用 `.get()`，
+  Overlay 用 `added_or_changed.get()`，彻底去掉两处 `expect` 越界 panic 点。
+  前端配合：`range` 失败 → `onRangeStale` → App 限频（1.5s）重跑当前查询。
+  回归测试 `range_and_open_reject_stale_generation`。
+- **#22 Overlay 空名覆盖同批新建（高）** —— `Overlay::apply` 空名回填顺序改为
+  「先查本 Overlay 已有条目（含 size/时间继承）→ 再回退 Base」。
+  回归测试 `overlay_nameless_upsert_keeps_same_batch_new_name`。
+- **#28 卷枚举第三遍未过滤 drive_type（中）** —— 第一遍同时采集 `drive_type`，
+  抽出 `is_supported_drive_type()`（2=可移动 / 3=固定），第二、三遍共用同一判定。
+- **#29 USN V2 FileNameOffset 下界（中低）** —— 追加 `name_offset >= USN_V2_HEADER_LEN`
+  与 `name_length` 为偶数校验，损坏记录直接记 `stopped_at` 并停止解析。
+- **#30 / #31** —— 见 I 节低危表「修法」。
+- **#10 锁中毒** —— 见 C 节。
+- **#6 单卷重建** —— `InProcessEngine::volume_ids()` + `Backend::resolve_volume()`。
+
+### 前端
+
+- **#23 max_hits**：`App.tsx` 常量 `MAX_HITS = 10_000` 随每次 search 传入；状态栏在
+  `total >= MAX_HITS` 时改用 `I18N.foundTruncated`（「仅显示前 N 个结果，请补充关键词」）。
+  虚拟滚动高度从百万级降到 10k×32px，远离 Chromium 上限。
+- **#24 range 回包无 catch**：补 `.catch()`，并改用 `currentIdRef` 判断过期回包
+  （原闭包里的 `id !== currentId` 恒为 false，是旧回包写进新结果集的根因）。
+- **#25 StrictMode 监听泄漏**：`track()` + `cancelled` 标志，Promise 晚于 cleanup 兑现时立即注销。
+- **#26 ParseError 字节/字符位**：新增 `i18n.parseErrorText()`（按字节切片解码后数字符），
+  `TopBar` 改用它；`MockEngine` 新增 `utf16SpanToByteSpan()`，让原型与真机同一口径。
+- **#27 搜索失败清态**：catch 里与空查询分支一致地清 `summary/total/rows/parseError`。
+- **#32 / #33 / #34 / #35**：见 I 节低危表「修法」。
+
+### 顺带清掉的旧账
+
+- #1（lib.rs 注释）、#2（query.rs / format.ts 注释）、#7（dbg_log 默认关闭）、
+  #14（删 `has_active_dialog` Tauri 命令）、#36（CopyName 口径统一）。
+
+### 仍未处理（有意保留）
+
+- **F2/F5/F6/F8**（见 M 节）：涉及后端切换迁移 / 核心落盘改写 / 复合键，风险收益比不合适。
+- **#3/#4/#5/#8**：功能未实现，不是缺陷。
+- **#9**：有前置长度检查，属「需谨慎维护」而非缺陷。

@@ -3,10 +3,11 @@
 /**
  * 把 epoch 毫秒转成可用的 Date。
  *
- * P1-8：Tauri IPC 层已把 FILETIME 转成 epoch 毫秒（app/src-tauri/src/timeconv.rs），
- * 但这里仍保留防御——MockEngine、未来的 HTTP 服务或缓存的旧回包都可能送来
- * null / NaN / 越界值。过去真机因单位不符显示成 `NaN-NaN-NaN NaN:NaN`，
- * 这类无效值统一降级为空白，而不是把 NaN 渲染到界面上。
+ * P1-8：Tauri IPC 层已把 FILETIME 转成 epoch 毫秒（`crates/ff-engine/src/timeconv.rs`，
+ * 桌面外壳 `app/src-tauri/src/main.rs` 调它），但这里仍保留防御——MockEngine、
+ * 未来的 HTTP 服务或缓存的旧回包都可能送来 null / NaN / 越界值。过去真机因单位
+ * 不符显示成 `NaN-NaN-NaN NaN:NaN`，这类无效值统一降级为空白，而不是把 NaN
+ * 渲染到界面上。
  */
 function toDate(ms: number | null): Date | null {
   if (ms == null || !Number.isFinite(ms)) return null;

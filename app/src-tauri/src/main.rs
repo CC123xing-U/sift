@@ -101,6 +101,29 @@ impl Backend {
             Backend::Pipe(p) => p.with_reconnect(|c| c.rescan(volume.clone())),
         }
     }
+    /// 已载入卷的 ID 列表。管道后端拿不到 VolumeId（协议只有显示字符串），返回空。
+    fn volume_ids(&self) -> Vec<VolumeId> {
+        match self {
+            Backend::InProcess(e) => e.volume_ids(),
+            #[cfg(windows)]
+            Backend::Pipe(_) => Vec::new(),
+        }
+    }
+    /// 把 UI 传入的盘符（`"C"` / `"C:"` / `"c:\\"`）解析成引擎需要的 [`VolumeId`]。
+    ///
+    /// 解析不到（空串 / 未知盘符 / 管道后端）时返回 `None`，调用方回退为「全部重建」。
+    fn resolve_volume(&self, name: &str) -> Option<VolumeId> {
+        let want = name
+            .trim()
+            .trim_end_matches(|c| c == '\\' || c == '/')
+            .trim_end_matches(':')
+            .chars()
+            .next()?
+            .to_ascii_uppercase();
+        self.volume_ids()
+            .into_iter()
+            .find(|v| v.drive.map(|c| c.to_ascii_uppercase()) == Some(want))
+    }
     fn open(&self, id: RequestId, index: usize, action: OpenAction) -> Result<(), EngineError> {
         match self {
             Backend::InProcess(e) => e.open(id, index, action),
@@ -233,15 +256,14 @@ fn status(state: tauri::State<EngineState>) -> EngineStatus {
 
 #[tauri::command]
 fn rescan(state: tauri::State<EngineState>, volume: Option<String>) -> Result<(), String> {
-    // M3：引擎公开 API 仅支持「按 VolumeId 全量重建」或「全部重建」，没有「按盘符查卷」的查询。
-    // 真实 UI 的 rescan 按钮不带参数（重建全部）；带盘符的单卷重建需引擎暴露卷列表（留待后续）。
-    // 此处忽略 `volume` 参数，统一重建全部——行为正确，只是粒度粗。
-    let _ = volume;
+    // #6：`volume` 现按盘符解析（"C" / "C:" / "C:\" 均可），映射到带 serial 的
+    // VolumeId 后只重建该卷。解析不到时回退为「全部重建」，与旧行为一致。
+    let backend = state.backend.clone();
+    let target = volume.as_deref().and_then(|v| backend.resolve_volume(v));
     // P0-4：起线程立即返回，避免在主线程跑全量扫描（否则托盘「重建索引」会让
     // 窗口与托盘无响应数秒到数十秒）。
-    let backend = state.backend.clone();
     std::thread::spawn(move || {
-        let _ = backend.rescan(None);
+        let _ = backend.rescan(target);
     });
     Ok(())
 }
@@ -331,12 +353,9 @@ fn fill_active_dialog(
     ff_dialog::fill_active_dialog(&path).map_err(|e| e.to_string())
 }
 
-/// 当前是否存在可回填的文件对话框（前端据此决定是否显示"填入"动作）。
-#[tauri::command]
-fn has_active_dialog() -> bool {
-    ff_dialog::has_active_dialog()
-}
-
+/// 当前是否存在可回填的文件对话框 —— 由 `ff_dialog` 的 `sift:dialog-detected` /
+/// `sift:dialog-closed` 事件驱动前端提示，不再单独暴露 IPC 命令（#14 死代码清理：
+/// 该命令注册后前端从未调用，留着只会让人误以为有一条可用的查询通道）。
 // ───────────────────────── 窗口命令（OS 级 show/hide/toggle） ─────────────────────────
 //
 // 窗口动效（UI_SPEC §2.6 dur-window-in/out，2026-11-15 落地，DECISIONS #83）：
@@ -347,12 +366,20 @@ fn has_active_dialog() -> bool {
 /// 一致才真隐藏；`show_window` 递增代数使所有挂起的隐藏作废（热键连按竞态）。
 static HIDE_GEN: AtomicU64 = AtomicU64::new(0);
 
+/// 是否有一个「已发出退出动画、正在等 90ms 后真隐藏」的挂起隐藏。
+///
+/// #33：`is_visible()` 在退出动画期间仍为 true，`toggle_window` 只看可见性的话，
+/// 90ms 内连按两次热键会连续两次调度隐藏（而不是唤回），窗口最终消失。
+/// 有了这个标志，第二次按热键能识别「正在隐藏」并按「显示」处理。
+static HIDE_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// 退出动画时长（UI_SPEC §2.6 `dur-window-out`），Rust 侧等它播完再真隐藏。
 const WINDOW_OUT_MS: u64 = 90;
 
 #[tauri::command]
 fn show_window(app: tauri::AppHandle) {
     dbg_log("show_window called");
+    HIDE_PENDING.store(false, Ordering::SeqCst); // 取消「正在隐藏」状态
     HIDE_GEN.fetch_add(1, Ordering::SeqCst); // 作废挂起的延迟隐藏
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -366,6 +393,7 @@ fn hide_window(app: tauri::AppHandle) {
     dbg_log("hide_window called");
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.emit("sift:hiding", ());
+        HIDE_PENDING.store(true, Ordering::SeqCst);
         let gen = HIDE_GEN.fetch_add(1, Ordering::SeqCst);
         let app = app.clone();
         std::thread::spawn(move || {
@@ -380,11 +408,14 @@ fn hide_window(app: tauri::AppHandle) {
                 HIDE_GEN.load(Ordering::SeqCst)
             ));
             if matched {
+                HIDE_PENDING.store(false, Ordering::SeqCst);
                 if let Some(w) = app.get_webview_window("main") {
                     let r = w.hide();
                     dbg_log(&format!("hide result ok={}", r.is_ok()));
                 }
             }
+            // matched == false：被 show_window 作废（它已把 HIDE_PENDING 置 false），
+            // 或被后一次 hide_window 接管（它会把 HIDE_PENDING 重新置 true）。
         });
     }
 }
@@ -392,7 +423,9 @@ fn hide_window(app: tauri::AppHandle) {
 #[tauri::command]
 fn toggle_window(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        if w.is_visible().unwrap_or(false) {
+        // #33：退出动画期间窗口仍然「可见」，此时连按热键应当唤回而不是再隐藏一次。
+        let pending_hide = HIDE_PENDING.load(Ordering::SeqCst);
+        if !pending_hide && w.is_visible().unwrap_or(false) {
             hide_window(app);
         } else {
             show_window(app);
@@ -439,11 +472,21 @@ fn foreground_pid() -> u32 {
     0
 }
 
-/// 临时调试日志（热键/焦点链路排查用，定位后移除）：写 %TEMP%\sift-debug.log。
+/// 调试日志（热键/焦点链路排查用）：写 `%TEMP%\sift-debug.log`。
 ///
-/// P2：无大小上限会随焦点/热键事件无限增长，这里超过 1MB 就先删除旧文件再写。
+/// #7：默认**只在 debug 构建或设置 `SIFT_DEBUG=1` 时**写入——release 版常驻写盘
+/// 既没必要（用户磁盘随时间被无意义事件日志占着），也让「临时定位后移除」这条
+/// 注释永远无法兑现。需要现场诊断时设环境变量即可开启。
+/// 文件超过 1MB 先删除再写，不会无限增长。
 fn dbg_log(msg: &str) {
     use std::io::Write;
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled =
+        *ENABLED.get_or_init(|| cfg!(debug_assertions) || std::env::var_os("SIFT_DEBUG").is_some());
+    if !enabled {
+        return;
+    }
     // 后台索引线程与 UI 线程会并发写；不加锁时两行会交错成一团（真机见到
     // `[ts1] [ts2] msg1msg2`），诊断日志本身就不可读了。持锁覆盖"删旧文件 +
     // 打开 + 写一行"整个过程，保证每行完整。
@@ -690,9 +733,12 @@ pub fn run() {
         t0.elapsed().as_millis()
     ));
 
-    let shortcut = "CmdOrCtrl+Alt+Space"
-        .parse::<Shortcut>()
-        .expect("全局快捷键解析失败");
+    // #12：解析失败同样不能 panic（和「注册被占用」一样降级为无全局热键）。
+    // 之前这里用 expect，常量写错一个字符就会让整个应用启动即崩。
+    let shortcut = "CmdOrCtrl+Alt+Space".parse::<Shortcut>().ok();
+    if shortcut.is_none() {
+        dbg_log("global shortcut parse failed, continue without hotkey");
+    }
 
     // 失焦自动隐藏的守卫：只有窗口「曾经获得过焦点」之后，失焦才隐藏。
     // 否则启动阶段窗口从未聚焦时收到的 Focused(false) 会把窗口立刻藏掉
@@ -703,23 +749,31 @@ pub fn run() {
     // L2：全局快捷键可能被其他程序占用，注册失败不应让整个应用启动即崩。
     // 注册成功才装插件；失败仅记日志并继续（托盘、失焦隐藏、窗口命令仍可用）。
     let mut builder = tauri::Builder::default();
-    match tauri_plugin_global_shortcut::Builder::new().with_shortcuts([shortcut]) {
-        Ok(shortcut_builder) => {
-            builder = builder.plugin(
-                shortcut_builder
-                    .with_handler(|app, _shortcut, event| {
-                        dbg_log("hotkey event received");
-                        if event.state() == ShortcutState::Pressed {
-                            dbg_log("hotkey pressed -> toggle_window");
-                            toggle_window(app.clone());
-                        }
-                    })
-                    .build(),
-            );
-        }
-        Err(e) => dbg_log(&format!(
-            "global shortcut register failed, continue without it: {e}"
-        )),
+    // L2：全局快捷键可能被其他程序占用，注册失败不应让整个应用启动即崩。
+    // 注册成功才装插件；失败（含解析失败）仅记日志并继续
+    // （托盘、失焦隐藏、窗口命令仍可用）。
+    let shortcut_builder = shortcut.and_then(
+        |s| match tauri_plugin_global_shortcut::Builder::new().with_shortcuts([s]) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                dbg_log(&format!(
+                    "global shortcut register failed, continue without it: {e}"
+                ));
+                None
+            }
+        },
+    );
+    if let Some(sb) = shortcut_builder {
+        builder = builder.plugin(
+            sb.with_handler(|app, _shortcut, event| {
+                dbg_log("hotkey event received");
+                if event.state() == ShortcutState::Pressed {
+                    dbg_log("hotkey pressed -> toggle_window");
+                    toggle_window(app.clone());
+                }
+            })
+            .build(),
+        );
     }
     dbg_log(&format!(
         "startup: plugins registered @{}ms (about to .run)",
@@ -779,7 +833,6 @@ pub fn run() {
             rescan,
             open,
             fill_active_dialog,
-            has_active_dialog,
             show_window,
             hide_window,
             toggle_window

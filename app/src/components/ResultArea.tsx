@@ -55,6 +55,11 @@ interface Props {
   onActionDone?: (msg: string) => void;
   /** M7：把选中结果路径回填到最近的文件对话框（由 App 调 Tauri 命令）。 */
   onFillDialog?: (id: number, index: number) => void;
+  /**
+   * #21/#24：`range` 取行失败（结果集被 60s TTL 回收，或索引换代后旧 id 失效）。
+   * 由 App 决定是否重跑当前查询，这里只负责上报，不自行重试。
+   */
+  onRangeStale?: () => void;
 }
 
 type Panel = 'list' | 'scanning' | 'emptyQuery' | 'noResult' | 'searchingEmpty' | 'error';
@@ -104,11 +109,19 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     onOpenError,
     onActionDone,
     onFillDialog,
+    onRangeStale,
   } = props;
 
   const parentRef = useRef<HTMLDivElement>(null);
   const areaRef = useRef<HTMLDivElement>(null);
   const rangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 在途 range 请求去重键（`id:lo:hi`）。慢滚动时同一窗口可能被重复请求，
+  // 回包按 lo 覆盖写入，重复请求纯属浪费 IPC（#32）。
+  const inflightRanges = useRef<Set<string>>(new Set());
+  // range 回包里判断「结果集是否已换」必须读 ref：effect 闭包里的 currentId
+  // 是捕获值，`id !== currentId` 恒为 false，旧回包会写进新结果集（#24 根因之一）。
+  const currentIdRef = useRef(currentId);
+  currentIdRef.current = currentId;
   const [selected, setSelected] = useState(0);
   const selectedRef = useRef(0);
   selectedRef.current = selected;
@@ -167,18 +180,32 @@ const ResultArea = forwardRef<ResultAreaHandle, Props>((props, ref) => {
     const lo = missing[0];
     const hi = missing[missing.length - 1];
     const id = currentId;
+    const key = `${id}:${lo}:${hi}`;
+    if (inflightRanges.current.has(key)) return;
+    inflightRanges.current.add(key);
     rangeTimer.current = setTimeout(() => {
       rangeTimer.current = null;
-      engine.range(id, lo, hi - lo + 1).then((batch) => {
-        if (id !== currentId) return;
-        setRows((prev) => {
-          const next = { ...prev };
-          batch.forEach((r, k) => {
-            next[lo + k] = r;
+      engine
+        .range(id, lo, hi - lo + 1)
+        .then((batch) => {
+          // 用 ref 而非闭包变量：期间可能已经发起了新搜索（#24）。
+          if (id !== currentIdRef.current) return;
+          setRows((prev) => {
+            const next = { ...prev };
+            batch.forEach((r, k) => {
+              next[lo + k] = r;
+            });
+            return next;
           });
-          return next;
+        })
+        .catch(() => {
+          // #24：以前没有 catch —— TTL 回收 / 换代导致 id 失效时留下未处理的
+          // rejected Promise，缺失行永远空白。这里上报给 App 触发一次重搜。
+          if (id === currentIdRef.current) onRangeStale?.();
+        })
+        .finally(() => {
+          inflightRanges.current.delete(key);
         });
-      });
     }, RANGE_DEBOUNCE_MS);
     return () => {
       if (rangeTimer.current) {

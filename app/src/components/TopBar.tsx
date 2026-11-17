@@ -1,5 +1,5 @@
 import React, { RefObject, useRef, useState } from 'react';
-import { I18N } from '../i18n';
+import { I18N, parseErrorText } from '../i18n';
 import { CloseIcon, SearchIcon, SettingsIcon, WarnIcon } from '../icons';
 import type { SortSpec } from '../types';
 
@@ -172,11 +172,8 @@ export default function TopBar({
       {parseError && (
         <div className="errorbar" role="alert">
           <WarnIcon className="erricon" />
-          <span>
-            {parseError.message
-              ? I18N.parseErrorWith(parseError.span.start, parseError.message)
-              : I18N.parseError(parseError.span.start)}
-          </span>
+          {/* #26：span 是字节区间，交给 parseErrorText 换算成字符位再展示。 */}
+          <span>{parseErrorText(parseError, input)}</span>
         </div>
       )}
     </div>

@@ -17,6 +17,24 @@ const TOTAL = 300_000;
 const SEED = 0x5349_4654;
 const SCAN_MS = 3000;
 
+/**
+ * 把 UTF-16 下标区间换算成 UTF-8 字节区间（#26）。
+ *
+ * `engine/query.ts` 的解析器按 JS 字符串下标（UTF-16 代码单元）报错，而
+ * `ParseError.span` 的契约是 Rust 侧的字节区间。原型必须做同样的换算，
+ * 否则同一句中文查询在原型与真机上的「第 N 位」不一致。
+ */
+function utf16SpanToByteSpan(
+  text: string,
+  span: { start: number; end: number },
+): { start: number; end: number } {
+  const enc = new TextEncoder();
+  return {
+    start: enc.encode(text.slice(0, Math.max(0, span.start))).length,
+    end: enc.encode(text.slice(0, Math.max(0, span.end))).length,
+  };
+}
+
 interface StoredResult {
   indices: number[];
   clauses: ReturnType<typeof parseQuery>['clauses'];
@@ -80,7 +98,9 @@ export class MockEngine implements EngineClient {
       // 缺 message 时才回落到通用文案——M20：别把"我们没实现"说成"你写错了"。
       const pe: ParseError = {
         message: pq.error.message || '语法错误，请检查查询',
-        span: pq.error.span,
+        // #26：Mock 解析器用 UTF-16 下标，而契约（types.ts `ParseError`）是
+        // UTF-8 **字节**区间。不换算的话原型与真机的错误位永远对不上。
+        span: utf16SpanToByteSpan(req.query, pq.error.span),
       };
       return new Promise((res) =>
         setTimeout(() => res({ id, total: 0, elapsed_ms: 1, parse_error: pe, content: null }), 10),

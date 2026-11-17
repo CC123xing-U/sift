@@ -90,8 +90,31 @@ impl Overlay {
                         // usn.rs::record_to_change），标 STALE_META 让 UI 显示占位而非
                         // 误导性的 "0 B"（S2）。有名的新建/改名记录不在此列。
                         oe.stale_meta = true;
-                        if let Some(name) = base.frn_to_id(e.frn).and_then(|id| base.name_str(id)) {
-                            oe.name = name.to_string();
+                        // ① 先查**本 Overlay** 的已有条目。同批里「FILE_CREATE（带名）
+                        //    → 紧接着写入（空名）」是常态：此时 Base 里还没有这个文件，
+                        //    只查 Base 会拿到空名，随即把刚入表的带名条目覆盖成空名，
+                        //    文件直接消失。所以自身优先，Base 只作回退。
+                        if let Some(prev) = self.added_or_changed.get(&e.frn) {
+                            if !prev.name.is_empty() {
+                                oe.name = prev.name.clone();
+                            }
+                            // 上一版本若带有真实元数据（带名记录来自重扫补齐），
+                            // 沿用它；本批记录本身不带 size/时间，不能拿 0 覆盖。
+                            if !prev.stale_meta {
+                                oe.size = prev.size;
+                                oe.mtime = prev.mtime;
+                                oe.ctime = prev.ctime;
+                                oe.atime = prev.atime;
+                                oe.stale_meta = false;
+                            }
+                        }
+                        // ② 回退 Base：已存在文件的元数据变化 / 改名前的原名。
+                        if oe.name.is_empty() {
+                            if let Some(name) =
+                                base.frn_to_id(e.frn).and_then(|id| base.name_str(id))
+                            {
+                                oe.name = name.to_string();
+                            }
                         }
                     }
                     self.added_or_changed.insert(e.frn, oe);

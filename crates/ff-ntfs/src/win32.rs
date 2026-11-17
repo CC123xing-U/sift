@@ -111,13 +111,37 @@ fn win32_error(context: &str, e: windows::core::Error) -> ScanError {
     }
 }
 
+/// 支持的卷类型：固定盘（`DRIVE_FIXED`=3）与可移动盘（`DRIVE_REMOVABLE`=2）。
+///
+/// 光驱（5）、网络映射盘（4）、RAM 盘（6）一律排除。网络盘不是不想支持，而是遍历
+/// 没有超时/取消，SMB 卡住会长期占住 scanner 锁、拖死其它卷的增量轮询（DECISIONS #93）。
+/// 三遍枚举（GUID 遍历 / 盘符 / 无盘符装载点）必须用同一套判定，否则第二遍排除掉的
+/// 卷会在第三遍以 `drive: None` 重新混进来（#28）。
+const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_FIXED: u32 = 3;
+
+fn is_supported_drive_type(dt: u32) -> bool {
+    dt == DRIVE_FIXED || dt == DRIVE_REMOVABLE
+}
+
+/// `GetDriveTypeW`（接受盘符根或 GUID 卷路径）。
+fn drive_type_of(root: &str) -> u32 {
+    let root_wide = wide(root);
+    // SAFETY: root_wide 是 NUL 结尾宽串，调用期间保持有效。
+    unsafe { GetDriveTypeW(windows::core::PCWSTR(root_wide.as_ptr())) }
+}
+
 /// 枚举系统上的卷（盘符卷 + 无盘符的 GUID 装载点卷）。
 ///
 /// - `GetLogicalDrives` 位掩码逐盘符查序列号 / 文件系统；
 /// - `FindFirstVolumeW` / `FindNextVolumeW` 遍历 GUID 路径，按序列号与盘符关联。
 pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, ScanError> {
-    // 第一遍：所有 GUID 路径及其序列号 / 文件系统。
-    let mut by_serial: Vec<(u32, String, String)> = Vec::new(); // (serial, fs_name, guid_path)
+    /// `ERROR_NO_MORE_FILES`：`FindNextVolumeW` 遍历结束的正常信号。
+    const ERROR_NO_MORE_FILES: u32 = 18;
+
+    // 第一遍：所有 GUID 路径及其序列号 / 文件系统 / 驱动器类型。
+    // (serial, fs_name, guid_path, drive_type)
+    let mut by_serial: Vec<(u32, String, String, u32)> = Vec::new();
     {
         let mut buf = [0u16; 128];
         // SAFETY: buf 是合法的可变宽字符缓冲；返回的句柄立即交给 RAII 包装或关闭。
@@ -127,10 +151,19 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, ScanError> {
         loop {
             let guid = from_wide(&buf);
             if let Ok(info) = query_volume_by_root(&guid) {
-                by_serial.push((info.0, info.1, guid));
+                let dt = drive_type_of(&guid);
+                by_serial.push((info.0, info.1, guid, dt));
             }
             // SAFETY: 同一缓冲重复用于 FindNextVolumeW。
-            if unsafe { FindNextVolumeW(find, &mut buf) }.is_err() {
+            if let Err(e) = unsafe { FindNextVolumeW(find, &mut buf) } {
+                // 只有 ERROR_NO_MORE_FILES 是正常结束；其它错误（设备表变动等）
+                // 也停止遍历，但必须留下痕迹，不能静默吞掉（#30）。
+                let code = win32_code(&e);
+                if code != ERROR_NO_MORE_FILES {
+                    eprintln!(
+                        "FindNextVolumeW 提前结束（Win32 错误码 {code}），卷列表可能不完整"
+                    );
+                }
                 break;
             }
         }
@@ -146,15 +179,13 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, ScanError> {
         }
         let drive = (b'A' + bit) as char;
         let root = format!("{drive}:\\");
-        let root_wide = wide(&root);
         // DRIVE_FIXED = 3 / DRIVE_REMOVABLE = 2（M7 §5.4：U 盘、存储卡这类
         // exFAT / FAT32 卷也要能索引，走目录遍历回退）。
         // 仍排除：光驱（5）、网络映射盘（4）、RAM 盘（6）。网络盘不是不想支持，
         // 而是遍历没有超时/取消，SMB 卡住会长期占住 scanner 锁、拖死其它卷的
         // 增量轮询——留到能中断的遍历做出来再开（DECISIONS #93）。
-        // SAFETY: root_wide 是 NUL 结尾宽串，调用期间保持有效。
-        let drive_type = unsafe { GetDriveTypeW(windows::core::PCWSTR(root_wide.as_ptr())) };
-        if drive_type != 3 && drive_type != 2 {
+        let drive_type = drive_type_of(&root);
+        if !is_supported_drive_type(drive_type) {
             continue;
         }
         let Ok((serial, fs_name)) = query_volume_by_root(&root) else {
@@ -162,8 +193,8 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, ScanError> {
         };
         let guid_path = by_serial
             .iter()
-            .find(|(s, _, _)| *s == serial)
-            .map(|(_, _, g)| g.clone())
+            .find(|(s, _, _, _)| *s == serial)
+            .map(|(_, _, g, _)| g.clone())
             .unwrap_or_default();
         volumes.push(VolumeInfo {
             serial,
@@ -175,8 +206,14 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, ScanError> {
 
     // 补上没有盘符的 GUID 卷（装载点）。无装载点的卷（恢复分区 / EFI / 瞬态虚拟卷）
     // 没有可解析路径，索引无意义且其出现/消失会让索引集合抖动，直接排除。
-    for (serial, fs_name, guid) in by_serial {
+    for (serial, fs_name, guid, drive_type) in by_serial {
         if volumes.iter().any(|v| v.serial == serial) {
+            continue;
+        }
+        // #28：第三遍必须套用与第二遍相同的驱动器类型过滤。否则第二遍排除掉的
+        // 光驱 / 网络盘 / RAM 盘会在这里以 `drive: None` 重新混进来，进而触发
+        // 无谓的 MFT 全扫或 walk 的 Unsupported。
+        if !is_supported_drive_type(drive_type) {
             continue;
         }
         if !has_mount_points(&guid) {

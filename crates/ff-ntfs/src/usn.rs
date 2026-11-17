@@ -205,6 +205,14 @@ pub fn parse_usn_journal_buffer(buf: &[u8]) -> JournalParseResult {
                 let name_length = u16::from_le_bytes(record[56..58].try_into().unwrap()) as usize;
                 let name_offset = u16::from_le_bytes(record[58..60].try_into().unwrap()) as usize;
 
+                // #29：名字区必须落在固定头之后（否则会把头部字节当文件名解码出垃圾），
+                // 且长度是 u16 代码单元的整数倍（奇数说明记录损坏）。
+                if name_offset < USN_V2_HEADER_LEN || !name_length.is_multiple_of(2) {
+                    result.stopped_at = Some(format!(
+                        "记录 #{index}: FileNameOffset={name_offset} / FileNameLength={name_length} 非法（固定头 {USN_V2_HEADER_LEN} 字节）"
+                    ));
+                    break;
+                }
                 let name_end = match name_offset.checked_add(name_length) {
                     Some(end) if end <= record_length => end,
                     _ => {
@@ -317,7 +325,9 @@ pub fn classify_usn_record(record: &ParsedUsnRecord) -> Option<UsnEvent> {
         let name = (!record.name.is_empty()).then(|| record.name.clone());
         return Some(UsnEvent::Upsert {
             frn: mask_frn(record.file_frn),
-            parent_frn: record.parent_frn,
+            // #31：与 `record_to_change` 保持同一口径——父 FRN 也要屏蔽高 16 位
+            // 序列号，否则它作为 frn_map 的键时与自身 frn 不同源（DESIGN §5.3）。
+            parent_frn: mask_frn(record.parent_frn),
             name,
             is_dir: record.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
             attrs: record.file_attributes,
@@ -354,9 +364,8 @@ pub fn record_to_change(record: &ParsedUsnRecord) -> Option<Change> {
             attrs,
         } => Some(Change::Upsert(RawEntry {
             frn,
-            // 父 FRN 同样要屏蔽高 16 位序列号：它在 ff-core 里用作 frn_map 的键，
-            // 与自身 frn 必须同一口径（DESIGN §5.3「用作键时统一掩码」）。
-            parent_frn: mask_frn(parent_frn),
+            // `classify_usn_record` 已按同一口径掩码（#31），此处直接沿用。
+            parent_frn,
             name: name.unwrap_or_default(),
             is_dir,
             attrs,
